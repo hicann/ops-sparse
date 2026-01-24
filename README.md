@@ -70,10 +70,7 @@ source ${HOME}/Ascend/ascend-toolkit/set_env.sh
     ```
     
 ### 调用示例说明
-本节示例代码分别展示了如何通过Python和C++调用算子。
-#### Python
-待补充
-#### C++
+本节示例代码分别展示了如何通过C++调用算子。
 待补充
 
 ## 四、参与贡献
@@ -81,7 +78,6 @@ source ${HOME}/Ascend/ascend-toolkit/set_env.sh
 1.  fork仓库
 2.  修改并提交代码
 3.  新建 Pull-Request
-
 
 ## 六、学习资源
 
