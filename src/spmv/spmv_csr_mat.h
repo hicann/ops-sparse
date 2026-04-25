@@ -13,8 +13,8 @@
 #ifndef SPMV_CSR_MAT_H
 #define SPMV_CSR_MAT_H
 #include "spmv.h"
-#include "spmv_host.h"
-#include "sparse_common.h"
+#include "cann_ops_sparse.h"
+#include "cann_ops_sparse_common.h"
 
 class SpmvCsrMat {
 public:

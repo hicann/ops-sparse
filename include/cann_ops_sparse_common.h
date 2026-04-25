@@ -10,10 +10,12 @@
  * ----------------------------------------------------------------------------------------------------------
  */
 
-#ifndef SPARSE_COMMON_H
-#define SPARSE_COMMON_H
+#ifndef CANN_OPS_SPARSE_COMMON_H
+#define CANN_OPS_SPARSE_COMMON_H
+
 #include <iostream>
 #include <acl/acl.h>
+
 #define CHECK_ACL(x)                                                                        \
     do {                                                                                    \
         aclError __ret = x;                                                                 \
@@ -26,9 +28,7 @@
 extern "C" {
 #endif
 
-#include "spmv_host.h"
-
-#define BLOCK_DIM 20
+#include "cann_ops_sparse.h"
 
 typedef struct AclSparseSpMatDescInner {
     uint64_t isDoPreProgress;
@@ -42,13 +42,13 @@ typedef struct AclSparseSpMatDescInner {
     AclSparseIndexBase baseType;
     AclSparseIndexType ptrType;
     AclSparseIndexType IdxType;
-    AclDataType valueType;
+    aclDataType valueType;
 } AclSparseSpMatDescInner;
 
 typedef struct AclSparseDnVecDescInner {
     uint64_t nums;
     void *values;
-    AclDataType valueType;
+    aclDataType valueType;
 } AclSparseDnVecDescInner;
 
 typedef struct AclSparseHandlerInner {

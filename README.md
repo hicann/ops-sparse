@@ -1,17 +1,33 @@
 # ops-sparse
 
-## 一、什么是ops-sparse
-### ops-sparse介绍
-ops-sparse 是基于昇腾芯片的高性能稀疏算子库，提供常用的稀疏矩阵基础运算。  
-### 软件架构
-待补充
+## 🔥Latest News
 
+- [2026/05] ops-sparse项目上线，提供稀疏矩阵计算的API以及优化的稀疏矩阵向量乘法实现。
 
-### ops-sparse仓介绍
+## 🚀概述
 
-ops-sparse库的目录结构如下：
+ops-sparse是[CANN](https://hiascend.com/software/cann) （Compute Architecture for Neural Networks）算子库中提供高性能稀疏矩阵计算的算子库，专注于优化稀疏矩阵的计算效率。
 
-```
+## ⚡️快速入门
+
+若您希望**从零到一快速体验**项目能力，请访问下述简易教程。
+
+1. [环境部署](docs/zh/install/quick_install.md)：介绍基础环境搭建，包括软件包和三方依赖的获取和安装、源码下载等。
+
+   > **说明**：本步骤是QuickStart和各类教程的操作前提，请先完成基础环境搭建。
+2. [QuickStart](docs/QUICKSTART.md)：提供快速上手本项目能力的指南，包括编译部署、算子调用/开发/调试等核心能力。
+
+## 📖学习教程
+
+若您已学习**环境部署和QuickStart**，对本项目有一定认知，并希望**深入了解和体验项目**，请访问下述详细教程。
+
+1. [接口列表](docs/zh/api_list.md)：提供全量API信息，方便您查看aclsparse接口的分类和功能。
+
+## 🔍目录结构
+
+ops-sparse仓关键目录结构如下。
+
+```txt
 ops-sparse
 ├── build          //可存放构建生成的文件
 ├── docs           //文档文件
@@ -26,60 +42,17 @@ ops-sparse
 ├── tests          //测试代码
 ```
 
-## 二、环境构建
-### 快速安装CANN软件
-本节提供快速安装CANN软件的示例命令，更多安装步骤请参考[详细安装指南](#cann详细安装指南)。
+## 💬相关信息
 
-#### 安装前准备
-在线安装和离线安装时，需确保已具备Python环境及pip3，当前CANN支持Python3.7.x至3.11.4版本。
-离线安装时，请单击[获取链接](https://www.hiascend.com/developer/download/community/result?module=cann)下载CANN软件包，并上传到安装环境任意路径。
-#### 安装CANN
-```shell
-chmod +x Ascend-cann-toolkit_8.5.RC1_linux-$(arch).run
-./Ascend-cann-toolkit_8.5.RC1_linux-$(arch).run --install
-```
-#### 安装后配置
-配置环境变量脚本set_env.sh，当前安装路径以${HOME}/Ascend为例。
-```
-source ${HOME}/Ascend/ascend-toolkit/set_env.sh
-```  
+- [贡献指南](CONTRIBUTING.md)
+- [安全声明](SECURITY.md)
+- [许可证](LICENSE)
+- [所属SIG](https://gitcode.com/cann/community/tree/master/CANN/sigs/ops-linear-algebra)
 
-### CANN详细安装指南 
-开发者可访问[昇腾文档-昇腾社区](https://www.hiascend.com/document)->CANN社区版->软件安装，查看CANN软件安装引导，根据机器环境、操作系统和业务场景选择后阅读详细安装步骤。
+## 🤝联系我们
 
-### 基础工具版本要求与安装
+本项目功能和文档正在持续更新和完善中，建议您关注最新版本。
 
-安装CANN之后，您可安装一些工具方便后续开发，参见以下内容：
-
-* [CANN依赖列表](https://www.hiascend.com/document/detail/zh/CANNCommunityEdition/83RC1alpha002/softwareinst/instg/instg_0045.html?Mode=PmIns&InstallType=local&OS=Debian&Software=cannToolKit)
-* [CANN安装后操作](https://www.hiascend.com/document/detail/zh/CANNCommunityEdition/83RC1alpha002/softwareinst/instg/instg_0094.html?Mode=PmIns&InstallType=local&OS=Debian&Software=cannToolKit)
-
-## 三、快速上手
-### ops-sparse编译
- - 加速库下载
-    ```sh
-    git clone https://gitcode.com/cann/ops-sparse.git
-    ```
-   您可自行选择需要的分支。
- - 加速库编译  
-    编译加速库，设置加速库环境变量：
-    ```sh
-    cd ops-sparse
-    bash scripts/build.sh
-    source output/ops-sparse/set_env.sh
-    ```
-    
-### 调用示例说明
-本节示例代码分别展示了如何通过C++调用算子。
-待补充
-
-## 四、参与贡献
- 
-1.  fork仓库
-2.  修改并提交代码
-3.  新建 Pull-Request
-
-## 六、学习资源
-
-## 七、参考文档
-**[CANN社区版文档](https://www.hiascend.com/document/detail/zh/CANNCommunityEdition/83RC1alpha002/index/index.html)**  
+- **问题反馈**：通过GitCode[【Issues】](https://gitcode.com/cann/ops-sparse/issues)提交问题。
+- **社区互动**：通过GitCode[【讨论】](https://gitcode.com/cann/ops-sparse/discussions)参与交流。
+- **技术专栏**：通过GitCode[【Wiki】](https://gitcode.com/cann/ops-sparse/wiki)获取技术文章，如系列化教程、优秀实践等。

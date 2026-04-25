@@ -11,7 +11,7 @@
  */
 
 #include <acl/acl.h>           // aclrtMalloc, aclrtMemcpy, etc.
-#include <spmv_host.h>  // aclSparseSpMV
+#include <cann_ops_sparse.h>  // aclSparseSpMV
 #include <stdio.h>             // printf
 #include <stdlib.h>            // EXIT_FAILURE
 #include <string.h>
@@ -207,16 +207,16 @@ int main(void)
         ACL_SPARSE_INDEX_32I,
         ACL_SPARSE_INDEX_32I,
         ACL_SPARSE_INDEX_BASE_ZERO,
-        ACL_R_32F))
+        ACL_FLOAT))
     end = clock();
     double time_aclSparseCreateCsr = (double)(end - start) / CLOCKS_PER_SEC;
     printf("Time for aclSparseCreateCsr: %f sec\n", time_aclSparseCreateCsr);
 
     start = clock();
     // Create dense vector X
-    CHECK_ACL_SPARSE(aclSparseCreateDnVec(&vecX, A_num_cols, dX, ACL_R_32F))
+    CHECK_ACL_SPARSE(aclSparseCreateDnVec(&vecX, A_num_cols, dX, ACL_FLOAT))
     // Create dense vector y
-    CHECK_ACL_SPARSE(aclSparseCreateDnVec(&vecY, A_num_rows, dY, ACL_R_32F))
+    CHECK_ACL_SPARSE(aclSparseCreateDnVec(&vecY, A_num_rows, dY, ACL_FLOAT))
     end = clock();
     double time_aclSparseCreateDnVec = (double)(end - start) / CLOCKS_PER_SEC;
     printf("Time for aclSparseCreateDnVec: %f sec\n", time_aclSparseCreateDnVec);
@@ -229,7 +229,7 @@ int main(void)
         vecX,
         &beta,
         vecY,
-        ACL_R_32F,
+        ACL_FLOAT,
         ACL_SPARSE_SPMV_ALG_DEFAULT,
         &bufferSize))
     CHECK_ACL(aclrtMalloc(&dBuffer, bufferSize, ACL_MEM_MALLOC_HUGE_FIRST))
@@ -243,7 +243,7 @@ int main(void)
         vecX,
         &beta,
         vecY,
-        ACL_R_32F,
+        ACL_FLOAT,
         ACL_SPARSE_SPMV_ALG_DEFAULT,
         dBuffer))
 
@@ -269,7 +269,7 @@ int main(void)
         vecX,
         &beta,
         vecY,
-        ACL_R_32F,
+        ACL_FLOAT,
         ACL_SPARSE_SPMV_ALG_DEFAULT,
         dBuffer))
 
@@ -277,7 +277,6 @@ int main(void)
 
     double time_aclSparseSpMV = (double)(end - start) / CLOCKS_PER_SEC;
 
-#if 1
     start = clock();
 
     // execute preprocess (optional)
@@ -294,12 +293,11 @@ int main(void)
         vecX,
         &beta,
         vecY,
-        ACL_R_32F,
+        ACL_FLOAT,
         ACL_SPARSE_SPMV_ALG_DEFAULT,
         dBuffer))
 
     end = clock();
-#endif
 
     double time_aclSparseSpMV2 = (double)(end - start) / CLOCKS_PER_SEC;
 
@@ -319,12 +317,12 @@ int main(void)
 
     for (uint64_t i = 0; i < A_num_rows; i++) {
         if (abs(hY[i] - hYBase[i]) > 0.001) {
-            printf("%lu expect %f , actor %f\r\n", i, hYBase[i], hY[i]);
+            printf("%lu expect %f , actual %f\r\n", i, hYBase[i], hY[i]);
             printf("test failed\r\n");
             return 0;
         }
     }
-    printf("test passed\r\n");
+    printf("[Success] test case accuracy is verification passed.\r\n");
 
     start = clock();
 
@@ -355,14 +353,14 @@ int main(void)
     double time_freeGPUMemory = (double)(end - start) / CLOCKS_PER_SEC;
 
 
-    printf("%f, %f, %f, %f, %f, %f, %f\n",
-        time_aclrtMalloc,
-        time_copyXDataToGPU,
-        time_aclSparseSpMVPre,
-        time_aclSparseSpMV,
-        time_aclSparseSpMV2,
-        time_copyResultToCPU,
-        time_freeGPUMemory);
+    // printf("%f, %f, %f, %f, %f, %f, %f\n",
+    //     time_aclrtMalloc,
+    //     time_copyXDataToGPU,
+    //     time_aclSparseSpMVPre,
+    //     time_aclSparseSpMV,
+    //     time_aclSparseSpMV2,
+    //     time_copyResultToCPU,
+    //     time_freeGPUMemory);
     Deinit(deviceId, stream);
     return EXIT_SUCCESS;
 }

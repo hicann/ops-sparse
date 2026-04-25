@@ -13,7 +13,7 @@
 #include <string.h>
 #include "spmv.h"
 #include "acl/acl.h"
-#include "sparse_common.h"
+#include "cann_ops_sparse_common.h"
 #include "spmv_csr_mat.h"
 
 #define ROUNDUP(a, b) (((a) + (b) - 1) / (b) * (b))

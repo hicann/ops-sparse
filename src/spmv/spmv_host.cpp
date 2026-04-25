@@ -10,13 +10,13 @@
  * ----------------------------------------------------------------------------------------------------------
  */
 
-#include "spmv_host.h"
+#include "cann_ops_sparse.h"
 #include <iostream>
 #include <stdlib.h>
 #include <string.h>
 #include "unistd.h"
 #include "spmv.h"
-#include "sparse_common.h"
+#include "cann_ops_sparse_common.h"
 #include "spmv_csr_mat.h"
 
 extern void spmv_kernel_do(void* buffer, void* x, void* y, uint64_t rows, uint64_t cols, uint32_t nnz, uint32_t numBlocks, void *stream);
@@ -47,7 +47,7 @@ AclSparseStatus aclSparseDestroy(AclSparseHandler handle)
     return ACL_SPARSE_STATUS_SUCCESS;
 }
 
-AclSparseStatus aclSparseCreateDnVec(AclSparseDnVecDesc *dnVecDescr, int64_t size, void *values, AclDataType valueType)
+AclSparseStatus aclSparseCreateDnVec(AclSparseDnVecDesc *dnVecDescr, int64_t size, void *values, aclDataType valueType)
 {
     AclSparseDnVecDescInner *inner = (AclSparseDnVecDescInner *)malloc(sizeof(AclSparseDnVecDescInner));
     if (inner == nullptr) {
@@ -72,7 +72,7 @@ AclSparseStatus aclSparseDestroyDnVec(AclSparseDnVecDesc dnVecDescr)
 
 AclSparseStatus aclSparseCreateCsr(AclSparseSpMatDesc *spMatDescr, int64_t rows, int64_t cols, int64_t nnz,
     void *csrRowOffsets, void *csrColInd, void *csrValues, AclSparseIndexType csrRowOffsetsType,
-    AclSparseIndexType csrColIndType, AclSparseIndexBase idxBase, AclDataType valueType)
+    AclSparseIndexType csrColIndType, AclSparseIndexBase idxBase, aclDataType valueType)
 {
     AclSparseSpMatDescInner *inner = (AclSparseSpMatDescInner *)malloc(sizeof(AclSparseSpMatDescInner));
     if (inner == nullptr) {
@@ -97,7 +97,7 @@ AclSparseStatus aclSparseCreateCsr(AclSparseSpMatDesc *spMatDescr, int64_t rows,
 
 AclSparseStatus aclSparseCreateCsc(AclSparseSpMatDesc *spMatDescr, int64_t rows, int64_t cols, int64_t nnz,
     void *cscColOffsets, void *cscRowInd, void *cscValues, AclSparseIndexType cscColOffsetsType,
-    AclSparseIndexType cscRowIndType, AclSparseIndexBase idxBase, AclDataType valueType)
+    AclSparseIndexType cscRowIndType, AclSparseIndexBase idxBase, aclDataType valueType)
 {
     AclSparseSpMatDescInner *inner = (AclSparseSpMatDescInner *)malloc(sizeof(AclSparseSpMatDescInner));
     if (inner == nullptr) {
@@ -131,7 +131,7 @@ AclSparseStatus aclSparseDestroySpMat(AclSparseSpMatDesc spMatDescr)
 }
 
 AclSparseStatus aclSparseSpmvGetBufferSize(AclSparseHandler handle, AclSparseOp op, const void *alpha,
-    AclSparseSpMatDesc mat, AclSparseDnVecDesc x, const void *beta, AclSparseDnVecDesc y, AclDataType computeType,
+    AclSparseSpMatDesc mat, AclSparseDnVecDesc x, const void *beta, AclSparseDnVecDesc y, aclDataType computeType,
     AclSparseSpmvAlg alg, size_t *size)
 {
     AclSparseSpMatDescInner *matInner = (AclSparseSpMatDescInner *)mat;
@@ -140,7 +140,7 @@ AclSparseStatus aclSparseSpmvGetBufferSize(AclSparseHandler handle, AclSparseOp 
 }
 
 AclSparseStatus aclSparseSpmvPreprocess(AclSparseHandler handle, AclSparseOp op, const void *alpha,
-    AclSparseSpMatDesc mat, AclSparseDnVecDesc x, const void *beta, AclSparseDnVecDesc y, AclDataType computeType,
+    AclSparseSpMatDesc mat, AclSparseDnVecDesc x, const void *beta, AclSparseDnVecDesc y, aclDataType computeType,
     AclSparseSpmvAlg alg, void *buffer)
 {
     AclSparseSpMatDescInner *matInner = (AclSparseSpMatDescInner *)mat;
@@ -161,7 +161,7 @@ AclSparseStatus aclSparseSpmvPreprocess(AclSparseHandler handle, AclSparseOp op,
 
 /* 当前 不支持 alpha 和 beta */
 AclSparseStatus aclSparseSpmv(AclSparseHandler handle, AclSparseOp op, const void *alpha, AclSparseSpMatDesc mat,
-    AclSparseDnVecDesc x, const void *beta, AclSparseDnVecDesc y, AclDataType computeType, AclSparseSpmvAlg alg,
+    AclSparseDnVecDesc x, const void *beta, AclSparseDnVecDesc y, aclDataType computeType, AclSparseSpmvAlg alg,
     void *buffer)
 {
     AclSparseHandlerInner *handleInner = (AclSparseHandlerInner *)handle;
