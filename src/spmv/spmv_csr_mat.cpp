@@ -130,32 +130,13 @@ uint32_t SpmvCsrMat::spmvDivideSubMat(SpmvCsrInfo *infos)
             subColIdx += blockLen;
             subValues += blockLen;
             subNnzOffset += blockLen;
-                if (subBlockPtr > subInfo->blockPtr + (subInfo->rowBlockLen / sizeof(uint32_t))) {
-                    printf("blockPtr error\r\n");
-                }
-                if (subColIdx > subInfo->colIdx + (subInfo->colIdxLen / sizeof(uint32_t))) {
-                    printf("colIdxLen error\r\n");
-                }
-                if (subValues > subInfo->values + (subInfo->valueLen / sizeof(float))) {
-                    printf("values error\r\n");
-                }
-                if (subBlock + blockLen > sptrs + subInfo->workspaceLen) {
-                    printf("subBlock error\r\n");
-                }
         }
         subBlockPtr[0] = subNnzOffset;
         subBlockPtr[1] = rows;
-        if (subNnzOffset != subInfo->nnz) {
-            printf("curId = %lu, nnz[%lu %lu]\r\n", curId, subNnzOffset, subInfo->nnz);
-        }
-        for (uint64_t i = 0; i < subInfo->nnz; i++) {
-            if (subInfo->colIdx[i] >= subInfo->colIdxLen) {
-                printf("curId = %lu, idx[%lu] = %d\r\n", curId, i, subInfo->colIdx[i]);
-            }
-        }
     }
     return 0;
 }
+
 uint64_t SpmvCsrMat::GetMaxNum(uint32_t *nums, uint64_t num)
 {
     uint64_t max = 0;

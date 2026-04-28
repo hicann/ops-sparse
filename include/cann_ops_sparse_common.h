@@ -15,6 +15,7 @@
 
 #include <iostream>
 #include <acl/acl.h>
+#include "cann_ops_sparse.h"
 
 #define CHECK_ACL(x)                                                                        \
     do {                                                                                    \
@@ -27,8 +28,6 @@
 #ifdef __cplusplus
 extern "C" {
 #endif
-
-#include "cann_ops_sparse.h"
 
 typedef struct AclSparseSpMatDescInner {
     uint64_t isDoPreProgress;

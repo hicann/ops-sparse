@@ -31,7 +31,7 @@ bash build.sh --pkg --soc=ascend910b --ops=spmv
 若提示如下信息，说明编译成功。
 
 ```bash
-Self-extractable archive "cann-ops-sparse-${cann_version}_linux-${arch}.run" successfully created.
+Self-extractable archive "cann-${soc_version}-ops-sparse-${cann_version}_linux-${arch}.run" successfully created.
 ```
 
 编译成功后，run包存放于项目根目录的build_out目录下。
@@ -39,7 +39,7 @@ Self-extractable archive "cann-ops-sparse-${cann_version}_linux-${arch}.run" suc
 ### 2. 安装Spmv算子包
 
 ```bash
-./build_out/cann-ops-sparse-*linux*.run
+./build_out/cann-${soc_version}-ops-sparse-*linux*.run --install --install-path=/usr/local/Ascend/
 ```
 
 ### 3. 快速验证：运行算子样例
@@ -110,7 +110,7 @@ __aicore__ inline void Process()
 2. **重新安装**：
 
     ```bash
-    ./build_out/cann-ops-sparse-*linux*.run
+    ./build_out/cann-${soc_version}-ops-sparse-*linux*.run --install --install-path=/usr/local/Ascend/
     ```
 
 3. **重新验证**：
@@ -158,9 +158,9 @@ __aicore__ inline void Process()
         this->rows = rows;
         this->cols = cols;
         this->nnz = nnz;
+        // 打印非零元素数量
+        AscendC::PRINTF("this->nnz is %llu\n", this->nnz);
     }
-    // 打印非零元素数量
-    AscendC::PRINTF("this->nnz is %llu\n", this->nnz);
   ```
 
 * **DumpTensor**

@@ -17,6 +17,7 @@
 #include <string.h>
 #include <time.h>
 #include <iostream>
+#include <new>                 // std::bad_alloc
 
 #define CHECK_ACL(x)                                                                        \
     do {                                                                                    \
@@ -78,8 +79,20 @@ void generate_random_csr(uint64_t rows, uint64_t cols, uint64_t nnz, int *csrOff
             row_nnz++;
         }
         
-        bool *col_used = new bool[cols]();
+        bool *col_used = nullptr;
+        if (cols > 0) {
+            try {
+                col_used = new bool[cols]();
+            } catch (const std::bad_alloc& e) {
+                std::cerr << "Memory allocation failed: " << e.what() << std::endl;
+                // 清理已分配的资源
+                delete[] col_used;
+                return;
+            }
+        }
+        
         for (uint64_t j = 0; j < row_nnz; j++) {
+            if (cols == 0) break; // 避免除0错误
             int col;
             do {
                 col = rand() % cols;
@@ -89,7 +102,9 @@ void generate_random_csr(uint64_t rows, uint64_t cols, uint64_t nnz, int *csrOff
             values[current_nnz] = 0.12345 + 0.000001 * current_nnz;
             current_nnz++;
         }
-        delete[] col_used;
+        if (col_used != nullptr) {
+            delete[] col_used;
+        }
         
         csrOffsets[i + 1] = current_nnz;
     }
@@ -251,15 +266,7 @@ int main(void)
 
     double time_aclSparseSpMVPre = (double)(end - start) / CLOCKS_PER_SEC;
 
-    // aclSparseSpmvShowWorkSpace(handle, dBuffer);
-
     start = clock();
-
-    // execute preprocess (optional)
-    //    CHECK_aclSparse( aclSparseSpMV_preprocess(
-    //            handle, aclSparse_OPERATION_NON_TRANSPOSE,
-    //            &alpha, matA, vecX, &beta, vecY, CUDA_R_32F,
-    //            aclSparse_SPMV_ALG_DEFAULT, dBuffer) )
 
     // execute SpMV
     CHECK_ACL_SPARSE(aclSparseSpmv(handle,
@@ -276,30 +283,6 @@ int main(void)
     end = clock();
 
     double time_aclSparseSpMV = (double)(end - start) / CLOCKS_PER_SEC;
-
-    start = clock();
-
-    // execute preprocess (optional)
-    //    CHECK_aclSparse( aclSparseSpMV_preprocess(
-    //            handle, aclSparse_OPERATION_NON_TRANSPOSE,
-    //            &alpha, matA, vecX, &beta, vecY, CUDA_R_32F,
-    //            aclSparse_SPMV_ALG_DEFAULT, dBuffer) )
-
-    // execute SpMV
-    CHECK_ACL_SPARSE(aclSparseSpmv(handle,
-        ACL_SPARSE_OP_NON_TRANSPOSE,
-        &alpha,
-        matA,
-        vecX,
-        &beta,
-        vecY,
-        ACL_FLOAT,
-        ACL_SPARSE_SPMV_ALG_DEFAULT,
-        dBuffer))
-
-    end = clock();
-
-    double time_aclSparseSpMV2 = (double)(end - start) / CLOCKS_PER_SEC;
 
     // destroy matrix/vector descriptors
     CHECK_ACL_SPARSE(aclSparseDestroySpMat(matA))
@@ -352,15 +335,6 @@ int main(void)
     end = clock();
     double time_freeGPUMemory = (double)(end - start) / CLOCKS_PER_SEC;
 
-
-    // printf("%f, %f, %f, %f, %f, %f, %f\n",
-    //     time_aclrtMalloc,
-    //     time_copyXDataToGPU,
-    //     time_aclSparseSpMVPre,
-    //     time_aclSparseSpMV,
-    //     time_aclSparseSpMV2,
-    //     time_copyResultToCPU,
-    //     time_freeGPUMemory);
     Deinit(deviceId, stream);
     return EXIT_SUCCESS;
 }

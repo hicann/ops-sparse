@@ -148,13 +148,6 @@ AclSparseStatus aclSparseSpmvPreprocess(AclSparseHandler handle, AclSparseOp op,
 
     SpmvCsrMat spmvmat(matInner);
     spmvmat.DoPreProcess((uint8_t *)buffer);
-/*
-    AclSparseHandlerInner *handleInner = (AclSparseHandlerInner *)handle;
-    printf("11 dA_values = %p\r\n", matInner->values);
-    ACLRT_LAUNCH_KERNEL(spmv_pre_custom)(20, handleInner->stream, matInner->ptrs, matInner->idxs, matInner->values, buffer,
-                        matInner->rows, matInner->cols, matInner->nnz);
-    CHECK_ACL(aclrtSynchronizeStream(handleInner->stream));
-    */
     matInner->isDoPreProgress = true;
     return ACL_SPARSE_STATUS_SUCCESS;
 }
@@ -192,72 +185,43 @@ AclSparseStatus aclSparseSpmvShowWorkSpace(AclSparseHandler handle, void *buffer
     SpmvCsrInfo *info = (SpmvCsrInfo *)(ptr + GM_SYNC_SIZE);
     CHECK_ACL(aclrtMemcpy(ptr, len, buffer, len, ACL_MEMCPY_DEVICE_TO_HOST));
     uint64_t tlen = GM_SYNC_SIZE + SPMV_CSR_INFO_LEN(info->num);
-    printf("############### %s start ##################\r\n", __func__);
-    printf("num:    %lu\r\n", info->num);
-    printf("mbs:    %lu\r\n", info->maxBlockSize);
-    printf("id\tbnum\tscol\tcnum\tnnz\tmbs\trbl\tcil\tvll\twsl\r\n");
+    printf("############### %s start ##################\r\nnum:    %lu\r\nmbs:    %lu\r\nid\tbnum\tscol\tcnum\tnnz\tmbs\trbl\tcil\tvll\twsl\r\n", __func__, info->num, info->maxBlockSize);
+    
     for (uint64_t i = 0; i < info->num; i++) {
         SpmvCsrSubMatInfo *subInfo = info->infos + i;
         printf("%lu\t%lu\t%lu\t%lu\t%lu\t%lu\t%lu\t%lu\t%lu\t%lu\t%p\t%p\t%p\r\n", 
-            i, 
-            subInfo->blockNum, 
-            subInfo->startCol, 
-            subInfo->colNum,
-            subInfo->nnz,
-            subInfo->maxBlockSize,
-            subInfo->rowBlockLen,
-            subInfo->colIdxLen,
-            subInfo->valueLen,
-            subInfo->workspaceLen,
-            subInfo->blockPtr,
-            subInfo->colIdx,
-            subInfo->values);
-            subInfo->blockPtr = (uint32_t *)(ptr + tlen);
-            subInfo->colIdx = (uint32_t *)(ptr + tlen + subInfo->rowBlockLen);
-            subInfo->values = (float *)(ptr + tlen + subInfo->rowBlockLen + subInfo->colIdxLen);
-            for (uint32_t j = 0; j < subInfo->blockNum; j++) {
-                uint32_t offset = (j << 1);
-                uint32_t start = subInfo->blockPtr[offset];
-                uint32_t rowId = subInfo->blockPtr[offset + 1];
-                uint32_t end = subInfo->blockPtr[offset + 2];
-                if (end - start > subInfo->maxBlockSize) {
-                    printf("i = %lu, j = %d, row = %d start = %d, len = %d\r\n", i, j, rowId, start, end - start);
-                }
-                if (start % (MAX_SUB_ROW_SIZE * 8) != 0) {
-                    printf("i = %lu, j = %d, row = %d start = %d, len = %d\r\n", i, j, rowId, start, end - start);
-                }
-            }
-            for (uint32_t j = 0; j < subInfo->nnz; j++) {
-                if (subInfo->colIdx[j] > subInfo->colNum) {
-                    printf("i = %lu, j = %d, colIdx = %d\r\n", i, j, subInfo->colIdx[j]);
-                }
-            }
-          
+            i, subInfo->blockNum, subInfo->startCol, subInfo->colNum, subInfo->nnz, subInfo->maxBlockSize, 
+            subInfo->rowBlockLen, subInfo->colIdxLen, subInfo->valueLen, subInfo->workspaceLen, 
+            subInfo->blockPtr, subInfo->colIdx, subInfo->values);
+        subInfo->blockPtr = (uint32_t *)(ptr + tlen);
+        subInfo->colIdx = (uint32_t *)(ptr + tlen + subInfo->rowBlockLen);
+        subInfo->values = (float *)(ptr + tlen + subInfo->rowBlockLen + subInfo->colIdxLen);
+        
+        for (uint32_t j = 0; j < subInfo->blockNum; j++) {
+            uint32_t offset = (j << 1), start = subInfo->blockPtr[offset], rowId = subInfo->blockPtr[offset + 1], end = subInfo->blockPtr[offset + 2];
+            if (end - start > subInfo->maxBlockSize || start % (MAX_SUB_ROW_SIZE * 8) != 0)
+                printf("i = %lu, j = %d, row = %d start = %d, len = %d\r\n", i, j, rowId, start, end - start);
+        }
+        for (uint32_t j = 0; j < subInfo->nnz; j++)
+            if (subInfo->colIdx[j] > subInfo->colNum)
+                printf("i = %lu, j = %d, colIdx = %d\r\n", i, j, subInfo->colIdx[j]);
         tlen += subInfo->workspaceLen;
     }
+    
     printf("total Len: %lu\r\n", tlen);
     for (uint64_t i = 0; i < info->num; i++) {
         SpmvCsrSubMatInfo *subInfo = info->infos + i;
         printf("blockptr: \r\n");
         for (uint32_t j = 0; j < 10; j++) {
-                uint32_t offset = (j << 1);
-                uint32_t start = subInfo->blockPtr[offset];
-                uint32_t rowId = subInfo->blockPtr[offset + 1];
-                printf("[%d, %d] ", start, rowId);
+            uint32_t offset = (j << 1);
+            printf("[%d, %d] ", subInfo->blockPtr[offset], subInfo->blockPtr[offset + 1]);
         }
-        printf("\r\n");
-        printf("value:\r\n");
-        for (uint32_t j = 0; j < 20; j++) {
-                printf("[%f] ", subInfo->values[j]);
-        }
-        printf("\r\n");
-        printf("idx\r\n");
-        for (uint32_t j = 0; j < 20; j++) {
-                printf("[%d] ", subInfo->colIdx[j]);
-        }
+        printf("\r\nvalue:\r\n");
+        for (uint32_t j = 0; j < 20; j++) printf("[%f] ", subInfo->values[j]);
+        printf("\r\nidx\r\n");
+        for (uint32_t j = 0; j < 20; j++) printf("[%d] ", subInfo->colIdx[j]);
         printf("\r\n");
     }
-
     printf("############### %s end ##################\r\n", __func__);
     free(ptr);
     return ACL_SPARSE_STATUS_SUCCESS;
