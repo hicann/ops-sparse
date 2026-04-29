@@ -30,6 +30,7 @@ typedef enum AclSparseOp {
 typedef void* AclSparseSpMatDesc;
 typedef void* AclSparseDnVecDesc;
 typedef void* AclSparseHandler;
+typedef void* aclsparseHandle_t;
 
 // This data type represents the status returned by the library functions and it can have the following values:
 typedef enum AclSparseStatus {
@@ -75,11 +76,13 @@ typedef enum AclSparseStatus {
     ACL_SPARSE_STATUS_NOT_SUPPORTED,
     // The operation or data type combination is currently not supported by the
     // function
-    ACL_SPARSE_STATUS_INSUFFICIENT_RESOURCES
+    ACL_SPARSE_STATUS_INSUFFICIENT_RESOURCES,
     // The resources for the computation, such as NPU global or shared
     // memory, are not sufficient to complete the operation. The error can
     // also indicate that the current computation mode (e.g. bit size of
     // sparse matrix indices) does not allow to handle the given input
+    ACL_SPARSE_STATUS_HANDLE_IS_NULLPTR
+    // The handle is a null pointer
 } AclSparseStatus;
 
 typedef enum AclSparseSpmvAlg {
@@ -278,6 +281,62 @@ AclSparseStatus aclSparseSpmv(AclSparseHandler handle, AclSparseOp op, const voi
     void *buffer);
 
 AclSparseStatus aclSparseSpmvShowWorkSpace(AclSparseHandler handle, void *buffer);
+
+/**
+ * @brief 创建 ops-sparse handle
+ *
+ * 在堆上分配一个 ops-sparse handle，并通过 @p handle 输出给调用者。
+ *
+ * @param handle 输出参数，用于接收创建的 handle 指针。调用前 *handle
+ *               必须为 nullptr，否则视为已存在以防止内存泄漏。
+ * @return ACL_SPARSE_STATUS_SUCCESS 成功
+ *         ACL_SPARSE_STATUS_HANDLE_IS_NULLPTR handle 指针为空
+ *         ACL_SPARSE_STATUS_INVALID_VALUE *handle 非空
+ *         ACL_SPARSE_STATUS_ALLOC_FAILED 内存分配失败
+ */
+AclSparseStatus aclsparseCreate(aclsparseHandle_t *handle);
+
+/**
+ * @brief 销毁 ops-sparse handle
+ *
+ * 释放由 aclsparseCreate 创建的 handle 所占有的全部资源。
+ *
+ * @param handle 要销毁的 handle
+ * @return ACL_SPARSE_STATUS_SUCCESS 成功
+ *         ACL_SPARSE_STATUS_HANDLE_IS_NULLPTR handle 为空
+ */
+AclSparseStatus aclsparseDestroy(aclsparseHandle_t handle);
+
+/**
+ * @brief 设置 handle 的 stream
+ * @param handle aclsparse handle（void*）
+ * @param stream 要设置的 stream，nullptr 表示使用默认 stream
+ * @return ACL_SPARSE_STATUS_SUCCESS 成功
+ *         ACL_SPARSE_STATUS_HANDLE_IS_NULLPTR handle 为空
+ */
+AclSparseStatus aclsparseSetStream(aclsparseHandle_t handle, aclrtStream stream);
+
+/**
+ * @brief 获取 handle 的 stream
+ * @param handle aclsparse handle（void*）
+ * @param stream 输出参数，返回当前 stream
+ * @return ACL_SPARSE_STATUS_SUCCESS 成功
+ *         ACL_SPARSE_STATUS_HANDLE_IS_NULLPTR handle 为空
+ *         ACL_SPARSE_STATUS_INVALID_VALUE stream 输出参数为空
+ */
+AclSparseStatus aclsparseGetStream(aclsparseHandle_t handle, aclrtStream *stream);
+
+/**
+ * @brief 获取 ops-sparse 版本号
+ *
+ * 版本号编码为 MAJOR * 10000 + MINOR * 100 + PATCH，如 10000 表示 1.0.0。
+ *
+ * @param handle handle指针，可为NULL
+ * @param version 输出参数，接收版本号
+ * @return ACL_SPARSE_STATUS_SUCCESS 成功
+ *         ACL_SPARSE_STATUS_INVALID_VALUE 参数无效
+ */
+AclSparseStatus aclsparseGetVersion(aclsparseHandle_t handle, int *version);
 
 #ifdef __cplusplus
 }
