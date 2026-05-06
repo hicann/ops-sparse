@@ -41,7 +41,7 @@ Self-extractable archive "cann-${soc_version}-ops-sparse-${cann_version}_linux-$
 ```bash
 ./build_out/cann-${soc_version}-ops-sparse-*linux*.run --install --install-path=/usr/local/Ascend/
 ```
-
+注：安装算子包之后，每次调用会从算子包中加载算子，若需快速调试验证算子功能，可直接按照 [3.快速验证：运行算子样例](#三算子调试) 步骤进行，无需安装算子包。
 ### 3. 快速验证：运行算子样例
 
 通用的运行命令格式：`bash build.sh --soc=<芯片版本> --ops=<算子名> --run`。
@@ -71,29 +71,29 @@ Test Summary:
 
 ### 1. 修改Kernel实现
 
-找到Spmv算子的核心kernel实现文件`sparse/src/spmv_kernel.cpp`，尝试修改算子中的process操作：
+找到Spmv算子的核心kernel实现文件`sparse/src/spmv_kernel.cpp`，尝试修改算子中的VectorPostComputor操作：
 
 ```cpp
-__aicore__ inline void Process()
-{
-    for (uint64_t i = MAX_TILE_SIZE * id; i < rows; i += MAX_TILE_SIZE * blockNum) {
-        uint64_t end = ((i + MAX_TILE_SIZE) > rows) ? rows : (i + MAX_TILE_SIZE);
-        GlobalTensor<float> gm;
-        // gm.SetGlobalBuffer(y + i, (end - i + 15) / 15 * 15);
-        // 新增修改逻辑
-        for (uint64_t j = i; j < end; j++) {
-            uint32_t rstart = info->ptrs[j];
-            uint32_t rend = info->ptrs[j + 1];
-            float res = 0.0;
-            for (uint32_t l = rstart; l < rend; l++) {
-                res += info->values[l] * x[info->idxs[l]];
-            }
-
-            y[j] = res;
+    __aicore__ inline void VectorPostComputor(
+        int32_t j, __gm__ SpmvCsrSubMatInfo *infos, uint32_t start, uint32_t len, GlobalTensor<uint32_t> &xId)
+    {
+        if ASCEND_IS_AIC {
+            return;
         }
-        DataCacheCleanAndInvalid<float, AscendC::CacheLine::ENTIRE_DATA_CACHE, AscendC::DcciDst::CACHELINE_OUT>(gm);
+        AscendC::CrossCoreWaitFlag(SYNC_AIC_TO_AIV);
+        auto yin = queueYIn.AllocTensor<float32_t>();
+        auto yout = queueYOut.AllocTensor<float32_t>();
+        // DataCopy(yin, swapAicToAivGm, CUBE_BLOCK_SIZE);
+
+        Gather(yout, yin, yOutIdxLm, 0, MAX_SUB_ROW_SIZE);
+        
+        AscendC::SetAtomicAdd<float>();
+        DataCopy(yGm[start], yout, MAX_SUB_ROW_SIZE);
+
+        AscendC::SetAtomicNone();
+        queueYOut.FreeTensor(yout);
+        queueYIn.FreeTensor(yin);
     }
-}
 ```
 
 ### 2. 编译与验证
@@ -152,14 +152,15 @@ __aicore__ inline void Process()
     {
         info = reinterpret_cast<__gm__ SpmvCsrInfo *>(buffer);
         blockNum = GetBlockNum();
+        nParts = info->num;
         id = GetBlockIdx();
-        this->x = (__gm__ float *)x;
-        this->y = (__gm__ float *)y;
         this->rows = rows;
         this->cols = cols;
         this->nnz = nnz;
         // 打印非零元素数量
         AscendC::PRINTF("this->nnz is %llu\n", this->nnz);
+
+        ...
     }
   ```
 
@@ -168,20 +169,21 @@ __aicore__ inline void Process()
   该接口支持Dump指定Tensor的内容，同时支持打印自定义附加信息，比如当前行号等，详细介绍请参见[《Ascend C API》](https://hiascend.com/document/redirect/CannCommunityAscendCApi)中“算子调测API > DumpTensor”。
 
   ```cpp
-    GlobalTensor<float> gm;
-    gm.SetGlobalBuffer(y + i, (end - i + 15) / 15 * 15);
-    for (uint64_t j = i; j < end; j++) {
-        uint32_t rstart = info->ptrs[j];
-        uint32_t rend = info->ptrs[j + 1];
-        float res = 0.0;
-        for (uint32_t l = rstart; l < rend; l++) {
-            res += info->values[l] * x[info->idxs[l]];
-        }
-
-        y[j] = res;
+    __aicore__ inline void CopyInA2(int32_t j, __gm__ SpmvCsrSubMatInfo *infos, uint32_t start, uint32_t len)
+    {
+        auto a2 = queueMatA2.AllocTensor<float32_t>();
+        auto x = queueMatA1.DeQue<float32_t>();
+        AscendC::LoadData2DParams loadDataParams;
+        loadDataParams.repeatTimes = len / (512 / sizeof(float32_t));  // 512: 分型大小
+        loadDataParams.srcStride = 1;
+        loadDataParams.dstGap = 0;
+        loadDataParams.ifTranspose = false;
+        AscendC::LoadData(a2, x, loadDataParams);
+        // 打印x Tensor信息
+        DumpTensor(x, 0, CUBE_BLOCK_SIZE);
+        queueMatA2.EnQue(a2);
+        queueMatA1.FreeTensor(x);
     }
-    // 打印gm Tensor信息
-    DumpTensor(gm, 0, MAX_TILE_SIZE);
   ```
 
 ### 2. 性能采集

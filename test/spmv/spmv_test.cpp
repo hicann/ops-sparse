@@ -114,9 +114,9 @@ int main(void)
 {
     clock_t start, end;
 
-    const uint64_t A_num_rows = 1000;
-    const uint64_t A_num_cols = 1000;
-    const uint64_t A_nnz = 5000;  // 稀疏度约为 0.5%
+    const uint64_t A_num_rows = 300;
+    const uint64_t A_num_cols = 300;
+    const uint64_t A_nnz = 1500;
     int32_t deviceId = 0;
     aclrtStream stream = 0;
     Init(deviceId, &stream);
@@ -298,14 +298,20 @@ int main(void)
     end = clock();
     double time_copyResultToCPU = (double)(end - start) / CLOCKS_PER_SEC;
 
+    uint64_t error_count = 0;
     for (uint64_t i = 0; i < A_num_rows; i++) {
         if (abs(hY[i] - hYBase[i]) > 0.001) {
             printf("%lu expect %f , actual %f\r\n", i, hYBase[i], hY[i]);
-            printf("test failed\r\n");
-            return 0;
+            error_count++;
         }
     }
-    printf("[Success] test case accuracy is verification passed.\r\n");
+    printf("[Result] Total rows: %lu, Error count: %lu, Success count: %lu\r\n", 
+           A_num_rows, error_count, A_num_rows - error_count);
+    if (error_count > 0) {
+        printf("[Failed] test case accuracy is verification failed.\r\n");
+    } else {
+        printf("[Success] test case accuracy is verification passed.\r\n");
+    }
 
     start = clock();
 

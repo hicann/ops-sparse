@@ -20,6 +20,7 @@
 #include "spmv_csr_mat.h"
 
 extern void spmv_kernel_do(void* buffer, void* x, void* y, uint64_t rows, uint64_t cols, uint32_t nnz, uint32_t numBlocks, void *stream);
+const uint32_t blockNum = 24; // 24为A2默认blockNum
 
 AclSparseStatus aclSparseCreate(AclSparseHandler *handle)
 {
@@ -169,9 +170,9 @@ AclSparseStatus aclSparseSpmv(AclSparseHandler handle, AclSparseOp op, const voi
     AclSparseDnVecDescInner *yInner = (AclSparseDnVecDescInner *)y;
     if (matInner->format == ACL_SPARSE_FORMAT_CSC) {
         // CSC and transpose 格式 行列数需要交换
-        spmv_kernel_do(buffer, xInner->values, yInner->values, matInner->cols, matInner->rows, matInner->nnz, 20, handleInner->stream);
+        spmv_kernel_do(buffer, xInner->values, yInner->values, matInner->cols, matInner->rows, matInner->nnz, blockNum, handleInner->stream);
     } else {
-        spmv_kernel_do(buffer, xInner->values, yInner->values, matInner->rows, matInner->cols, matInner->nnz, 20, handleInner->stream);
+        spmv_kernel_do(buffer, xInner->values, yInner->values, matInner->rows, matInner->cols, matInner->nnz, blockNum, handleInner->stream);
     }
     CHECK_ACL(aclrtSynchronizeStream(handleInner->stream));
 
