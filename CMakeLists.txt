@@ -101,6 +101,7 @@ target_include_directories(${OPS_SPARSE} PRIVATE
     ${ASCEND_CANN_PACKAGE_PATH}/pkg_inc/op_common/
     ${ASCEND_CANN_PACKAGE_PATH}/pkg_inc/base/
     ${ASCEND_CANN_PACKAGE_PATH}/pkg_inc/
+    ${ASCEND_CANN_PACKAGE_PATH}/include/op_common
     ./include
 )
 
