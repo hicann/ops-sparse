@@ -21,26 +21,58 @@
 extern "C" {
 #endif
 // This type indicates which operations is applied to the related input (e.g. sparse matrix, or vector).
-typedef enum AclSparseOp {
+typedef enum aclsparseOperation_t {
     ACL_SPARSE_OP_NON_TRANSPOSE = 0,   // The non-transpose operation is selected.
     ACL_SPARSE_OP_TRANSPOSE,           // The transpose operation is selected.
     ACL_SPARSE_OP_CONJUGATE_TRANSPOSE  // The conjugate transpose operation is selected.
-} AclSparseOp;
+} aclsparseOperation_t;
 
-typedef void* AclSparseSpMatDesc;
-typedef void* AclSparseDnVecDesc;
-typedef void* AclSparseHandler;
-typedef void* aclsparseHandle_t;
+struct aclsparseContext;
+struct aclsparseSpMatDescr;
+struct aclsparseDnVecDescr;
+struct aclsparseDnMatDescr;
+
+typedef struct aclsparseContext* aclsparseHandle_t;
+typedef struct aclsparseSpMatDescr* aclsparseSpMatDescr_t;
+typedef struct aclsparseDnVecDescr* aclsparseDnVecDescr_t;
+typedef struct aclsparseDnMatDescr* aclsparseDnMatDescr_t;
+
+typedef struct aclsparseSpMatDescr const* aclsparseConstSpMatDescr_t;
+typedef struct aclsparseDnVecDescr const* aclsparseConstDnVecDescr_t;
+typedef struct aclsparseDnMatDescr const* aclsparseConstDnMatDescr_t;
+
+// Dense matrix data layout (used by B / C of SpMM).
+typedef enum aclsparseOrder_t {
+    ACL_SPARSE_ORDER_ROW = 0,   // Row-major.
+    ACL_SPARSE_ORDER_COL = 1,   // Column-major.
+} aclsparseOrder_t;
+
+// Algorithm enum for SpMM.
+typedef enum aclsparseSpMMAlg_t {
+    ACL_SPARSE_SPMM_ALG_DEFAULT = 0,
+    // Default algorithm. Implemented as a pure SIMT/AIV path; best for extremely
+    // sparse matrices (density < ~1%).
+    ACL_SPARSE_SPMM_CSR_ALG1,
+    // CSR algorithm 1. Implemented as a SIMT path with a larger column tile,
+    // intended to deliver better throughput in the 70%~99% sparsity range.
+    ACL_SPARSE_SPMM_CSR_FP32_HIGH_PRECISION_ALG,
+    // fp32 high-precision algorithm. Same SIMT path as the default, but the fp32
+    // accumulation uses Kahan compensated summation to suppress rounding /
+    // cancellation error on long rows. Trades throughput for accuracy and is only
+    // meaningful for fp32 (silently ignored for fp16 / int8). The other algorithms
+    // remain the high-performance choice with standard (lower) fp32 precision.
+    // ACL_SPARSE_SPMM_COO_ALG1,  // Reserved: COO support (V2).
+} aclsparseSpMMAlg_t;
 
 // This data type represents the status returned by the library functions and it can have the following values:
-typedef enum AclSparseStatus {
+typedef enum aclsparseStatus_t {
     ACL_SPARSE_STATUS_SUCCESS = 0,
     // The operation completed successfully
     ACL_SPARSE_STATUS_NOT_INITIALIZED,
     // The aclSPARSE library was not initialized. This is usually caused by the
     // lack of a prior call, an error in the Ascend Runtime API called by the
     // aclSPARSE routine, or an error in the hardware setup To correct: call
-    // aclSparseCreate() prior to the function call; and check that the
+    // aclsparseCreate() prior to the function call; and check that the
     // hardware, an appropriate version of the driver, and the aclSPARSE library
     // are correctly installed The error also applies to generic APIs (aclSPARSE
     // Generic APIs) for indicating a matrix/vector descriptor not initialized
@@ -83,9 +115,9 @@ typedef enum AclSparseStatus {
     // sparse matrix indices) does not allow to handle the given input
     ACL_SPARSE_STATUS_HANDLE_IS_NULLPTR
     // The handle is a null pointer
-} AclSparseStatus;
+} aclsparseStatus_t;
 
-typedef enum AclSparseSpmvAlg {
+typedef enum aclsparseSpMVAlg_t {
     ACL_SPARSE_SPMV_ALG_DEFAULT,
     // Default algorithm for any sparse matrix format.
     ACL_SPARSE_SPMV_COO_ALG1,
@@ -103,22 +135,22 @@ typedef enum AclSparseSpmvAlg {
     ACL_SPARSE_SPMV_SELL_ALG1,
     // Default algorithm for Sliced Ellpack sparse matrix format. Provides deterministic
     // (bit-wise) results for each run.
-} AclSparseSpmvAlg;
+} aclsparseSpMVAlg_t;
 
 // This type indicates the index type for representing the sparse matrix indices.
-typedef enum AclSparseIndexType {
+typedef enum aclsparseIndexType_t {
     ACL_SPARSE_INDEX_32I = 0,  // 32-bit unsigned integer [0, 2^31 - 1]
     ACL_SPARSE_INDEX_64I       // 64-bit unsigned integer [0, 2^63 - 1]
-} AclSparseIndexType;
+} aclsparseIndexType_t;
 
 // This type indicates if the base of the matrix indices is zero or one.
-typedef enum AclSparseIndexBase {
+typedef enum aclsparseIndexBase_t {
     ACL_SPARSE_INDEX_BASE_ZERO = 0,  // The base index is zero (C compatibility).
     ACL_SPARSE_INDEX_BASE_ONE        // The base index is one (Fortran compatibility).
-} AclSparseIndexBase;
+} aclsparseIndexBase_t;
 
 // This type indicates the format of the sparse matrix.
-typedef enum AclSparseFormat {
+typedef enum aclsparseFormat_t {
     ACL_SPARSE_FORMAT_COO = 0,
     // The matrix is stored in Coordinate (COO) format organized in Structure of Arrays (SoA) layout
     ACL_SPARSE_FORMAT_CSR,
@@ -131,21 +163,14 @@ typedef enum AclSparseFormat {
     // The matrix is stored in Sliced-Ellpack (Sliced-ELL) format
     ACL_SPARSE_FORMAT_BSR
     // The matrix is stored in Block Sparse Row (BSR) format
-} AclSparseFormat;
+} aclsparseFormat_t;
 
-/**
- * @brief 创建稀疏矩阵处理器。
- * @param handle IN/OUT, HOST，返回创建的稀疏矩阵处理器句柄。
- * @return AclSparseStatus，表示函数执行状态。
+/*
+ * NOTE: handle 的创建/销毁/stream 绑定统一使用下方的小写 aclsparse* 接口
+ * （aclsparseCreate / aclsparseDestroy / aclsparseSetStream / aclsparseGetStream）。
+ * 旧的 aclSparseCreate / aclSparseDestroy 与内部结构体 AclSparseHandlerInner 已废弃移除：
+ * 它们与 aclsparse* 使用的内部 handle 结构体布局不一致，混用会读到错误的 stream 字段。
  */
-AclSparseStatus aclSparseCreate(AclSparseHandler *handle);
-
-/**
- * @brief 销毁稀疏矩阵处理器。
- * @param handle IN, HOST, 稀疏矩阵处理器句柄。
- * @return 返回销毁操作的状态。
- */
-AclSparseStatus aclSparseDestroy(AclSparseHandler handle);
 
 /**
  * @brief 创建一个稠密向量。
@@ -154,17 +179,23 @@ AclSparseStatus aclSparseDestroy(AclSparseHandler handle);
  * @param size IN, HOST, 向量的大小。
  * @param values IN, DEVICE, 向量的值。
  * @param valueType IN, HOST, 值的数据类型。
- * @return AclSparseStatus 返回稀疏操作的状态。
+ * @return aclsparseStatus_t 返回稀疏操作的状态。
  */
-AclSparseStatus aclSparseCreateDnVec(AclSparseDnVecDesc *dnVecDescr, int64_t size, void *values, aclDataType valueType);
+aclsparseStatus_t aclSparseCreateDnVec(aclsparseDnVecDescr_t *dnVecDescr, int64_t size, void *values, aclDataType valueType);
+
+/**
+ * @brief 创建只读(const)稠密向量描述符。数据指针为 const。
+ */
+aclsparseStatus_t aclsparseCreateConstDnVec(aclsparseConstDnVecDescr_t *dnVecDescr, int64_t size,
+    const void *values, aclDataType valueType);
 
 /**
  * @brief 销毁稀疏向量描述符。
  *
  * @param dnVecDescr IN, HOST, 要销毁的稀疏向量描述符。
- * @return AclSparseStatus 返回执行状态，成功返回ACL_SPARSE_STATUS_SUCCESS。
+ * @return aclsparseStatus_t 返回执行状态，成功返回ACL_SPARSE_STATUS_SUCCESS。
  */
-AclSparseStatus aclSparseDestroyDnVec(AclSparseDnVecDesc dnVecDescr);
+aclsparseStatus_t aclSparseDestroyDnVec(aclsparseConstDnVecDescr_t dnVecDescr);
 
 /**
  * @brief 创建稀疏矩阵的CSR格式。
@@ -188,11 +219,18 @@ AclSparseStatus aclSparseDestroyDnVec(AclSparseDnVecDesc dnVecDescr);
  * @param idxBase IN, HOST, 索引的基值，可以是0或1。
  *                        0表示索引从0开始，1表示索引从1开始。
  * @param valueType IN, HOST, 非零元素的数据类型。
- * @return AclSparseStatus 返回执行状态，成功返回ACL_SPARSE_STATUS_SUCCESS。
+ * @return aclsparseStatus_t 返回执行状态，成功返回ACL_SPARSE_STATUS_SUCCESS。
  */
-AclSparseStatus aclSparseCreateCsr(AclSparseSpMatDesc *spMatDescr, int64_t rows, int64_t cols, int64_t nnz,
-    void *csrRowOffsets, void *csrColInd, void *csrValues, AclSparseIndexType csrRowOffsetsType,
-    AclSparseIndexType csrColIndType, AclSparseIndexBase idxBase, aclDataType valueType);
+aclsparseStatus_t aclsparseCreateCsr(aclsparseSpMatDescr_t *spMatDescr, int64_t rows, int64_t cols, int64_t nnz,
+    void *csrRowOffsets, void *csrColInd, void *csrValues, aclsparseIndexType_t csrRowOffsetsType,
+    aclsparseIndexType_t csrColIndType, aclsparseIndexBase_t idxBase, aclDataType valueType);
+
+/**
+ * @brief 创建只读(const)CSR 稀疏矩阵描述符。
+ */
+aclsparseStatus_t aclsparseCreateConstCsr(aclsparseConstSpMatDescr_t *spMatDescr, int64_t rows, int64_t cols, int64_t nnz,
+    const void *csrRowOffsets, const void *csrColInd, const void *csrValues, aclsparseIndexType_t csrRowOffsetsType,
+    aclsparseIndexType_t csrColIndType, aclsparseIndexBase_t idxBase, aclDataType valueType);
 
 /**
  * @brief 创建一个CSC（Compressed Sparse Column）稀疏矩阵。
@@ -208,43 +246,50 @@ AclSparseStatus aclSparseCreateCsr(AclSparseSpMatDesc *spMatDescr, int64_t rows,
  * @param cscRowIndType IN, HOST, 行索引数组的数据类型。
  * @param idxBase IN, HOST, 索引的基础值，通常为0或1。
  * @param valueType IN, HOST, 非零元素值的数据类型。
- * @return AclSparseStatus 返回执行状态，成功则为ACL_SPARSE_STATUS_SUCCESS。
+ * @return aclsparseStatus_t 返回执行状态，成功则为ACL_SPARSE_STATUS_SUCCESS。
  */
-AclSparseStatus aclSparseCreateCsc(AclSparseSpMatDesc *spMatDescr, int64_t rows, int64_t cols, int64_t nnz,
-    void *cscColOffsets, void *cscRowInd, void *cscValues, AclSparseIndexType cscColOffsetsType,
-    AclSparseIndexType cscRowIndType, AclSparseIndexBase idxBase, aclDataType valueType);
+aclsparseStatus_t aclsparseCreateCsc(aclsparseSpMatDescr_t *spMatDescr, int64_t rows, int64_t cols, int64_t nnz,
+    void *cscColOffsets, void *cscRowInd, void *cscValues, aclsparseIndexType_t cscColOffsetsType,
+    aclsparseIndexType_t cscRowIndType, aclsparseIndexBase_t idxBase, aclDataType valueType);
+
+/**
+ * @brief 创建只读(const)CSC 稀疏矩阵描述符。
+ */
+aclsparseStatus_t aclsparseCreateConstCsc(aclsparseConstSpMatDescr_t *spMatDescr, int64_t rows, int64_t cols, int64_t nnz,
+    const void *cscColOffsets, const void *cscRowInd, const void *cscValues, aclsparseIndexType_t cscColOffsetsType,
+    aclsparseIndexType_t cscRowIndType, aclsparseIndexBase_t idxBase, aclDataType valueType);
 
 /**
  * @brief 销毁稀疏矩阵对象。
  *
  * @param spMatDescr IN, HOST, 稀疏矩阵描述符，用于标识要销毁的稀疏矩阵对象。
- * @return AclSparseStatus 返回执行状态，若成功返回ACL_SPARSE_STATUS_SUCCESS。
+ * @return aclsparseStatus_t 返回执行状态，若成功返回ACL_SPARSE_STATUS_SUCCESS。
  */
-AclSparseStatus aclSparseDestroySpMat(AclSparseSpMatDesc spMatDescr);
+aclsparseStatus_t aclsparseDestroySpMat(aclsparseConstSpMatDescr_t spMatDescr);
 
 /**
  * @brief 获取稀疏矩阵与向量相乘（SpMV）操作所需的缓冲区大小。
  *
- * @param handle IN, HOST, AclSparseHandler类型，稀疏计算句柄。
- * @param op IN, HOST, AclSparseOp类型，稀疏操作类型。
+ * @param handle IN, HOST, aclsparseHandle_t类型，稀疏计算句柄。
+ * @param op IN, HOST, aclsparseOperation_t类型，稀疏操作类型。
  * @param alpha IN, HOST/DEVICE, 指向常量的指针，表示SpMV操作中的alpha参数。
- * @param mat IN, HOST, AclSparseSpMatDesc类型，稀疏矩阵描述符。
- * @param x IN, HOST, AclSparseDnVecDesc类型，输入向量x的描述符。
+ * @param mat IN, HOST, aclsparseSpMatDescr_t类型，稀疏矩阵描述符。
+ * @param x IN, HOST, aclsparseDnVecDescr_t类型，输入向量x的描述符。
  * @param beta IN, HOST/DEVICE, 指向常量的指针，表示SpMV操作中的beta参数。
- * @param y IN, HOST, AclSparseDnVecDesc类型，输出向量y的描述符。
+ * @param y IN, HOST, aclsparseDnVecDescr_t类型，输出向量y的描述符。
  * @param computeType IN, HOST, aclDataType类型，计算的数据类型。
- * @param alg IN, HOST, AclSparseSpmvAlg类型，SpMV算法类型。
+ * @param alg IN, HOST, aclsparseSpMVAlg_t类型，SpMV算法类型。
  * @param size IN, HOST, 指向size_t的指针，用于返回所需的缓冲区大小。
- * @return AclSparseStatus类型，表示函数执行状态。
+ * @return aclsparseStatus_t类型，表示函数执行状态。
  */
-AclSparseStatus aclSparseSpmvGetBufferSize(AclSparseHandler handle, AclSparseOp op, const void *alpha,
-    AclSparseSpMatDesc mat, AclSparseDnVecDesc x, const void *beta, AclSparseDnVecDesc y, aclDataType computeType,
-    AclSparseSpmvAlg alg, size_t *size);
+aclsparseStatus_t aclSparseSpmvGetBufferSize(aclsparseHandle_t handle, aclsparseOperation_t op, const void *alpha,
+    aclsparseConstSpMatDescr_t mat, aclsparseConstDnVecDescr_t x, const void *beta, aclsparseDnVecDescr_t y, aclDataType computeType,
+    aclsparseSpMVAlg_t alg, size_t *size);
 
 /**
  * @brief 对稀疏矩阵进行预处理，以便在后续的SpMV计算中使用。
  *
- * @param handle IN, HOST, AclSparseHandler类型的句柄，用于管理稀疏计算资源。
+ * @param handle IN, HOST, aclsparseHandle_t类型的句柄，用于管理稀疏计算资源。
  * @param op IN, HOST, 稀疏操作类型，定义了稀疏矩阵的计算方式。
  * @param alpha IN, HOST/DEVICE, 指向常量alpha的指针，用于缩放稀疏矩阵。
  * @param mat IN, HOST 稀疏矩阵的描述符，包含了矩阵的属性和数据。
@@ -255,11 +300,11 @@ AclSparseStatus aclSparseSpmvGetBufferSize(AclSparseHandler handle, AclSparseOp 
  * @param alg IN, HOST, SpMV计算的算法类型，定义了计算的具体实现方式。
  * @param buffer IN, DEVICE, 用于存储预处理结果的缓冲区指针。
  *
- * @return AclSparseStatus 返回预处理操作的状态，表示操作是否成功。
+ * @return aclsparseStatus_t 返回预处理操作的状态，表示操作是否成功。
  */
-AclSparseStatus aclSparseSpmvPreprocess(AclSparseHandler handle, AclSparseOp op, const void *alpha,
-    AclSparseSpMatDesc mat, AclSparseDnVecDesc x, const void *beta, AclSparseDnVecDesc y, aclDataType computeType,
-    AclSparseSpmvAlg alg, void *buffer);
+aclsparseStatus_t aclSparseSpmvPreprocess(aclsparseHandle_t handle, aclsparseOperation_t op, const void *alpha,
+    aclsparseConstSpMatDescr_t mat, aclsparseConstDnVecDescr_t x, const void *beta, aclsparseDnVecDescr_t y, aclDataType computeType,
+    aclsparseSpMVAlg_t alg, void *buffer);
 
 /**
  * @brief 稀疏矩阵向量乘法函数
@@ -274,13 +319,70 @@ AclSparseStatus aclSparseSpmvPreprocess(AclSparseHandler handle, AclSparseOp op,
  * @param computeType IN, HOST, 计算类型
  * @param alg IN, HOST, 稀疏矩阵向量乘法算法
  * @param buffer IN, DEVICE, 工作缓冲区指针
- * @return AclSparseStatus 返回状态
+ * @return aclsparseStatus_t 返回状态
  */
-AclSparseStatus aclSparseSpmv(AclSparseHandler handle, AclSparseOp op, const void *alpha, AclSparseSpMatDesc mat,
-    AclSparseDnVecDesc x, const void *beta, AclSparseDnVecDesc y, aclDataType computeType, AclSparseSpmvAlg alg,
+aclsparseStatus_t aclSparseSpmv(aclsparseHandle_t handle, aclsparseOperation_t op, const void *alpha, aclsparseConstSpMatDescr_t mat,
+    aclsparseConstDnVecDescr_t x, const void *beta, aclsparseDnVecDescr_t y, aclDataType computeType, aclsparseSpMVAlg_t alg,
     void *buffer);
 
-AclSparseStatus aclSparseSpmvShowWorkSpace(AclSparseHandler handle, void *buffer);
+aclsparseStatus_t aclSparseSpmvShowWorkSpace(aclsparseHandle_t handle, void *buffer);
+
+/**
+ * @brief 创建稠密矩阵描述符。
+ *
+ * 用于描述 SpMM 中的 B / C 稠密矩阵。
+ *
+ * @param dnMatDescr IN/OUT, HOST，输出的稠密矩阵描述符。
+ * @param rows       IN, HOST，矩阵的行数。
+ * @param cols       IN, HOST，矩阵的列数。
+ * @param ld         IN, HOST，leading dimension。行主序时需 >= cols；列主序时需 >= rows。
+ * @param values     IN, DEVICE，矩阵数据指针。
+ * @param valueType  IN, HOST，元素数据类型（V1 支持 ACL_FLOAT；后续扩展 ACL_FLOAT16 / ACL_INT8）。
+ * @param order      IN, HOST，布局：ACL_SPARSE_ORDER_ROW / ACL_SPARSE_ORDER_COL。
+ * @return aclsparseStatus_t
+ */
+aclsparseStatus_t aclsparseCreateDnMat(aclsparseDnMatDescr_t *dnMatDescr,
+    int64_t rows, int64_t cols, int64_t ld, void *values,
+    aclDataType valueType, aclsparseOrder_t order);
+
+/**
+ * @brief 创建只读(const)稠密矩阵描述符。
+ */
+aclsparseStatus_t aclsparseCreateConstDnMat(aclsparseConstDnMatDescr_t *dnMatDescr,
+    int64_t rows, int64_t cols, int64_t ld, const void *values,
+    aclDataType valueType, aclsparseOrder_t order);
+
+/**
+ * @brief 销毁稠密矩阵描述符。
+ */
+aclsparseStatus_t aclsparseDestroyDnMat(aclsparseConstDnMatDescr_t dnMatDescr);
+
+/**
+ * @brief 计算 SpMM 所需 workspace 字节数。
+ */
+aclsparseStatus_t aclsparseSpMMGetBufferSize(
+    aclsparseHandle_t handle, aclsparseOperation_t opA, aclsparseOperation_t opB,
+    const void *alpha, aclsparseConstSpMatDescr_t matA, aclsparseConstDnMatDescr_t matB,
+    const void *beta, aclsparseDnMatDescr_t matC, aclDataType computeType,
+    aclsparseSpMMAlg_t alg, size_t *size);
+
+/**
+ * @brief 对稀疏矩阵进行预处理，加速后续 SpMM 计算。
+ */
+aclsparseStatus_t aclsparseSpMMPreprocess(
+    aclsparseHandle_t handle, aclsparseOperation_t opA, aclsparseOperation_t opB,
+    const void *alpha, aclsparseConstSpMatDescr_t matA, aclsparseConstDnMatDescr_t matB,
+    const void *beta, aclsparseDnMatDescr_t matC, aclDataType computeType,
+    aclsparseSpMMAlg_t alg, void *buffer);
+
+/**
+ * @brief 稀疏矩阵-稠密矩阵乘法：C = alpha * op(A) * op(B) + beta * C
+ */
+aclsparseStatus_t aclsparseSpMM(
+    aclsparseHandle_t handle, aclsparseOperation_t opA, aclsparseOperation_t opB,
+    const void *alpha, aclsparseConstSpMatDescr_t matA, aclsparseConstDnMatDescr_t matB,
+    const void *beta, aclsparseDnMatDescr_t matC, aclDataType computeType,
+    aclsparseSpMMAlg_t alg, void *buffer);
 
 /**
  * @brief 创建 ops-sparse handle
@@ -294,7 +396,7 @@ AclSparseStatus aclSparseSpmvShowWorkSpace(AclSparseHandler handle, void *buffer
  *         ACL_SPARSE_STATUS_INVALID_VALUE *handle 非空
  *         ACL_SPARSE_STATUS_ALLOC_FAILED 内存分配失败
  */
-AclSparseStatus aclsparseCreate(aclsparseHandle_t *handle);
+aclsparseStatus_t aclsparseCreate(aclsparseHandle_t *handle);
 
 /**
  * @brief 销毁 ops-sparse handle
@@ -305,7 +407,7 @@ AclSparseStatus aclsparseCreate(aclsparseHandle_t *handle);
  * @return ACL_SPARSE_STATUS_SUCCESS 成功
  *         ACL_SPARSE_STATUS_HANDLE_IS_NULLPTR handle 为空
  */
-AclSparseStatus aclsparseDestroy(aclsparseHandle_t handle);
+aclsparseStatus_t aclsparseDestroy(aclsparseHandle_t handle);
 
 /**
  * @brief 设置 handle 的 stream
@@ -314,7 +416,7 @@ AclSparseStatus aclsparseDestroy(aclsparseHandle_t handle);
  * @return ACL_SPARSE_STATUS_SUCCESS 成功
  *         ACL_SPARSE_STATUS_HANDLE_IS_NULLPTR handle 为空
  */
-AclSparseStatus aclsparseSetStream(aclsparseHandle_t handle, aclrtStream stream);
+aclsparseStatus_t aclsparseSetStream(aclsparseHandle_t handle, aclrtStream stream);
 
 /**
  * @brief 获取 handle 的 stream
@@ -324,7 +426,7 @@ AclSparseStatus aclsparseSetStream(aclsparseHandle_t handle, aclrtStream stream)
  *         ACL_SPARSE_STATUS_HANDLE_IS_NULLPTR handle 为空
  *         ACL_SPARSE_STATUS_INVALID_VALUE stream 输出参数为空
  */
-AclSparseStatus aclsparseGetStream(aclsparseHandle_t handle, aclrtStream *stream);
+aclsparseStatus_t aclsparseGetStream(aclsparseHandle_t handle, aclrtStream *stream);
 
 /**
  * @brief 获取 ops-sparse 版本号
@@ -336,7 +438,7 @@ AclSparseStatus aclsparseGetStream(aclsparseHandle_t handle, aclrtStream *stream
  * @return ACL_SPARSE_STATUS_SUCCESS 成功
  *         ACL_SPARSE_STATUS_INVALID_VALUE 参数无效
  */
-AclSparseStatus aclsparseGetVersion(aclsparseHandle_t handle, int *version);
+aclsparseStatus_t aclsparseGetVersion(aclsparseHandle_t handle, int *version);
 
 #ifdef __cplusplus
 }

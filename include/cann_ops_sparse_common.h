@@ -25,38 +25,10 @@
         }                                                                                   \
     } while (0);
 
-#ifdef __cplusplus
-extern "C" {
-#endif
-
-typedef struct AclSparseSpMatDescInner {
-    uint64_t isDoPreProgress;
-    AclSparseFormat format;
-    uint64_t rows;
-    uint64_t cols;
-    uint64_t nnz;
-    void *ptrs;
-    void *idxs;
-    void *values;
-    AclSparseIndexBase baseType;
-    AclSparseIndexType ptrType;
-    AclSparseIndexType IdxType;
-    aclDataType valueType;
-} AclSparseSpMatDescInner;
-
-typedef struct AclSparseDnVecDescInner {
-    uint64_t nums;
-    void *values;
-    aclDataType valueType;
-} AclSparseDnVecDescInner;
-
-typedef struct AclSparseHandlerInner {
-    int id;
-    aclrtStream stream;
-} AclSparseHandlerInner;
-
-#ifdef __cplusplus
-}
-#endif
+/*
+ * 描述符内部结构体（aclsparseSpMatDescr / aclsparseDnVecDescr /
+ * aclsparseDnMatDescr）已迁移到内部头 src/common/aclsparse_descr_internal.h，
+ * 对外只暴露不透明的 struct* 句柄，此处不再定义。
+ */
 
 #endif

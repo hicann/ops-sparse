@@ -24,18 +24,18 @@
 namespace {
 
 /**
- * @brief 将对外 void* 句柄安全转换为内部 _aclsparse_handle*。
+ * @brief 将对外 void* 句柄安全转换为内部 aclsparseContext*。
  */
-inline _aclsparse_handle *ToInternal(aclsparseHandle_t handle)
+inline aclsparseContext *ToInternal(aclsparseHandle_t handle)
 {
-    return reinterpret_cast<_aclsparse_handle *>(handle);
+    return reinterpret_cast<aclsparseContext *>(handle);
 }
 
 } // namespace
 
 extern "C" {
 
-AclSparseStatus aclsparseCreate(aclsparseHandle_t *handle)
+aclsparseStatus_t aclsparseCreate(aclsparseHandle_t *handle)
 {
     if (handle == nullptr) {
         return ACL_SPARSE_STATUS_HANDLE_IS_NULLPTR;
@@ -46,7 +46,7 @@ AclSparseStatus aclsparseCreate(aclsparseHandle_t *handle)
         return ACL_SPARSE_STATUS_INVALID_VALUE;
     }
 
-    auto *h = new (std::nothrow) _aclsparse_handle();
+    auto *h = new (std::nothrow) aclsparseContext();
     if (h == nullptr) {
         return ACL_SPARSE_STATUS_ALLOC_FAILED;
     }
@@ -57,7 +57,7 @@ AclSparseStatus aclsparseCreate(aclsparseHandle_t *handle)
     return ACL_SPARSE_STATUS_SUCCESS;
 }
 
-AclSparseStatus aclsparseDestroy(aclsparseHandle_t handle)
+aclsparseStatus_t aclsparseDestroy(aclsparseHandle_t handle)
 {
     if (handle == nullptr) {
         return ACL_SPARSE_STATUS_HANDLE_IS_NULLPTR;
@@ -72,7 +72,7 @@ AclSparseStatus aclsparseDestroy(aclsparseHandle_t handle)
     return ACL_SPARSE_STATUS_SUCCESS;
 }
 
-AclSparseStatus aclsparseSetStream(aclsparseHandle_t handle, aclrtStream stream)
+aclsparseStatus_t aclsparseSetStream(aclsparseHandle_t handle, aclrtStream stream)
 {
     if (handle == nullptr) {
         return ACL_SPARSE_STATUS_HANDLE_IS_NULLPTR;
@@ -83,7 +83,7 @@ AclSparseStatus aclsparseSetStream(aclsparseHandle_t handle, aclrtStream stream)
     return ACL_SPARSE_STATUS_SUCCESS;
 }
 
-AclSparseStatus aclsparseGetStream(aclsparseHandle_t handle, aclrtStream *stream)
+aclsparseStatus_t aclsparseGetStream(aclsparseHandle_t handle, aclrtStream *stream)
 {
     if (handle == nullptr) {
         return ACL_SPARSE_STATUS_HANDLE_IS_NULLPTR;
@@ -97,7 +97,7 @@ AclSparseStatus aclsparseGetStream(aclsparseHandle_t handle, aclrtStream *stream
     return ACL_SPARSE_STATUS_SUCCESS;
 }
 
-AclSparseStatus aclsparseGetVersion(aclsparseHandle_t handle, int *version)
+aclsparseStatus_t aclsparseGetVersion(aclsparseHandle_t handle, int *version)
 {
     if (version == nullptr) {
         return ACL_SPARSE_STATUS_INVALID_VALUE;

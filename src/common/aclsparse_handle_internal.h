@@ -47,7 +47,7 @@
  * 该结构体定义仅在实现文件中可见，对外部用户完全不可见。
  * 对外接口使用 void* / void** 作为 handle 类型。
  */
-struct _aclsparse_handle {
+struct aclsparseContext {
     /* ========== Stream ========== */
     aclrtStream stream = nullptr;     ///< 当前 stream，用于 kernel 执行
 };

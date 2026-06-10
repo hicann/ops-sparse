@@ -17,7 +17,7 @@
 
 namespace AclSparse {
 
-AclSparseStatus aclsparseLoggerSetLevel(aclsparseLogLevel_t logLevel)
+aclsparseStatus_t aclsparseLoggerSetLevel(aclsparseLogLevel_t logLevel)
 {
     switch (logLevel) {
         case aclsparseLogLevel_t::LOG_LEVEL_INFO:
@@ -33,7 +33,7 @@ AclSparseStatus aclsparseLoggerSetLevel(aclsparseLogLevel_t logLevel)
             dlog_setlevel(OP, DLOG_INFO, 1);
             break;
     }
-    return AclSparseStatus::ACL_SPARSE_STATUS_SUCCESS;
+    return aclsparseStatus_t::ACL_SPARSE_STATUS_SUCCESS;
 }
 
 

@@ -29,7 +29,7 @@
 
 #define CHECK_ACL_SPARSE(x)                                                                       \
     do {                                                                                          \
-        AclSparseStatus __ret = x;                                                                \
+        aclsparseStatus_t __ret = x;                                                                \
         if (__ret != ACL_SPARSE_STATUS_SUCCESS) {                                                 \
             std::cerr << __FILE__ << ":" << __LINE__ << " aclSparseError:" << __ret << std::endl; \
         }                                                                                         \
@@ -193,12 +193,12 @@ int main(void)
         ACL_MEMCPY_HOST_TO_DEVICE))
     //--------------------------------------------------------------------------
     // aclSparse APIs
-    AclSparseHandler handle = NULL;
-    AclSparseSpMatDesc matA;
-    AclSparseDnVecDesc vecX, vecY;
+    aclsparseHandle_t handle = NULL;
+    aclsparseSpMatDescr_t matA;
+    aclsparseDnVecDescr_t vecX, vecY;
     void *dBuffer = NULL;
     size_t bufferSize = 0;
-    CHECK_ACL_SPARSE(aclSparseCreate(&handle))
+    CHECK_ACL_SPARSE(aclsparseCreate(&handle))
     for (uint64_t i = 0; i < 10; i++) {
         printf("%f ", hA_values[i]);
     }
@@ -212,7 +212,7 @@ int main(void)
 
     start = clock();
     // Create sparse matrix A in CSR format
-    CHECK_ACL_SPARSE(aclSparseCreateCsr(&matA,
+    CHECK_ACL_SPARSE(aclsparseCreateCsr(&matA,
         A_num_rows,
         A_num_cols,
         A_nnz,
@@ -225,7 +225,7 @@ int main(void)
         ACL_FLOAT))
     end = clock();
     double time_aclSparseCreateCsr = (double)(end - start) / CLOCKS_PER_SEC;
-    printf("Time for aclSparseCreateCsr: %f sec\n", time_aclSparseCreateCsr);
+    printf("Time for aclsparseCreateCsr: %f sec\n", time_aclSparseCreateCsr);
 
     start = clock();
     // Create dense vector X
@@ -285,10 +285,10 @@ int main(void)
     double time_aclSparseSpMV = (double)(end - start) / CLOCKS_PER_SEC;
 
     // destroy matrix/vector descriptors
-    CHECK_ACL_SPARSE(aclSparseDestroySpMat(matA))
+    CHECK_ACL_SPARSE(aclsparseDestroySpMat(matA))
     CHECK_ACL_SPARSE(aclSparseDestroyDnVec(vecX))
     CHECK_ACL_SPARSE(aclSparseDestroyDnVec(vecY))
-    CHECK_ACL_SPARSE(aclSparseDestroy(handle))
+    CHECK_ACL_SPARSE(aclsparseDestroy(handle))
 
     start = clock();
     //--------------------------------------------------------------------------

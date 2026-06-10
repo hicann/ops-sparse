@@ -13,13 +13,15 @@
 
 | 接口名 | 说明 |
 |--------|------|
-| [aclSparseCreate](#aclsparsecreate) | 创建稀疏矩阵处理器 |
-| [aclSparseDestroy](#aclsparsedestroy) | 销毁稀疏矩阵处理器 |
+| [aclsparseCreate](#aclsparsecreate) | 创建稀疏矩阵处理器 |
+| [aclsparseDestroy](#aclsparsedestroy) | 销毁稀疏矩阵处理器 |
+| [aclsparseSetStream](#aclsparsesetstream) | 设置处理器使用的 stream |
+| [aclsparseGetStream](#aclsparsegetstream) | 获取处理器当前的 stream |
 | [aclSparseCreateDnVec](#aclsparsecreatednvec) | 创建稠密向量 |
 | [aclSparseDestroyDnVec](#aclsparsedestroydnvec) | 销毁稀疏向量描述符 |
-| [aclSparseCreateCsr](#aclsparsecreatecsr) | 创建CSR格式稀疏矩阵 |
-| [aclSparseCreateCsc](#aclsparsecreatecsc) | 创建CSC格式稀疏矩阵 |
-| [aclSparseDestroySpMat](#aclsparsedestroyspmat) | 销毁稀疏矩阵对象 |
+| [aclsparseCreateCsr](#aclsparsecreatecsr) | 创建CSR格式稀疏矩阵 |
+| [aclsparseCreateCsc](#aclsparsecreatecsc) | 创建CSC格式稀疏矩阵 |
+| [aclsparseDestroySpMat](#aclsparsedestroyspmat) | 销毁稀疏矩阵对象 |
 | [aclSparseSpmvGetBufferSize](#aclsparsespmvgetbuffersize) | 获取SpMV缓冲区大小 |
 | [aclSparseSpmvPreprocess](#aclsparsespmvpreprocess) | SpMV预处理 |
 | [aclSparseSpmv](#aclsparsespmv) | 稀疏矩阵向量乘法 |
@@ -27,17 +29,17 @@
 
 ## 接口详情
 
-### aclSparseCreate
+### aclsparseCreate
 
 ```c
-AclSparseStatus aclSparseCreate(AclSparseHandler *handle);
+aclsparseStatus_t aclsparseCreate(aclsparseHandle_t *handle);
 ```
 
-**功能**：创建稀疏矩阵处理器。
+**功能**：创建稀疏矩阵处理器。处理器的 stream 默认为 `nullptr`（默认 stream），如需指定请调用 `aclsparseSetStream`。
 
 **参数说明**：
 
-- `handle`（IN/OUT）：HOST，返回创建的稀疏矩阵处理器句柄。
+- `handle`（IN/OUT）：HOST，返回创建的稀疏矩阵处理器句柄。调用前 `*handle` 必须为 `nullptr`。
 
 **返回值**：
 
@@ -46,13 +48,13 @@ AclSparseStatus aclSparseCreate(AclSparseHandler *handle);
 
 ---
 
-### aclSparseDestroy
+### aclsparseDestroy
 
 ```c
-AclSparseStatus aclSparseDestroy(AclSparseHandler handle);
+aclsparseStatus_t aclsparseDestroy(aclsparseHandle_t handle);
 ```
 
-**功能**：销毁稀疏矩阵处理器。
+**功能**：销毁稀疏矩阵处理器。stream 由用户托管，此接口不会销毁 stream。
 
 **参数说明**：
 
@@ -65,11 +67,51 @@ AclSparseStatus aclSparseDestroy(AclSparseHandler handle);
 
 ---
 
+### aclsparseSetStream
+
+```c
+aclsparseStatus_t aclsparseSetStream(aclsparseHandle_t handle, aclrtStream stream);
+```
+
+**功能**：设置处理器后续算子执行所使用的 stream。
+
+**参数说明**：
+
+- `handle`（IN）：稀疏矩阵处理器句柄。
+- `stream`（IN）：要绑定的 stream，`nullptr` 表示使用默认 stream。
+
+**返回值**：
+
+- `ACL_SPARSE_STATUS_SUCCESS`：成功
+- 其他值：失败
+
+---
+
+### aclsparseGetStream
+
+```c
+aclsparseStatus_t aclsparseGetStream(aclsparseHandle_t handle, aclrtStream *stream);
+```
+
+**功能**：获取处理器当前绑定的 stream。
+
+**参数说明**：
+
+- `handle`（IN）：稀疏矩阵处理器句柄。
+- `stream`（OUT）：返回当前 stream。
+
+**返回值**：
+
+- `ACL_SPARSE_STATUS_SUCCESS`：成功
+- 其他值：失败
+
+---
+
 ### aclSparseCreateDnVec
 
 ```c
-AclSparseStatus aclSparseCreateDnVec(
-    AclSparseDnVecDesc *dnVecDescr,
+aclsparseStatus_t aclSparseCreateDnVec(
+    aclsparseDnVecDescr_t *dnVecDescr,
     int64_t size,
     void *values,
     aclDataType valueType
@@ -95,7 +137,7 @@ AclSparseStatus aclSparseCreateDnVec(
 ### aclSparseDestroyDnVec
 
 ```c
-AclSparseStatus aclSparseDestroyDnVec(AclSparseDnVecDesc dnVecDescr);
+aclsparseStatus_t aclSparseDestroyDnVec(aclsparseConstDnVecDescr_t dnVecDescr);
 ```
 
 **功能**：销毁稀疏向量描述符。
@@ -111,20 +153,20 @@ AclSparseStatus aclSparseDestroyDnVec(AclSparseDnVecDesc dnVecDescr);
 
 ---
 
-### aclSparseCreateCsr
+### aclsparseCreateCsr
 
 ```c
-AclSparseStatus aclSparseCreateCsr(
-    AclSparseSpMatDesc *spMatDescr,
+aclsparseStatus_t aclsparseCreateCsr(
+    aclsparseSpMatDescr_t *spMatDescr,
     int64_t rows,
     int64_t cols,
     int64_t nnz,
     void *csrRowOffsets,
     void *csrColInd,
     void *csrValues,
-    AclSparseIndexType csrRowOffsetsType,
-    AclSparseIndexType csrColIndType,
-    AclSparseIndexBase idxBase,
+    aclsparseIndexType_t csrRowOffsetsType,
+    aclsparseIndexType_t csrColIndType,
+    aclsparseIndexBase_t idxBase,
     aclDataType valueType
 );
 ```
@@ -152,20 +194,20 @@ AclSparseStatus aclSparseCreateCsr(
 
 ---
 
-### aclSparseCreateCsc
+### aclsparseCreateCsc
 
 ```c
-AclSparseStatus aclSparseCreateCsc(
-    AclSparseSpMatDesc *spMatDescr,
+aclsparseStatus_t aclsparseCreateCsc(
+    aclsparseSpMatDescr_t *spMatDescr,
     int64_t rows,
     int64_t cols,
     int64_t nnz,
     void *cscColOffsets,
     void *cscRowInd,
     void *cscValues,
-    AclSparseIndexType cscColOffsetsType,
-    AclSparseIndexType cscRowIndType,
-    AclSparseIndexBase idxBase,
+    aclsparseIndexType_t cscColOffsetsType,
+    aclsparseIndexType_t cscRowIndType,
+    aclsparseIndexBase_t idxBase,
     aclDataType valueType
 );
 ```
@@ -193,10 +235,10 @@ AclSparseStatus aclSparseCreateCsc(
 
 ---
 
-### aclSparseDestroySpMat
+### aclsparseDestroySpMat
 
 ```c
-AclSparseStatus aclSparseDestroySpMat(AclSparseSpMatDesc spMatDescr);
+aclsparseStatus_t aclsparseDestroySpMat(aclsparseConstSpMatDescr_t spMatDescr);
 ```
 
 **功能**：销毁稀疏矩阵对象。
@@ -212,19 +254,42 @@ AclSparseStatus aclSparseDestroySpMat(AclSparseSpMatDesc spMatDescr);
 
 ---
 
+### 只读(const)描述符构造接口
+
+只读(const)构造接口：数据指针为 `const`，构造出的描述符是 `const` 变体，只能传给接收 `const` 形参的接口（如 SpMV/SpMM 的输入 `mat`/`matA`/`x`/`matB`）。销毁接口（`aclSparseDestroyDnVec` / `aclsparseDestroySpMat` / `aclsparseDestroyDnMat`）统一接收 `const` 变体，因此 const 与非 const 描述符都可销毁。
+
+```c
+aclsparseStatus_t aclsparseCreateConstDnVec(aclsparseConstDnVecDescr_t *dnVecDescr, int64_t size,
+    const void *values, aclDataType valueType);
+
+aclsparseStatus_t aclsparseCreateConstCsr(aclsparseConstSpMatDescr_t *spMatDescr, int64_t rows, int64_t cols, int64_t nnz,
+    const void *csrRowOffsets, const void *csrColInd, const void *csrValues, aclsparseIndexType_t csrRowOffsetsType,
+    aclsparseIndexType_t csrColIndType, aclsparseIndexBase_t idxBase, aclDataType valueType);
+
+aclsparseStatus_t aclsparseCreateConstCsc(aclsparseConstSpMatDescr_t *spMatDescr, int64_t rows, int64_t cols, int64_t nnz,
+    const void *cscColOffsets, const void *cscRowInd, const void *cscValues, aclsparseIndexType_t cscColOffsetsType,
+    aclsparseIndexType_t cscRowIndType, aclsparseIndexBase_t idxBase, aclDataType valueType);
+
+aclsparseStatus_t aclsparseCreateConstDnMat(aclsparseConstDnMatDescr_t *dnMatDescr,
+    int64_t rows, int64_t cols, int64_t ld, const void *values,
+    aclDataType valueType, aclsparseOrder_t order);
+```
+
+---
+
 ### aclSparseSpmvGetBufferSize
 
 ```c
-AclSparseStatus aclSparseSpmvGetBufferSize(
-    AclSparseHandler handle,
-    AclSparseOp op,
+aclsparseStatus_t aclSparseSpmvGetBufferSize(
+    aclsparseHandle_t handle,
+    aclsparseOperation_t op,
     const void *alpha,
-    AclSparseSpMatDesc mat,
-    AclSparseDnVecDesc x,
+    aclsparseConstSpMatDescr_t mat,
+    aclsparseConstDnVecDescr_t x,
     const void *beta,
-    AclSparseDnVecDesc y,
+    aclsparseDnVecDescr_t y,
     aclDataType computeType,
-    AclSparseSpmvAlg alg,
+    aclsparseSpMVAlg_t alg,
     size_t *size
 );
 ```
@@ -254,16 +319,16 @@ AclSparseStatus aclSparseSpmvGetBufferSize(
 ### aclSparseSpmvPreprocess
 
 ```c
-AclSparseStatus aclSparseSpmvPreprocess(
-    AclSparseHandler handle,
-    AclSparseOp op,
+aclsparseStatus_t aclSparseSpmvPreprocess(
+    aclsparseHandle_t handle,
+    aclsparseOperation_t op,
     const void *alpha,
-    AclSparseSpMatDesc mat,
-    AclSparseDnVecDesc x,
+    aclsparseConstSpMatDescr_t mat,
+    aclsparseConstDnVecDescr_t x,
     const void *beta,
-    AclSparseDnVecDesc y,
+    aclsparseDnVecDescr_t y,
     aclDataType computeType,
-    AclSparseSpmvAlg alg,
+    aclsparseSpMVAlg_t alg,
     void *buffer
 );
 ```
@@ -293,16 +358,16 @@ AclSparseStatus aclSparseSpmvPreprocess(
 ### aclSparseSpmv
 
 ```c
-AclSparseStatus aclSparseSpmv(
-    AclSparseHandler handle,
-    AclSparseOp op,
+aclsparseStatus_t aclSparseSpmv(
+    aclsparseHandle_t handle,
+    aclsparseOperation_t op,
     const void *alpha,
-    AclSparseSpMatDesc mat,
-    AclSparseDnVecDesc x,
+    aclsparseConstSpMatDescr_t mat,
+    aclsparseConstDnVecDescr_t x,
     const void *beta,
-    AclSparseDnVecDesc y,
+    aclsparseDnVecDescr_t y,
     aclDataType computeType,
-    AclSparseSpmvAlg alg,
+    aclsparseSpMVAlg_t alg,
     void *buffer
 );
 ```
@@ -332,7 +397,7 @@ AclSparseStatus aclSparseSpmv(
 ### aclSparseSpmvShowWorkSpace
 
 ```c
-AclSparseStatus aclSparseSpmvShowWorkSpace(AclSparseHandler handle, void *buffer);
+aclsparseStatus_t aclSparseSpmvShowWorkSpace(aclsparseHandle_t handle, void *buffer);
 ```
 
 **功能**：显示SpMV工作空间信息。
@@ -351,7 +416,7 @@ AclSparseStatus aclSparseSpmvShowWorkSpace(AclSparseHandler handle, void *buffer
 
 ## 枚举说明
 
-### AclSparseOp
+### aclsparseOperation_t
 
 稀疏操作类型枚举：
 
@@ -361,7 +426,7 @@ AclSparseStatus aclSparseSpmvShowWorkSpace(AclSparseHandler handle, void *buffer
 | `ACL_SPARSE_OP_TRANSPOSE` | 转置操作 |
 | `ACL_SPARSE_OP_CONJUGATE_TRANSPOSE` | 共轭转置操作 |
 
-### AclSparseStatus
+### aclsparseStatus_t
 
 返回状态枚举：
 
@@ -378,7 +443,7 @@ AclSparseStatus aclSparseSpmvShowWorkSpace(AclSparseHandler handle, void *buffer
 | `ACL_SPARSE_STATUS_NOT_SUPPORTED` | 当前不支持该操作或数据类型组合 |
 | `ACL_SPARSE_STATUS_INSUFFICIENT_RESOURCES` | 资源不足 |
 
-### AclSparseSpmvAlg
+### aclsparseSpMVAlg_t
 
 SpMV算法枚举：
 
@@ -391,7 +456,7 @@ SpMV算法枚举：
 | `ACL_SPARSE_SPMV_CSR_ALG2` | CSR/CSC格式确定性算法 |
 | `ACL_SPARSE_SPMV_SELL_ALG1` | SELL格式默认算法 |
 
-### AclSparseIndexType
+### aclsparseIndexType_t
 
 索引类型枚举：
 
@@ -400,7 +465,7 @@ SpMV算法枚举：
 | `ACL_SPARSE_INDEX_32I` | 32位无符号整数 [0, 2^31 - 1] |
 | `ACL_SPARSE_INDEX_64I` | 64位无符号整数 [0, 2^63 - 1] |
 
-### AclSparseIndexBase
+### aclsparseIndexBase_t
 
 索引基值枚举：
 
@@ -409,7 +474,7 @@ SpMV算法枚举：
 | `ACL_SPARSE_INDEX_BASE_ZERO` | 索引从0开始（C语言兼容） |
 | `ACL_SPARSE_INDEX_BASE_ONE` | 索引从1开始（Fortran兼容） |
 
-### AclSparseFormat
+### aclsparseFormat_t
 
 稀疏矩阵格式枚举：
 
@@ -431,19 +496,20 @@ aclInit(nullptr);
 aclrtSetDevice(deviceId);
 aclrtCreateStream(&stream);
 
-// 创建稀疏矩阵处理器
-AclSparseHandler handle;
-aclSparseCreate(&handle);
+// 创建稀疏矩阵处理器并绑定 stream
+aclsparseHandle_t handle = nullptr;
+aclsparseCreate(&handle);
+aclsparseSetStream(handle, stream);
 
 // 创建CSR格式稀疏矩阵
-AclSparseSpMatDesc matA;
-aclSparseCreateCsr(&matA, rows, cols, nnz,
+aclsparseSpMatDescr_t matA;
+aclsparseCreateCsr(&matA, rows, cols, nnz,
     dA_csrOffsets, dA_columns, dA_values,
     ACL_SPARSE_INDEX_32I, ACL_SPARSE_INDEX_32I,
     ACL_SPARSE_INDEX_BASE_ZERO, ACL_FLOAT);
 
 // 创建稠密向量
-AclSparseDnVecDesc vecX, vecY;
+aclsparseDnVecDescr_t vecX, vecY;
 aclSparseCreateDnVec(&vecX, cols, dX, ACL_FLOAT);
 aclSparseCreateDnVec(&vecY, rows, dY, ACL_FLOAT);
 
@@ -464,10 +530,10 @@ aclSparseSpmv(handle, ACL_SPARSE_OP_NON_TRANSPOSE,
     ACL_FLOAT, ACL_SPARSE_SPMV_ALG_CSR_ALG1, dBuffer);
 
 // 销毁资源
-aclSparseDestroySpMat(matA);
+aclsparseDestroySpMat(matA);
 aclSparseDestroyDnVec(vecX);
 aclSparseDestroyDnVec(vecY);
-aclSparseDestroy(handle);
+aclsparseDestroy(handle);
 
 // 清理ACL
 aclrtFree(dBuffer);

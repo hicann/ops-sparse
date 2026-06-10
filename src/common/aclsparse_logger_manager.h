@@ -27,7 +27,7 @@ typedef enum aclsparseLogLevel {
     LOG_LEVEL_ERROR = 2,
 } aclsparseLogLevel_t;
 
-AclSparseStatus aclsparseLoggerSetLevel(aclsparseLogLevel_t logLevel);
+aclsparseStatus_t aclsparseLoggerSetLevel(aclsparseLogLevel_t logLevel);
 
 }
 

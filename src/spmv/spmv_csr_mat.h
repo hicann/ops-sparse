@@ -15,10 +15,11 @@
 #include "spmv.h"
 #include "cann_ops_sparse.h"
 #include "cann_ops_sparse_common.h"
+#include "aclsparse_descr_internal.h"
 
 class SpmvCsrMat {
 public:
-    SpmvCsrMat(AclSparseSpMatDescInner *inner) : rows(inner->rows), cols(inner->cols), nnz(inner->nnz), matDesc(inner)
+    SpmvCsrMat(aclsparseSpMatDescr *inner) : rows(inner->rows), cols(inner->cols), nnz(inner->nnz), matDesc(inner)
     {
         // 支持 CSC 并且 transpose的格式
         if (inner->format == ACL_SPARSE_FORMAT_CSC) {
@@ -48,7 +49,7 @@ private:
     float *values;
     uint32_t *idxs;
     uint32_t *ptrs;
-    AclSparseSpMatDescInner *matDesc;
+    aclsparseSpMatDescr *matDesc;
 };
 
 #endif
