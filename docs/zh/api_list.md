@@ -541,3 +541,8 @@ aclrtDestroyStream(stream);
 aclrtResetDevice(deviceId);
 aclFinalize();
 ```
+
+## 备注
+
+- 接口能力与属性支持范围以当前实现版本为准，详细限制请参考各算子目录下的README文档（如`test/spmv/README.md`）及头文件内注释。
+- 若文档描述与头文件声明不一致，请**以头文件声明与实际实现行为为准**。

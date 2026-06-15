@@ -71,7 +71,7 @@ Test Summary:
 
 ### 1. 修改Kernel实现
 
-找到Spmv算子的核心kernel实现文件`sparse/src/spmv_kernel.cpp`，尝试修改算子中的VectorPostComputor操作：
+找到Spmv算子的核心kernel实现文件`src/spmv/spmv_kernel.cpp`，尝试修改算子中的VectorPostComputor操作：
 
 ```cpp
     __aicore__ inline void VectorPostComputor(
@@ -140,7 +140,7 @@ Test Summary:
 
 算子如果出现执行失败、精度异常等问题，添加打印进行问题分析和定位。
 
-请在`sparse/src/spmv_kernel.cpp`中进行代码修改。
+请在`src/spmv/spmv_kernel.cpp`中进行代码修改。
 
 * **printf**
 

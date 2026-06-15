@@ -8,42 +8,39 @@
 
 ops-sparse是[CANN](https://hiascend.com/software/cann) （Compute Architecture for Neural Networks）算子库中提供高性能稀疏矩阵计算的算子库，专注于优化稀疏矩阵的计算效率。
 
-## ⚡️快速入门
+## 🛠️环境准备
 
-若您希望**从零到一快速体验**项目能力，请访问下述简易教程。
+[环境部署](docs/zh/install/quick_install.md)是体验本项目能力的前提，请先完成NPU驱动、CANN包安装等，确保环境正常。
 
-1. [环境部署](docs/zh/install/quick_install.md)：介绍基础环境搭建，包括软件包和三方依赖的获取和安装、源码下载等。
+> **说明**：本项目仅支持CANN 8.5.0及后续版本，源码版本与CANN版本配套关系参见[release仓库](https://gitcode.com/cann/release-management)。
 
-   > **说明**：本步骤是QuickStart和各类教程的操作前提，请先完成基础环境搭建。
-2. [QuickStart](docs/QUICKSTART.md)：提供快速上手本项目能力的指南，包括编译部署、算子调用/开发/调试等核心能力。
+## ⬇️源码下载
+
+环境准备好后，下载与CANN版本配套的分支源码，命令如下，\$\{tag\_version\}替换为分支标签名。
+
+> 说明：若环境中已存在配套分支源码，**可跳过本步骤**，例如CANNLab默认已提供最新商发版CANN对应的源码。
+
+```bash
+git clone -b ${tag_version} https://gitcode.com/cann/ops-sparse.git
+```
+
+说明：对于CANNLab云开发环境，已默认提供最新商发CANN版本配套的源码，如需获取其他版本源码，参考上述命令获取。
 
 ## 📖学习教程
 
-若您已学习**环境部署和QuickStart**，对本项目有一定认知，并希望**深入了解和体验项目**，请访问下述详细教程。
-
-1. [接口列表](docs/zh/api_list.md)：提供全量API信息，方便您查看aclsparse接口的分类和功能。
+- [快速入门](docs/QUICKSTART.md)：从零开始快速体验项目核心基础能力，涵盖源码编译、算子调用、开发与调试等操作。
+- [接口列表](docs/zh/api_list.md)：提供全量API信息，方便您查看aclsparse接口的分类和功能。
 
 ## 🔍目录结构
 
-ops-sparse仓关键目录结构如下。
+ops-sparse仓关键目录结构请参见[目录结构](docs/zh/install/dir_structure.md)。
 
-```txt
-ops-sparse
-├── build          //可存放构建生成的文件
-├── docs           //文档文件
-├── example        //算子调用示例代码，包含可直接运行的Demo
-├── include        //存放公共头文件
-├── scripts        //脚本文件存放目录
-├── src            //主体源代码目录
-│   ├── common     //初始化、上下文管理等通用代码
-│   ├── spmv       //spmv算子实现
-│   ├──  ...       //其他算子实现
-│   └── CMakeLists.txt
-├── tests          //测试代码
-```
+> **说明**：当前算子调用样例位于`test/`目录下（如`test/spmv/spmv_test.cpp`），`examples/`为预留目录。各算子的详细调用说明可参考`test/<算子名>/README.md`。
 
 ## 💬相关信息
 
+- [目录结构](docs/zh/install/dir_structure.md)
+- [接口列表](docs/zh/api_list.md)
 - [贡献指南](CONTRIBUTING.md)
 - [安全声明](SECURITY.md)
 - [许可证](LICENSE)
