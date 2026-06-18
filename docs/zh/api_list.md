@@ -2,7 +2,7 @@
 
 ## 使用说明
 
-为方便调用稀疏算子，提供一套基于C的API（以aclSparse为前缀API），主要用于稀疏矩阵运算场景。该API提供稀疏矩阵与向量的乘法（SpMV）等操作。
+为方便调用稀疏算子，提供一套基于C的API（以aclSparse为前缀API），主要用于稀疏矩阵运算场景。
 
 调用稀疏算子API时，需引用依赖的头文件和库文件。
 
@@ -26,6 +26,11 @@
 | [aclSparseSpmvPreprocess](#aclsparsespmvpreprocess) | SpMV预处理 |
 | [aclSparseSpmv](#aclsparsespmv) | 稀疏矩阵向量乘法 |
 | [aclSparseSpmvShowWorkSpace](#aclsparsespmvshowworkspace) | 显示SpMV工作空间 |
+| [aclsparseCreateDnMat](#aclsparsecreatednmat) | 创建稠密矩阵 |
+| [aclsparseDestroyDnMat](#aclsparsedestroydnmat) | 销毁稠密矩阵描述符 |
+| [aclsparseSpMMGetBufferSize](#aclsparsespmmgetbuffersize) | 获取SpMM缓冲区大小 |
+| [aclsparseSpMMPreprocess](#aclsparsespmmpreprocess) | SpMM预处理 |
+| [aclsparseSpMM](#aclsparsespmm) | 稀疏矩阵-稠密矩阵乘法 |
 
 ## 接口详情
 
@@ -414,6 +419,181 @@ aclsparseStatus_t aclSparseSpmvShowWorkSpace(aclsparseHandle_t handle, void *buf
 
 ---
 
+### aclsparseCreateDnMat
+
+```c
+aclsparseStatus_t aclsparseCreateDnMat(
+    aclsparseDnMatDescr_t *dnMatDescr,
+    int64_t rows,
+    int64_t cols,
+    int64_t ld,
+    void *values,
+    aclDataType valueType,
+    aclsparseOrder_t order
+);
+```
+
+**功能**：创建稠密矩阵描述符，用于描述 SpMM 中的 B / C 稠密矩阵。
+
+**参数说明**：
+
+- `dnMatDescr`（IN/OUT）：HOST，输出的稠密矩阵描述符。
+- `rows`（IN）：HOST，矩阵的行数。
+- `cols`（IN）：HOST，矩阵的列数。
+- `ld`（IN）：HOST，leading dimension。行主序时需 `>= cols`；列主序时需 `>= rows`。
+- `values`（IN）：DEVICE，矩阵数据指针。
+- `valueType`（IN）：HOST，元素数据类型（支持 `ACL_FLOAT` / `ACL_FLOAT16` / `ACL_INT8` / `ACL_INT32`）。
+- `order`（IN）：HOST，布局：`ACL_SPARSE_ORDER_ROW`（行主序）/ `ACL_SPARSE_ORDER_COL`（列主序）。
+
+**返回值**：
+
+- `ACL_SPARSE_STATUS_SUCCESS`：成功
+- 其他值：失败
+
+---
+
+### aclsparseDestroyDnMat
+
+```c
+aclsparseStatus_t aclsparseDestroyDnMat(aclsparseConstDnMatDescr_t dnMatDescr);
+```
+
+**功能**：销毁稠密矩阵描述符。
+
+**参数说明**：
+
+- `dnMatDescr`（IN）：HOST，要销毁的稠密矩阵描述符。
+
+**返回值**：
+
+- `ACL_SPARSE_STATUS_SUCCESS`：成功
+- 其他值：失败
+
+---
+
+### aclsparseSpMMGetBufferSize
+
+```c
+aclsparseStatus_t aclsparseSpMMGetBufferSize(
+    aclsparseHandle_t handle,
+    aclsparseOperation_t opA,
+    aclsparseOperation_t opB,
+    const void *alpha,
+    aclsparseConstSpMatDescr_t matA,
+    aclsparseConstDnMatDescr_t matB,
+    const void *beta,
+    aclsparseDnMatDescr_t matC,
+    aclDataType computeType,
+    aclsparseSpMMAlg_t alg,
+    size_t *size
+);
+```
+
+**功能**：获取稀疏矩阵-稠密矩阵乘法（SpMM）操作所需的 workspace 缓冲区大小。
+
+**参数说明**：
+
+- `handle`（IN）：HOST，稀疏计算句柄。
+- `opA`（IN）：HOST，稀疏矩阵 A 的操作类型，当前版本仅支持 `ACL_SPARSE_OP_NON_TRANSPOSE`。
+- `opB`（IN）：HOST，稠密矩阵 B 的操作类型，支持 `ACL_SPARSE_OP_NON_TRANSPOSE` / `ACL_SPARSE_OP_TRANSPOSE`。
+- `alpha`（IN）：HOST/DEVICE，标量 alpha 参数。
+- `matA`（IN）：HOST，CSR 稀疏矩阵 A 的描述符。
+- `matB`（IN）：HOST，输入稠密矩阵 B 的描述符。
+- `beta`（IN）：HOST/DEVICE，标量 beta 参数。
+- `matC`（IN）：HOST，输入/输出稠密矩阵 C 的描述符。
+- `computeType`（IN）：HOST，计算的数据类型。
+- `alg`（IN）：HOST，SpMM 算法类型。
+- `size`（OUT）：HOST，所需的 workspace 缓冲区大小（字节）。
+
+**返回值**：
+
+- `ACL_SPARSE_STATUS_SUCCESS`：成功
+- 其他值：失败
+
+---
+
+### aclsparseSpMMPreprocess
+
+```c
+aclsparseStatus_t aclsparseSpMMPreprocess(
+    aclsparseHandle_t handle,
+    aclsparseOperation_t opA,
+    aclsparseOperation_t opB,
+    const void *alpha,
+    aclsparseConstSpMatDescr_t matA,
+    aclsparseConstDnMatDescr_t matB,
+    const void *beta,
+    aclsparseDnMatDescr_t matC,
+    aclDataType computeType,
+    aclsparseSpMMAlg_t alg,
+    void *buffer
+);
+```
+
+**功能**：对 CSR 稀疏矩阵进行预处理（行重排与分桶），以便在后续的 SpMM 计算中使用。
+
+**参数说明**：
+
+- `handle`（IN）：HOST，稀疏计算句柄。
+- `opA`（IN）：HOST，稀疏矩阵 A 的操作类型。
+- `opB`（IN）：HOST，稠密矩阵 B 的操作类型。
+- `alpha`（IN）：HOST/DEVICE，标量 alpha 参数。
+- `matA`（IN）：HOST，CSR 稀疏矩阵 A 的描述符。
+- `matB`（IN）：HOST，输入稠密矩阵 B 的描述符。
+- `beta`（IN）：HOST/DEVICE，标量 beta 参数。
+- `matC`（IN）：HOST，输入/输出稠密矩阵 C 的描述符。
+- `computeType`（IN）：HOST，计算的数据类型。
+- `alg`（IN）：HOST，SpMM 算法类型。
+- `buffer`（IN）：DEVICE，用于存储预处理结果的 workspace 缓冲区。
+
+**返回值**：
+
+- `ACL_SPARSE_STATUS_SUCCESS`：成功
+- 其他值：失败
+
+---
+
+### aclsparseSpMM
+
+```c
+aclsparseStatus_t aclsparseSpMM(
+    aclsparseHandle_t handle,
+    aclsparseOperation_t opA,
+    aclsparseOperation_t opB,
+    const void *alpha,
+    aclsparseConstSpMatDescr_t matA,
+    aclsparseConstDnMatDescr_t matB,
+    const void *beta,
+    aclsparseDnMatDescr_t matC,
+    aclDataType computeType,
+    aclsparseSpMMAlg_t alg,
+    void *buffer
+);
+```
+
+**功能**：稀疏矩阵-稠密矩阵乘法（SpMM），计算 `C = alpha * op(A) * op(B) + beta * C`。
+
+**参数说明**：
+
+- `handle`（IN）：HOST，稀疏矩阵处理器句柄。
+- `opA`（IN）：HOST，稀疏矩阵 A 的操作类型，当前版本仅支持 `ACL_SPARSE_OP_NON_TRANSPOSE`。
+- `opB`（IN）：HOST，稠密矩阵 B 的操作类型。
+- `alpha`（IN）：HOST/DEVICE，标量 alpha。
+- `matA`（IN）：HOST，CSR 稀疏矩阵 A 的描述符。
+- `matB`（IN）：HOST，输入稠密矩阵 B 的描述符。
+- `beta`（IN）：HOST/DEVICE，标量 beta。
+- `matC`（IN/OUT）：HOST，输入/输出稠密矩阵 C 的描述符。
+- `computeType`（IN）：HOST，计算类型。
+- `alg`（IN）：HOST，SpMM 算法类型。
+- `buffer`（IN）：DEVICE，工作缓冲区指针（需先调用 `aclsparseSpMMGetBufferSize` 分配，建议先调用 `aclsparseSpMMPreprocess` 预处理）。
+
+**返回值**：
+
+- `ACL_SPARSE_STATUS_SUCCESS`：成功
+- 其他值：失败
+
+---
+
 ## 枚举说明
 
 ### aclsparseOperation_t
@@ -456,6 +636,25 @@ SpMV算法枚举：
 | `ACL_SPARSE_SPMV_CSR_ALG2` | CSR/CSC格式确定性算法 |
 | `ACL_SPARSE_SPMV_SELL_ALG1` | SELL格式默认算法 |
 
+### aclsparseSpMMAlg_t
+
+SpMM算法枚举：
+
+| 枚举值 | 说明 |
+|--------|------|
+| `ACL_SPARSE_SPMM_ALG_DEFAULT` | 默认算法，推荐使用；当前版本对 CSR 格式走 SIMT/AIV 实现 |
+| `ACL_SPARSE_SPMM_CSR_ALG1` | CSR 算法 1，显式指定 CSR 路径；当前版本与 DEFAULT 同一实现 |
+| `ACL_SPARSE_SPMM_CSR_FP32_HIGH_PRECISION_ALG` | fp32 高精度算法；同一 SIMT Kernel，fp32 累加使用 Kahan 补偿求和；仅对 fp32 生效 |
+
+### aclsparseOrder_t
+
+稠密矩阵布局枚举（SpMM 中 B / C 使用）：
+
+| 枚举值 | 说明 |
+|--------|------|
+| `ACL_SPARSE_ORDER_ROW` | 行主序 |
+| `ACL_SPARSE_ORDER_COL` | 列主序 |
+
 ### aclsparseIndexType_t
 
 索引类型枚举：
@@ -487,62 +686,65 @@ SpMV算法枚举：
 | `ACL_SPARSE_FORMAT_SLICED_ELL` | Sliced-ELL格式 |
 | `ACL_SPARSE_FORMAT_BSR` | BSR（Block Sparse Row）格式 |
 
+---
 
-## 使用示例
+## 推荐调用流程
+
+1. 调用 `aclsparseCreate` 创建句柄，并通过 `aclsparseSetStream` 绑定 stream。
+2. 使用 `aclsparseCreateCsr` 创建 CSR 稀疏矩阵 A，使用 `aclsparseCreateDnMat` 创建稠密矩阵 B、C。
+3. 调用 `aclsparseSpMMGetBufferSize` 获取 workspace 大小并分配设备内存。
+4. 调用 `aclsparseSpMMPreprocess` 对稀疏矩阵进行预处理（同一 sparsity pattern 可复用 workspace）。
+5. 调用 `aclsparseSpMM` 执行稀疏矩阵-稠密矩阵乘法。
+6. 依次销毁矩阵描述符与句柄，释放 workspace 与 ACL 资源。
+
+---
+
+## 最小示例（伪代码）
 
 ```c
-// 初始化ACL
-aclInit(nullptr);
-aclrtSetDevice(deviceId);
-aclrtCreateStream(&stream);
-
-// 创建稀疏矩阵处理器并绑定 stream
 aclsparseHandle_t handle = nullptr;
 aclsparseCreate(&handle);
 aclsparseSetStream(handle, stream);
 
-// 创建CSR格式稀疏矩阵
+// C = alpha * A * B + beta * C：A 为 rows × cols，B 为 cols × colsOut，C 为 rows × colsOut
 aclsparseSpMatDescr_t matA;
 aclsparseCreateCsr(&matA, rows, cols, nnz,
     dA_csrOffsets, dA_columns, dA_values,
     ACL_SPARSE_INDEX_32I, ACL_SPARSE_INDEX_32I,
     ACL_SPARSE_INDEX_BASE_ZERO, ACL_FLOAT);
 
-// 创建稠密向量
-aclsparseDnVecDescr_t vecX, vecY;
-aclSparseCreateDnVec(&vecX, cols, dX, ACL_FLOAT);
-aclSparseCreateDnVec(&vecY, rows, dY, ACL_FLOAT);
+aclsparseDnMatDescr_t matB, matC;
+aclsparseCreateDnMat(&matB, cols, colsOut, colsOut, dB, ACL_FLOAT, ACL_SPARSE_ORDER_ROW);
+aclsparseCreateDnMat(&matC, rows, colsOut, colsOut, dC, ACL_FLOAT, ACL_SPARSE_ORDER_ROW);
 
-// 获取缓冲区大小
-size_t bufferSize;
+size_t bufferSize = 0;
 float alpha = 1.0f, beta = 0.0f;
-aclSparseSpmvGetBufferSize(handle, ACL_SPARSE_OP_NON_TRANSPOSE,
-    &alpha, matA, vecX, &beta, vecY,
-    ACL_FLOAT, ACL_SPARSE_SPMV_ALG_CSR_ALG1, &bufferSize);
+aclsparseSpMMGetBufferSize(handle,
+    ACL_SPARSE_OP_NON_TRANSPOSE, ACL_SPARSE_OP_NON_TRANSPOSE,
+    &alpha, matA, matB, &beta, matC,
+    ACL_FLOAT, ACL_SPARSE_SPMM_ALG_DEFAULT, &bufferSize);
 
-// 分配缓冲区
-void *dBuffer;
+void *dBuffer = nullptr;
 aclrtMalloc(&dBuffer, bufferSize, ACL_MEM_MALLOC_HUGE_FIRST);
+aclsparseSpMMPreprocess(handle,
+    ACL_SPARSE_OP_NON_TRANSPOSE, ACL_SPARSE_OP_NON_TRANSPOSE,
+    &alpha, matA, matB, &beta, matC,
+    ACL_FLOAT, ACL_SPARSE_SPMM_ALG_DEFAULT, dBuffer);
+aclsparseSpMM(handle,
+    ACL_SPARSE_OP_NON_TRANSPOSE, ACL_SPARSE_OP_NON_TRANSPOSE,
+    &alpha, matA, matB, &beta, matC,
+    ACL_FLOAT, ACL_SPARSE_SPMM_ALG_DEFAULT, dBuffer);
 
-// 执行SpMV
-aclSparseSpmv(handle, ACL_SPARSE_OP_NON_TRANSPOSE,
-    &alpha, matA, vecX, &beta, vecY,
-    ACL_FLOAT, ACL_SPARSE_SPMV_ALG_CSR_ALG1, dBuffer);
-
-// 销毁资源
+aclsparseDestroyDnMat(matB);
+aclsparseDestroyDnMat(matC);
 aclsparseDestroySpMat(matA);
-aclSparseDestroyDnVec(vecX);
-aclSparseDestroyDnVec(vecY);
 aclsparseDestroy(handle);
-
-// 清理ACL
 aclrtFree(dBuffer);
-aclrtDestroyStream(stream);
-aclrtResetDevice(deviceId);
-aclFinalize();
 ```
+
+---
 
 ## 备注
 
-- 接口能力与属性支持范围以当前实现版本为准，详细限制请参考各算子目录下的README文档（如`test/spmv/README.md`）及头文件内注释。
+- 接口能力与属性支持范围以当前实现版本为准，详细限制请参考各算子目录下的README文档（如`test/spmv/README.md`、`test/spmm/README.md`）及头文件内注释。
 - 若文档描述与头文件声明不一致，请**以头文件声明与实际实现行为为准**。

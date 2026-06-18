@@ -50,11 +50,11 @@ typedef enum aclsparseOrder_t {
 // Algorithm enum for SpMM.
 typedef enum aclsparseSpMMAlg_t {
     ACL_SPARSE_SPMM_ALG_DEFAULT = 0,
-    // Default algorithm. Implemented as a pure SIMT/AIV path; best for extremely
-    // sparse matrices (density < ~1%).
+    // Recommended entry for any sparse matrix format. V1 routes CSR to the same
+    // SIMT/AIV implementation as ACL_SPARSE_SPMM_CSR_ALG1.
     ACL_SPARSE_SPMM_CSR_ALG1,
-    // CSR algorithm 1. Implemented as a SIMT path with a larger column tile,
-    // intended to deliver better throughput in the 70%~99% sparsity range.
+    // Explicit CSR algorithm 1. V1 uses the same SIMT/AIV implementation as
+    // ACL_SPARSE_SPMM_ALG_DEFAULT.
     ACL_SPARSE_SPMM_CSR_FP32_HIGH_PRECISION_ALG,
     // fp32 high-precision algorithm. Same SIMT path as the default, but the fp32
     // accumulation uses Kahan compensated summation to suppress rounding /

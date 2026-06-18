@@ -31,19 +31,6 @@ extern "C" void spmm_kernel_launch(
     void *workspaceGM, void *tilingGM,
     int32_t dataType, uint32_t blockDim, void *stream);
 
-// (m_tile, n_tile, k_pack) preset combo table indexed by tile_combo (3 bits).
-// See doc section 2.3.3.
-static const int32_t kSpmmTileCombo[8][3] = {
-    {16,  64,   16},
-    {32,  128,  64},
-    {32,  128,  256},
-    {32,  256,  128},
-    {64,  128,  256},
-    {64,  256,  256},
-    {128, 128,  512},
-    {128, 256,  1024},
-};
-
 namespace {
 
 // Outer launch blockDim = AIV core count from CANN platform config
@@ -69,78 +56,6 @@ uint32_t GetSpmmBlockDim()
 #endif
     cached = kSpmmBlockDimFallback;
     return cached;
-}
-
-// Heuristic dispatcher: choose algo + tile_combo based on shape + density.
-// Returns the packed TilingKey.
-uint64_t ComputeSpmmTilingKey(const aclsparseSpMatDescr *matA,
-                              const aclsparseDnMatDescr *matB,
-                              const aclsparseDnMatDescr *matC,
-                              aclsparseOperation_t opB,
-                              aclsparseSpMMAlg_t alg,
-                              bool betaIsZero,
-                              int32_t *m_tile_out,
-                              int32_t *n_tile_out,
-                              int32_t *k_pack_out)
-{
-    const int64_t m   = static_cast<int64_t>(matA->rows);
-    const int64_t n   = matC->cols;
-    const int64_t nnz = static_cast<int64_t>(matA->nnz);
-
-    double density = (m > 0 && matA->cols > 0)
-                     ? static_cast<double>(nnz) / (static_cast<double>(m) * static_cast<double>(matA->cols))
-                     : 0.0;
-
-    uint32_t algoBit;
-    if (alg == ACL_SPARSE_SPMM_ALG_DEFAULT ||
-        alg == ACL_SPARSE_SPMM_CSR_FP32_HIGH_PRECISION_ALG) {
-        // High-precision is orthogonal to tiling, so it reuses the default
-        // density-based algo/tile heuristic; only the fp32 accumulation differs.
-        // Density < 1% (sparsity > 99%) and small n => stay on SIMT-only.
-        algoBit = (density < 0.01 || n < 64) ? SPMM_ALGO_DEFAULT : SPMM_ALGO_CSR_ALG1;
-    } else {
-        algoBit = SPMM_ALGO_CSR_ALG1;
-    }
-
-    uint32_t tileCombo;
-    if (m < 64 || n < 128) {
-        tileCombo = 0;
-    } else if (density < 0.05 && n < 256) {
-        tileCombo = 1;
-    } else if (density < 0.30 && n < 256) {
-        tileCombo = 2;
-    } else if (n >= 256 && m < 1024) {
-        tileCombo = 3;
-    } else if (m < 4096 && n < 256) {
-        tileCombo = 4;
-    } else if (m < 4096) {
-        tileCombo = 5;
-    } else if (n < 256) {
-        tileCombo = 6;
-    } else {
-        tileCombo = 7;
-    }
-
-    *m_tile_out = kSpmmTileCombo[tileCombo][0];
-    *n_tile_out = kSpmmTileCombo[tileCombo][1];
-    *k_pack_out = kSpmmTileCombo[tileCombo][2];
-
-    uint32_t opBBit = (opB == ACL_SPARSE_OP_TRANSPOSE) ? 1u : 0u;
-    uint32_t orderPair = static_cast<uint32_t>(matB->order) * 2u +
-                         static_cast<uint32_t>(matC->order);
-    uint32_t betaZero = betaIsZero ? 1u : 0u;
-
-    return SPMM_TK_PACK(algoBit, opBBit, orderPair, betaZero, tileCombo);
-}
-
-bool ScalarIsZeroF32(const void *p, aclDataType computeType) {
-    if (p == nullptr) {
-        return true;
-    }
-    if (computeType == ACL_INT32) {
-        return *static_cast<const int32_t *>(p) == 0;
-    }
-    return *static_cast<const float *>(p) == 0.0f;
 }
 
 float ScalarReadF32(const void *p) {
@@ -383,29 +298,14 @@ static aclsparseStatus_t SpmmBuildTilingToBuffer(
     }
 
     // 2) Build TilingData on host, write to device workspace.
-    int32_t m_tile = 0, n_tile = 0, k_pack = 0;
-    bool betaZero = ScalarIsZeroF32(beta, computeType);
-    uint64_t tk = ComputeSpmmTilingKey(matAInner, matBInner, matCInner, opB,
-                                       alg, betaZero, &m_tile, &n_tile, &k_pack);
-    (void)tk; // tilingKey is passed to the kernel via the launcher (below).
-
     SpmmTilingData td{};
     td.m   = static_cast<int32_t>(matAInner->rows);
     td.n   = static_cast<int32_t>(matCInner->cols);
-    td.k   = static_cast<int32_t>(matAInner->cols);
-    td.nnz = static_cast<int32_t>(matAInner->nnz);
     td.ldb = static_cast<int32_t>(matBInner->ld);
     td.ldc = static_cast<int32_t>(matCInner->ld);
-    td.m_tile      = m_tile;
-    td.n_tile      = n_tile;
-    td.k_pack      = k_pack;
-    td.row_bin_num = static_cast<int32_t>(GetSpmmBlockDim());
     td.reorder_offset  = static_cast<int32_t>(off.reorderOff);
     td.bin_edge_offset = static_cast<int32_t>(off.binEdgeOff);
-    td.meta_flag       = SPMM_META_PREPROCESS_DONE;
-    td.blockDim        = static_cast<int32_t>(GetSpmmBlockDim());
-    td.data_type       = SpmmDataTypeFromAcl(matAInner->valueType);
-    td.high_precision  = ComputeSpmmHighPrecision(alg, td.data_type);
+    td.high_precision  = ComputeSpmmHighPrecision(alg, SpmmDataTypeFromAcl(matAInner->valueType));
     td.opB             = (opB == ACL_SPARSE_OP_TRANSPOSE) ? 1 : 0;
     td.order_pair      = static_cast<int32_t>(matBInner->order) * 2 +
                          static_cast<int32_t>(matCInner->order);
@@ -435,11 +335,10 @@ static aclsparseStatus_t SpmmRefreshActiveTiling(
     if (ret != ACL_ERROR_NONE) {
         return ACL_SPARSE_STATUS_EXECUTION_FAILED;
     }
-    td.data_type = SpmmDataTypeFromAcl(matA->valueType);
     td.opB = (opB == ACL_SPARSE_OP_TRANSPOSE) ? 1 : 0;
     td.order_pair = static_cast<int32_t>(matB->order) * 2 +
                     static_cast<int32_t>(matC->order);
-    td.high_precision = ComputeSpmmHighPrecision(alg, td.data_type);
+    td.high_precision = ComputeSpmmHighPrecision(alg, SpmmDataTypeFromAcl(matA->valueType));
     SetTilingAlphaBeta(&td, alpha, beta, computeType);
     ret = aclrtMemcpy(static_cast<uint8_t *>(buffer) + off.tilingOff,
                       sizeof(SpmmTilingData),
