@@ -181,7 +181,7 @@ typedef enum aclsparseFormat_t {
  * @param valueType IN, HOST, 值的数据类型。
  * @return aclsparseStatus_t 返回稀疏操作的状态。
  */
-aclsparseStatus_t aclSparseCreateDnVec(aclsparseDnVecDescr_t *dnVecDescr, int64_t size, void *values, aclDataType valueType);
+aclsparseStatus_t aclsparseCreateDnVec(aclsparseDnVecDescr_t *dnVecDescr, int64_t size, void *values, aclDataType valueType);
 
 /**
  * @brief 创建只读(const)稠密向量描述符。数据指针为 const。
@@ -195,7 +195,7 @@ aclsparseStatus_t aclsparseCreateConstDnVec(aclsparseConstDnVecDescr_t *dnVecDes
  * @param dnVecDescr IN, HOST, 要销毁的稀疏向量描述符。
  * @return aclsparseStatus_t 返回执行状态，成功返回ACL_SPARSE_STATUS_SUCCESS。
  */
-aclsparseStatus_t aclSparseDestroyDnVec(aclsparseConstDnVecDescr_t dnVecDescr);
+aclsparseStatus_t aclsparseDestroyDnVec(aclsparseConstDnVecDescr_t dnVecDescr);
 
 /**
  * @brief 创建稀疏矩阵的CSR格式。
@@ -268,23 +268,23 @@ aclsparseStatus_t aclsparseCreateConstCsc(aclsparseConstSpMatDescr_t *spMatDescr
 aclsparseStatus_t aclsparseDestroySpMat(aclsparseConstSpMatDescr_t spMatDescr);
 
 /**
- * @brief 获取稀疏矩阵与向量相乘（SpMV）操作所需的缓冲区大小。
+ * @brief 获取稀疏矩阵向量乘法（SpMV）所需的缓冲区大小
  *
- * @param handle IN, HOST, aclsparseHandle_t类型，稀疏计算句柄。
- * @param op IN, HOST, aclsparseOperation_t类型，稀疏操作类型。
- * @param alpha IN, HOST/DEVICE, 指向常量的指针，表示SpMV操作中的alpha参数。
- * @param mat IN, HOST, aclsparseSpMatDescr_t类型，稀疏矩阵描述符。
- * @param x IN, HOST, aclsparseDnVecDescr_t类型，输入向量x的描述符。
- * @param beta IN, HOST/DEVICE, 指向常量的指针，表示SpMV操作中的beta参数。
- * @param y IN, HOST, aclsparseDnVecDescr_t类型，输出向量y的描述符。
- * @param computeType IN, HOST, aclDataType类型，计算的数据类型。
- * @param alg IN, HOST, aclsparseSpMVAlg_t类型，SpMV算法类型。
- * @param size IN, HOST, 指向size_t的指针，用于返回所需的缓冲区大小。
- * @return aclsparseStatus_t类型，表示函数执行状态。
+ * @param handle IN, HOST, aclsparse 句柄
+ * @param opA IN, HOST, 稀疏矩阵操作类型
+ * @param alpha IN, HOST/DEVICE, 标量 alpha 指针
+ * @param matA IN, HOST, 稀疏矩阵描述符
+ * @param vecX IN, HOST, 稠密向量 x 描述符
+ * @param beta IN, HOST/DEVICE, 标量 beta 指针
+ * @param vecY IN, HOST, 稠密向量 y 描述符
+ * @param computeType IN, HOST, 计算精度类型
+ * @param alg IN, HOST, SpMV 算法类型
+ * @param bufferSize OUT, HOST, 输出所需缓冲区大小
+ * @return aclsparseStatus_t 状态码
  */
-aclsparseStatus_t aclSparseSpmvGetBufferSize(aclsparseHandle_t handle, aclsparseOperation_t op, const void *alpha,
-    aclsparseConstSpMatDescr_t mat, aclsparseConstDnVecDescr_t x, const void *beta, aclsparseDnVecDescr_t y, aclDataType computeType,
-    aclsparseSpMVAlg_t alg, size_t *size);
+aclsparseStatus_t aclsparseSpMVGetBufferSize(aclsparseHandle_t handle, aclsparseOperation_t opA, const void *alpha,
+                                                aclsparseConstSpMatDescr_t matA, aclsparseConstDnVecDescr_t vecX, const void *beta, aclsparseDnVecDescr_t vecY, aclDataType computeType,
+                                                aclsparseSpMVAlg_t alg, size_t *bufferSize);
 
 /**
  * @brief 对稀疏矩阵进行预处理，以便在后续的SpMV计算中使用。
@@ -307,23 +307,23 @@ aclsparseStatus_t aclSparseSpmvPreprocess(aclsparseHandle_t handle, aclsparseOpe
     aclsparseSpMVAlg_t alg, void *buffer);
 
 /**
- * @brief 稀疏矩阵向量乘法函数
+ * @brief 稀疏矩阵向量乘法（SpMV）计算入口
  *
- * @param handle IN, HOST, 稀疏矩阵处理器句柄
- * @param op IN, HOST, 稀疏矩阵操作符
- * @param alpha IN, HOST/DEVICE, 标量alpha
- * @param mat IN, HOST, 稀疏矩阵描述符
- * @param x IN, HOST, 密集向量x描述符
- * @param beta IN, HOST/DEVICE, 标量beta
- * @param y IN, HOST, 密集向量y描述符
- * @param computeType IN, HOST, 计算类型
- * @param alg IN, HOST, 稀疏矩阵向量乘法算法
- * @param buffer IN, DEVICE, 工作缓冲区指针
- * @return aclsparseStatus_t 返回状态
+ * @param handle IN, HOST, aclsparse 句柄
+ * @param opA IN, HOST, 稀疏矩阵操作类型
+ * @param alpha IN, HOST/DEVICE, 标量 alpha 指针
+ * @param matA IN, HOST, 稀疏矩阵描述符
+ * @param vecX IN, HOST, 稠密向量 x 描述符
+ * @param beta IN, HOST/DEVICE, 标量 beta 指针
+ * @param vecY IN, HOST, 稠密向量 y 描述符
+ * @param computeType IN, HOST, 计算精度类型
+ * @param alg IN, HOST, SpMV 算法类型
+ * @param externalBuffer IN, DEVICE, 工作缓冲区
+ * @return aclsparseStatus_t 状态码
  */
-aclsparseStatus_t aclSparseSpmv(aclsparseHandle_t handle, aclsparseOperation_t op, const void *alpha, aclsparseConstSpMatDescr_t mat,
-    aclsparseConstDnVecDescr_t x, const void *beta, aclsparseDnVecDescr_t y, aclDataType computeType, aclsparseSpMVAlg_t alg,
-    void *buffer);
+aclsparseStatus_t aclsparseSpMV(aclsparseHandle_t handle, aclsparseOperation_t opA, const void *alpha,
+                                aclsparseConstSpMatDescr_t matA, aclsparseConstDnVecDescr_t vecX, const void *beta, aclsparseDnVecDescr_t vecY, aclDataType computeType,
+                                aclsparseSpMVAlg_t alg, void *externalBuffer);
 
 aclsparseStatus_t aclSparseSpmvShowWorkSpace(aclsparseHandle_t handle, void *buffer);
 
