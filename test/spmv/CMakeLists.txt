@@ -8,17 +8,4 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # ----------------------------------------------------------------------------------------------------------
 
-add_executable(spmv_test
-    spmv_test.cpp
-)
-
-target_include_directories(spmv_test PRIVATE
-    ${CMAKE_SOURCE_DIR}/include
-    ${CMAKE_SOURCE_DIR}/src/spmv
-    $ENV{LINUX_INCLUDE_PATH}
-)
-
-target_link_libraries(spmv_test PRIVATE
-    ${OPS_SPARSE}
-    $ENV{EAGER_LIBRARY_PATH}/libascendcl.so
-)
+ops_sparse_add_test(spmv ${OPS_SPARSE})

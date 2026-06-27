@@ -35,10 +35,10 @@ message(STATUS "SOC_VERSION=${SOC_VERSION}, NPU_ARCH=${NPU_ARCH}")
 # 根据 SOC 版本返回需要编译的架构目录列表
 #
 # 支持的映射关系：
+#   - ascend910b*    -> arch22 (DAV-2201 架构)
+#   - ascend910_93*  -> arch22 (DAV-2201 架构)
 #   - ascend950*     -> arch35 (DAV-3510 架构)
 #   - ascend310p*    -> arch20 (DAV-2002 架构)
-#   - ascend910b*    -> 使用通用实现 (DAV-2201 架构)
-#   - ascend910_93*  -> 使用通用实现 (DAV-2201 架构)
 #
 # 函数参数：
 #   soc_version: 输入的 SOC 版本字符串（如 ascend910b3, ascend950）
@@ -48,17 +48,19 @@ function(get_soc_arch_dirs soc_version arch_dirs)
   string(TOLOWER "${soc_version}" soc_lower)
   set(dirs "")
 
-  # ascend950 系列使用 arch35 优化
-  if(soc_lower MATCHES "^ascend950")
+  if(soc_lower MATCHES "^ascend910b")
+    list(APPEND dirs "arch22")
+    message(STATUS "  -> SOC [${soc_version}] matched arch22 (DAV-2201)")
+  elseif(soc_lower MATCHES "^ascend910_93")
+    list(APPEND dirs "arch22")
+    message(STATUS "  -> SOC [${soc_version}] matched arch22 (DAV-2201)")
+  elseif(soc_lower MATCHES "^ascend950")
     list(APPEND dirs "arch35")
     message(STATUS "  -> SOC [${soc_version}] matched arch35 (DAV-3510)")
-  # ascend310p 系列使用 arch20 优化
   elseif(soc_lower MATCHES "^ascend310p")
     list(APPEND dirs "arch20")
     message(STATUS "  -> SOC [${soc_version}] matched arch20 (DAV-2002)")
   endif()
-  # ascend910b/910_93 系列使用通用实现
-  # 其他 SOC 可以根据需要添加
 
   set(${arch_dirs} ${dirs} PARENT_SCOPE)
 endfunction()
@@ -69,7 +71,7 @@ message(STATUS "SOC_ARCH_DIRS=${SOC_ARCH_DIRS}")
 
 # 架构特定目录列表（全局定义）
 # 这些目录包含架构特定的优化实现，会从通用源文件中排除，再根据 SOC 选择性添加
-set(ARCH_SPECIFIC_DIRS arch35 arch20 CACHE INTERNAL "Architecture specific directories")
+set(ARCH_SPECIFIC_DIRS arch35 arch22 arch20 CACHE INTERNAL "Architecture specific directories")
 
 set(ASCEND_CANN_PACKAGE_PATH $ENV{ASCEND_HOME_PATH})
 set(RUN_MODE "npu" CACHE STRING "run mode: npu")
@@ -127,6 +129,7 @@ install(FILES
 )
 
 # ========= 构建测试程序 =========
+include(cmake/test.cmake)
 option(BUILD_TEST "Build test programs" OFF)
 if(BUILD_TEST)
     add_subdirectory(test)

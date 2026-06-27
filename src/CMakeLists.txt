@@ -29,7 +29,7 @@ message(STATUS "[src] Total source files before filtering: ${BASE_SRC_FILES}")
 
 # -------------------------------------------------------------------------------------------------
 # 步骤1：过滤掉所有架构特定目录中的文件
-#   - ARCH_SPECIFIC_DIRS 在根 CMakeLists.txt 中定义（如 arch35, arch20）
+#   - ARCH_SPECIFIC_DIRS 在根 CMakeLists.txt 中定义（如 arch35, arch22, arch20）
 #   - 使用路径匹配替代 GLOB 模式，确保正确识别嵌套目录中的架构特定文件
 # -------------------------------------------------------------------------------------------------
 foreach(arch_dir ${ARCH_SPECIFIC_DIRS})
@@ -52,7 +52,7 @@ endforeach()
 # -------------------------------------------------------------------------------------------------
 # 步骤2：收集当前 SOC 对应的架构特定源文件
 #   - SOC_ARCH_DIRS 根据 SOC_VERSION 在根 CMakeLists.txt 中通过 get_soc_arch_dirs() 确定
-#   - 例如：ascend950 -> arch35, ascend310p -> arch20
+#   - 例如：ascend910b -> arch22, ascend950 -> arch35, ascend310p -> arch20
 # -------------------------------------------------------------------------------------------------
 set(ARCH_SRC_FILES "")
 if(SOC_ARCH_DIRS)

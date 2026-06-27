@@ -35,7 +35,7 @@ git clone -b ${tag_version} https://gitcode.com/cann/ops-sparse.git
 
 ops-sparse仓关键目录结构请参见[目录结构](docs/zh/install/dir_structure.md)。
 
-> **说明**：当前算子调用样例位于`test/`目录下（如`test/spmv/spmv_test.cpp`），`examples/`为预留目录。各算子的详细调用说明可参考`test/<算子名>/README.md`。
+> **说明**：当前算子调用样例位于`test/`目录下（如`test/spmv/arch22/spmv_test.cpp`），`examples/`为预留目录。各算子的详细调用说明可参考`test/<算子名>/README.md`。
 
 ## 💬相关信息
 

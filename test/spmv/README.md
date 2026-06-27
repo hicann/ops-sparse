@@ -23,7 +23,7 @@ $$
 ## 目录结构介绍
 
 ```
-src/spmv/arch22
+src/spmv/arch22/
 ├── kernels/                           // 各类型独立编译单元（每 TU 一个 kernel）
 │   ├── spmv_kernel.h                 // 模板类 + DEFINE 宏
 │   ├── spmv_kernel_f32.cpp           // <float, float, float>
@@ -31,12 +31,13 @@ src/spmv/arch22
 │   ├── ...
 ├── spmv_host.cpp                     // Host 侧 API 实现
 ├── spmv_tiling_data.h                // Tiling 数据结构
-└── spmv_utils.h                      // 宏和内部辅助
+└── spmv.h                            // 算子内部头文件
 
 test/spmv/
-├── CMakeLists.txt                    // 编译工程文件
+├── CMakeLists.txt                    // 调用 ops_sparse_add_test(spmv ${OPS_SPARSE})
 ├── README.md                         // 说明文档
-└── spmv_test.cpp                     // 算子调用样例
+└── arch22/
+    └── spmv_test.cpp                 // 910B 算子调用样例
 ```
 
 ## 算子描述

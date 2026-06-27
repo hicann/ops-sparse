@@ -2,7 +2,7 @@
 
 ## 使用须知
 
-本指南旨在帮助您快速上手CANN和`ops-sparse`算子仓的使用。为方便快速了解算子开发全流程，将以**Spmv**算子为实践对象，其源文件位于`ops-sparse/src/spmv`，具体操作流程如下：
+本指南旨在帮助您快速上手CANN和`ops-sparse`算子仓的使用。为方便快速了解算子开发全流程，将以**Spmv**算子为实践对象，其源文件位于`ops-sparse/src/spmv/arch22`（Ascend 910B 实现），具体操作流程如下：
 
 1. **[环境部署](zh/install/quick_install.md)**：完成软件包安装和源码下载，此处不再赘述。快速入门场景下，**推荐WebIDE或Docker环境**，安装操作简单。
 
@@ -41,21 +41,30 @@ Self-extractable archive "cann-${soc_version}-ops-sparse-${cann_version}_linux-$
 ```bash
 ./build_out/cann-${soc_version}-ops-sparse-*linux*.run --install --install-path=/usr/local/Ascend/
 ```
-注：安装算子包之后，每次调用会从算子包中加载算子，若需快速调试验证算子功能，可直接按照 [3.快速验证：运行算子样例](#三算子调试) 步骤进行，无需安装算子包。
+
+注：安装算子包之后，每次调用会从算子包中加载算子，若需快速调试验证算子功能，可直接按照 [3. 快速验证：运行算子样例](#3-快速验证运行算子样例) 步骤进行，无需安装算子包。
+
 ### 3. 快速验证：运行算子样例
 
 通用的运行命令格式：`bash build.sh --soc=<芯片版本> --ops=<算子名> --run`。
 
-以Spmv为例，其提供了简单算子样例`test/spmv/spmv_test.cpp`，运行该样例验证算子功能是否正常。
+以Spmv为例，其提供了算子样例`test/spmv/arch22/spmv_test.cpp`，覆盖 float / int32 / fp16 / bf16 等多种 dtype 组合及转置场景，运行该样例验证算子功能是否正常。
 
 ```bash
 bash build.sh --soc=ascend910b --ops=spmv --run
 ```
 
-预期输出：打印算子`Spmv`的进度比对结果，表明算子已成功部署并正确执行。
+预期输出：各测试用例精度比对通过，并最终打印汇总信息。
 
 ```txt
-[Success] test case accuracy is verification passed.
+========================================
+              Test Summary
+========================================
+Total cases  : ...
+Passed       : ...
+Failed       : 0
+Pass rate    : 100%
+========================================
 [PASS] spmv_test
 
 ========================================
@@ -67,70 +76,26 @@ Test Summary:
 
 ## 二、算子开发
 
-本阶段目的是对已成功运行的Spmv算子尝试**修改核函数代码**。
+本阶段通过**改 kernel 代码 → 重新编译 → 跑测试**，体验算子修改与验证的闭环。
 
-### 1. 修改Kernel实现
+### 1. 修改 Kernel
 
-找到Spmv算子的核心kernel实现文件`src/spmv/spmv_kernel.cpp`，尝试修改算子中的VectorPostComputor操作：
+打开 `src/spmv/arch22/kernels/spmv_kernel.h`，在 `Compute` 函数的 float 路径中，将 `alpha` 缩放临时改为 2 倍（**仅用于学习，勿合入**）：
 
 ```cpp
-    __aicore__ inline void VectorPostComputor(
-        int32_t j, __gm__ SpmvCsrSubMatInfo *infos, uint32_t start, uint32_t len, GlobalTensor<uint32_t> &xId)
-    {
-        if ASCEND_IS_AIC {
-            return;
-        }
-        AscendC::CrossCoreWaitFlag(SYNC_AIC_TO_AIV);
-        auto yin = queueYIn.AllocTensor<float32_t>();
-        auto yout = queueYOut.AllocTensor<float32_t>();
-        // DataCopy(yin, swapAicToAivGm, CUBE_BLOCK_SIZE);
-
-        Gather(yout, yin, yOutIdxLm, 0, MAX_SUB_ROW_SIZE);
-        
-        AscendC::SetAtomicAdd<float>();
-        DataCopy(yGm[start], yout, MAX_SUB_ROW_SIZE);
-
-        AscendC::SetAtomicNone();
-        queueYOut.FreeTensor(yout);
-        queueYIn.FreeTensor(yin);
-    }
+AscendC::Muls(floatTmpBuffer, floatTmpBuffer, this->alpha * 2.0f, 1);
 ```
 
 ### 2. 编译与验证
 
-重复[编译运行](#一编译运行)章节中的步骤：
+```bash
+bash build.sh --soc=ascend910b --ops=spmv --run
+```
 
-1. **重新编译**：
-    先回到项目根目录，编译命令如下：
+- 修改后：精度比对失败，`spmv_test` 退出码非 0
+- 改回正确实现后：各用例输出 `====Test case pass!====`，build.sh 打印 `[PASS] spmv_test`
 
-    ```bash
-    bash build.sh --pkg --soc=ascend910b --ops=spmv
-    ```
-
-2. **重新安装**：
-
-    ```bash
-    ./build_out/cann-${soc_version}-ops-sparse-*linux*.run --install --install-path=/usr/local/Ascend/
-    ```
-
-3. **重新验证**：
-
-    ```bash
-    bash build.sh --soc=ascend910b --ops=spmv --run
-    ```
-
-4. **成功标志**：输出结果精度比对成功。
-
-    ```txt
-    [Success] test case accuracy is verification passed.
-    [PASS] spmv_test
-
-    ========================================
-    Test Summary:
-    Passed: 1 - spmv
-    Failed: 0 - 
-    ========================================
-    ```
+如需打包安装，步骤同[一、编译运行](#一编译运行)。
 
 ## 三、算子调试
 
@@ -140,50 +105,50 @@ Test Summary:
 
 算子如果出现执行失败、精度异常等问题，添加打印进行问题分析和定位。
 
-请在`src/spmv/spmv_kernel.cpp`中进行代码修改。
+请在 `src/spmv/arch22/kernels/spmv_kernel.h`（或具体 dtype 对应的 `kernels/spmv_kernel_*.cpp`）中进行代码修改。
 
 * **printf**
 
   该接口支持打印Scalar类型数据，如整数、字符型、布尔型等，详细介绍请参见[《Ascend C API》](https://hiascend.com/document/redirect/CannCommunityAscendCApi)中“算子调测API > printf”。
 
-  ```cpp
-    __aicore__ inline void Init(
-        GM_ADDR sync, GM_ADDR buffer, GM_ADDR x, GM_ADDR y, uint64_t rows, uint64_t cols, uint64_t nnz)
-    {
-        info = reinterpret_cast<__gm__ SpmvCsrInfo *>(buffer);
-        blockNum = GetBlockNum();
-        nParts = info->num;
-        id = GetBlockIdx();
-        this->rows = rows;
-        this->cols = cols;
-        this->nnz = nnz;
-        // 打印非零元素数量
-        AscendC::PRINTF("this->nnz is %llu\n", this->nnz);
+  在 `Init` 中打印当前核负责的行范围与 tile 大小，便于确认多核切分是否正确：
 
-        ...
-    }
+  ```cpp
+  __aicore__ inline void Init(
+      GM_ADDR csrRowPtr, GM_ADDR csrColInd, GM_ADDR csrVal, GM_ADDR xVec, GM_ADDR yVec,
+      uint32_t totalRowsNum, uint32_t totalColsNum,
+      CompT alpha, CompT beta) {
+      // ... 行切分与 GlobalBuffer 绑定 ...
+
+      AscendC::PRINTF("blockIdx=%u startRow=%u blockRowNum=%u tileLength=%u nnzRange=[%u,%u)\n",
+                      AscendC::GetBlockIdx(), this->startRow, this->blockRowNum,
+                      this->tileLength, this->startValIdx, this->endValIdx);
+
+      pipe.InitBuffer(inQueueColIdx, BUFFER_NUM, this->tileLength * sizeof(int32_t));
+      // ...
+  }
   ```
 
 * **DumpTensor**
 
   该接口支持Dump指定Tensor的内容，同时支持打印自定义附加信息，比如当前行号等，详细介绍请参见[《Ascend C API》](https://hiascend.com/document/redirect/CannCommunityAscendCApi)中“算子调测API > DumpTensor”。
 
+  在 `Compute` 中，`xLocal` 与 `valsLocal` 逐元素相乘后，Dump 局部向量检查中间结果：
+
   ```cpp
-    __aicore__ inline void CopyInA2(int32_t j, __gm__ SpmvCsrSubMatInfo *infos, uint32_t start, uint32_t len)
-    {
-        auto a2 = queueMatA2.AllocTensor<float32_t>();
-        auto x = queueMatA1.DeQue<float32_t>();
-        AscendC::LoadData2DParams loadDataParams;
-        loadDataParams.repeatTimes = len / (512 / sizeof(float32_t));  // 512: 分型大小
-        loadDataParams.srcStride = 1;
-        loadDataParams.dstGap = 0;
-        loadDataParams.ifTranspose = false;
-        AscendC::LoadData(a2, x, loadDataParams);
-        // 打印x Tensor信息
-        DumpTensor(x, 0, CUBE_BLOCK_SIZE);
-        queueMatA2.EnQue(a2);
-        queueMatA1.FreeTensor(x);
-    }
+  __aicore__ inline void Compute(int32_t currentRow, int32_t validNum) {
+      // ... xLocal 已与 valsLocal 完成 Mul ...
+
+      AscendC::Mul(xLocal, xLocal, valsLocal, validNum);
+      AscendC::PipeBarrier<PIPE_V>();
+
+      // 打印当前行、有效非零元个数及 xLocal 前若干元素
+      AscendC::PRINTF("Compute row=%d validNum=%d\n", currentRow, validNum);
+      AscendC::DumpTensor(xLocal, 0, validNum);
+
+      sharedTmpBuffer = workQueueReduce.AllocTensor<float>();
+      // ...
+  }
   ```
 
 ### 2. 性能采集
