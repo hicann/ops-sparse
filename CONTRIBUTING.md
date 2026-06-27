@@ -79,7 +79,7 @@ PR上库要求：
 
 ### 5. Committer检视
 
-Committer检视后将反馈检视意见，请根据意见修改，完成后@指派的Committer。
+Committer检视后将反馈检视意见，请根据意见修改。建议您在 PR 修改过程中，在 PR 标题中增加 `[WIP]` 标签；修改完成后去掉该标签，并 @ 指派的 Committer 进行二次检视。
 
 ### 6. Maintainer合入
 
