@@ -198,61 +198,6 @@ WsOffsets ComputeWsOffsets(int64_t m, int32_t blockDim) {
 
 } // namespace
 
-aclsparseStatus_t aclsparseCreateDnMat(aclsparseDnMatDescr_t *dnMatDescr,
-    int64_t rows, int64_t cols, int64_t ld, void *values,
-    aclDataType valueType, aclsparseOrder_t order)
-{
-    if (dnMatDescr == nullptr) {
-        return ACL_SPARSE_STATUS_HANDLE_IS_NULLPTR;
-    }
-    if (rows <= 0 || cols <= 0 || ld <= 0) {
-        return ACL_SPARSE_STATUS_INVALID_VALUE;
-    }
-    // ld 约束：行主序需 >= cols；列主序需 >= rows。
-    if (order == ACL_SPARSE_ORDER_ROW && ld < cols) {
-        return ACL_SPARSE_STATUS_INVALID_VALUE;
-    }
-    if (order == ACL_SPARSE_ORDER_COL && ld < rows) {
-        return ACL_SPARSE_STATUS_INVALID_VALUE;
-    }
-    auto *inner = new (std::nothrow) aclsparseDnMatDescr();
-    if (inner == nullptr) {
-        return ACL_SPARSE_STATUS_ALLOC_FAILED;
-    }
-    inner->rows = rows;
-    inner->cols = cols;
-    inner->ld = ld;
-    inner->order = order;
-    inner->values = values;
-    inner->valueType = valueType;
-    *dnMatDescr = (aclsparseDnMatDescr_t)inner;
-    return ACL_SPARSE_STATUS_SUCCESS;
-}
-
-aclsparseStatus_t aclsparseDestroyDnMat(aclsparseConstDnMatDescr_t dnMatDescr)
-{
-    if (dnMatDescr == nullptr) {
-        return ACL_SPARSE_STATUS_SUCCESS;
-    }
-    delete const_cast<aclsparseDnMatDescr *>(dnMatDescr);
-    return ACL_SPARSE_STATUS_SUCCESS;
-}
-
-// 只读(const)稠密矩阵构造接口：数据指针为 const，构造出 const 变体描述符。
-aclsparseStatus_t aclsparseCreateConstDnMat(aclsparseConstDnMatDescr_t *dnMatDescr,
-    int64_t rows, int64_t cols, int64_t ld, const void *values,
-    aclDataType valueType, aclsparseOrder_t order)
-{
-    aclsparseDnMatDescr_t tmp = nullptr;
-    aclsparseStatus_t st = aclsparseCreateDnMat(&tmp, rows, cols, ld,
-        const_cast<void *>(values), valueType, order);
-    if (st != ACL_SPARSE_STATUS_SUCCESS) {
-        return st;
-    }
-    *dnMatDescr = tmp;
-    return ACL_SPARSE_STATUS_SUCCESS;
-}
-
 aclsparseStatus_t aclsparseSpMMGetBufferSize(
     aclsparseHandle_t /*handle*/, aclsparseOperation_t opA, aclsparseOperation_t opB,
     const void * /*alpha*/, aclsparseConstSpMatDescr_t matA, aclsparseConstDnMatDescr_t matB,
@@ -372,10 +317,6 @@ static aclsparseStatus_t SpmmRunKernel(
                        static_cast<uint8_t *>(buffer) + off.tilingOff,
                        SpmmDataTypeFromAcl(matA->valueType),
                        GetSpmmBlockDim(), stream);
-    aclError ret = aclrtSynchronizeStream(stream);
-    if (ret != ACL_ERROR_NONE) {
-        return ACL_SPARSE_STATUS_EXECUTION_FAILED;
-    }
     return ACL_SPARSE_STATUS_SUCCESS;
 }
 

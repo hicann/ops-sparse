@@ -104,7 +104,7 @@ typedef enum aclsparseStatus_t {
     // The matrix type is not supported by this function. This is
     // usually caused by passing an invalid matrix descriptor to the
     // function To correct: check that the fields in
-    // aclSparseMatDescr_t descrA were set correctly
+    // aclsparseSpMatDescr_t descrA were set correctly
     ACL_SPARSE_STATUS_NOT_SUPPORTED,
     // The operation or data type combination is currently not supported by the
     // function
@@ -164,13 +164,6 @@ typedef enum aclsparseFormat_t {
     ACL_SPARSE_FORMAT_BSR
     // The matrix is stored in Block Sparse Row (BSR) format
 } aclsparseFormat_t;
-
-/*
- * NOTE: handle 的创建/销毁/stream 绑定统一使用下方的小写 aclsparse* 接口
- * （aclsparseCreate / aclsparseDestroy / aclsparseSetStream / aclsparseGetStream）。
- * 旧的 aclSparseCreate / aclSparseDestroy 与内部结构体 AclSparseHandlerInner 已废弃移除：
- * 它们与 aclsparse* 使用的内部 handle 结构体布局不一致，混用会读到错误的 stream 字段。
- */
 
 /**
  * @brief 创建一个稠密向量。
@@ -287,24 +280,26 @@ aclsparseStatus_t aclsparseSpMVGetBufferSize(aclsparseHandle_t handle, aclsparse
                                                 aclsparseSpMVAlg_t alg, size_t *bufferSize);
 
 /**
- * @brief 对稀疏矩阵进行预处理，以便在后续的SpMV计算中使用。
+ * @brief 对稀疏矩阵进行预处理，以便在后续的 SpMV 计算中使用。
  *
- * @param handle IN, HOST, aclsparseHandle_t类型的句柄，用于管理稀疏计算资源。
- * @param op IN, HOST, 稀疏操作类型，定义了稀疏矩阵的计算方式。
- * @param alpha IN, HOST/DEVICE, 指向常量alpha的指针，用于缩放稀疏矩阵。
- * @param mat IN, HOST 稀疏矩阵的描述符，包含了矩阵的属性和数据。
- * @param x IN, HOST 密集向量x的描述符，作为SpMV计算的输入。
- * @param beta IN, HOST/DEVICE, 指向常量beta的指针，用于缩放结果向量。
- * @param y IN, HOST, 密集向量y的描述符，作为SpMV计算的输出。
- * @param computeType IN, HOST, 计算的数据类型，定义了计算过程中使用的数据精度。
- * @param alg IN, HOST, SpMV计算的算法类型，定义了计算的具体实现方式。
- * @param buffer IN, DEVICE, 用于存储预处理结果的缓冲区指针。
+ * 可选调用；对同一 sparsity pattern 多次执行 SpMV 时可加速后续计算。
+ * 调用后将 buffer 标记为 matA 的 active buffer，后续 SpMV 可复用预处理结果。
  *
- * @return aclsparseStatus_t 返回预处理操作的状态，表示操作是否成功。
+ * @param handle IN, HOST, aclsparse 句柄
+ * @param opA IN, HOST, 稀疏矩阵操作类型
+ * @param alpha IN, HOST/DEVICE, 标量 alpha 指针
+ * @param matA IN, HOST, 稀疏矩阵描述符
+ * @param vecX IN, HOST, 稠密向量 x 描述符
+ * @param beta IN, HOST/DEVICE, 标量 beta 指针
+ * @param vecY IN, HOST, 稠密向量 y 描述符
+ * @param computeType IN, HOST, 计算精度类型
+ * @param alg IN, HOST, SpMV 算法类型
+ * @param externalBuffer IN, DEVICE, 工作缓冲区
+ * @return aclsparseStatus_t 状态码
  */
-aclsparseStatus_t aclSparseSpmvPreprocess(aclsparseHandle_t handle, aclsparseOperation_t op, const void *alpha,
-    aclsparseConstSpMatDescr_t mat, aclsparseConstDnVecDescr_t x, const void *beta, aclsparseDnVecDescr_t y, aclDataType computeType,
-    aclsparseSpMVAlg_t alg, void *buffer);
+aclsparseStatus_t aclsparseSpMVPreprocess(aclsparseHandle_t handle, aclsparseOperation_t opA, const void *alpha,
+    aclsparseConstSpMatDescr_t matA, aclsparseConstDnVecDescr_t vecX, const void *beta, aclsparseDnVecDescr_t vecY,
+    aclDataType computeType, aclsparseSpMVAlg_t alg, void *externalBuffer);
 
 /**
  * @brief 稀疏矩阵向量乘法（SpMV）计算入口
@@ -324,8 +319,6 @@ aclsparseStatus_t aclSparseSpmvPreprocess(aclsparseHandle_t handle, aclsparseOpe
 aclsparseStatus_t aclsparseSpMV(aclsparseHandle_t handle, aclsparseOperation_t opA, const void *alpha,
                                 aclsparseConstSpMatDescr_t matA, aclsparseConstDnVecDescr_t vecX, const void *beta, aclsparseDnVecDescr_t vecY, aclDataType computeType,
                                 aclsparseSpMVAlg_t alg, void *externalBuffer);
-
-aclsparseStatus_t aclSparseSpmvShowWorkSpace(aclsparseHandle_t handle, void *buffer);
 
 /**
  * @brief 创建稠密矩阵描述符。

@@ -1,8 +1,8 @@
-# 稀疏算子接口（aclSparse）
+# 稀疏算子接口（aclsparse）
 
 ## 使用说明
 
-为方便调用稀疏算子，提供一套基于C的API（以aclSparse为前缀API），主要用于稀疏矩阵运算场景。
+为方便调用稀疏算子，提供一套基于 C 的 API（以 aclsparse 为前缀），主要用于稀疏矩阵运算场景。
 
 调用稀疏算子API时，需引用依赖的头文件和库文件。
 
@@ -17,15 +17,14 @@
 | [aclsparseDestroy](#aclsparsedestroy) | 销毁稀疏矩阵处理器 |
 | [aclsparseSetStream](#aclsparsesetstream) | 设置处理器使用的 stream |
 | [aclsparseGetStream](#aclsparsegetstream) | 获取处理器当前的 stream |
-| [aclSparseCreateDnVec](#aclsparsecreatednvec) | 创建稠密向量 |
-| [aclSparseDestroyDnVec](#aclsparsedestroydnvec) | 销毁稀疏向量描述符 |
+| [aclsparseCreateDnVec](#aclsparsecreatednvec) | 创建稠密向量 |
+| [aclsparseDestroyDnVec](#aclsparsedestroydnvec) | 销毁稀疏向量描述符 |
 | [aclsparseCreateCsr](#aclsparsecreatecsr) | 创建CSR格式稀疏矩阵 |
-| [aclsparseCreateCsc](#aclsparsecreatecsc) | 创建CSC格式稀疏矩阵 |
+| [aclsparseCreateCsc](#aclsparsecreatecsc) | 创建CSC格式稀疏矩阵（**暂未支持**） |
 | [aclsparseDestroySpMat](#aclsparsedestroyspmat) | 销毁稀疏矩阵对象 |
-| [aclSparseSpmvGetBufferSize](#aclsparsespmvgetbuffersize) | 获取SpMV缓冲区大小 |
-| [aclSparseSpmvPreprocess](#aclsparsespmvpreprocess) | SpMV预处理 |
-| [aclSparseSpmv](#aclsparsespmv) | 稀疏矩阵向量乘法 |
-| [aclSparseSpmvShowWorkSpace](#aclsparsespmvshowworkspace) | 显示SpMV工作空间 |
+| [aclsparseSpMVGetBufferSize](#aclsparsespmvgetbuffersize) | 获取SpMV缓冲区大小（**暂未支持**） |
+| [aclsparseSpMVPreprocess](#aclsparsespmvpreprocess) | SpMV预处理（**暂未支持**） |
+| [aclsparseSpMV](#aclsparsespmv) | 稀疏矩阵向量乘法 |
 | [aclsparseCreateDnMat](#aclsparsecreatednmat) | 创建稠密矩阵 |
 | [aclsparseDestroyDnMat](#aclsparsedestroydnmat) | 销毁稠密矩阵描述符 |
 | [aclsparseSpMMGetBufferSize](#aclsparsespmmgetbuffersize) | 获取SpMM缓冲区大小 |
@@ -112,10 +111,10 @@ aclsparseStatus_t aclsparseGetStream(aclsparseHandle_t handle, aclrtStream *stre
 
 ---
 
-### aclSparseCreateDnVec
+### aclsparseCreateDnVec
 
 ```c
-aclsparseStatus_t aclSparseCreateDnVec(
+aclsparseStatus_t aclsparseCreateDnVec(
     aclsparseDnVecDescr_t *dnVecDescr,
     int64_t size,
     void *values,
@@ -139,10 +138,10 @@ aclsparseStatus_t aclSparseCreateDnVec(
 
 ---
 
-### aclSparseDestroyDnVec
+### aclsparseDestroyDnVec
 
 ```c
-aclsparseStatus_t aclSparseDestroyDnVec(aclsparseConstDnVecDescr_t dnVecDescr);
+aclsparseStatus_t aclsparseDestroyDnVec(aclsparseConstDnVecDescr_t dnVecDescr);
 ```
 
 **功能**：销毁稀疏向量描述符。
@@ -200,6 +199,8 @@ aclsparseStatus_t aclsparseCreateCsr(
 ---
 
 ### aclsparseCreateCsc
+
+> **支持状态**：暂未支持。当前版本仅提供头文件声明，库中尚无实现；调用会导致链接失败。
 
 ```c
 aclsparseStatus_t aclsparseCreateCsc(
@@ -261,7 +262,7 @@ aclsparseStatus_t aclsparseDestroySpMat(aclsparseConstSpMatDescr_t spMatDescr);
 
 ### 只读(const)描述符构造接口
 
-只读(const)构造接口：数据指针为 `const`，构造出的描述符是 `const` 变体，只能传给接收 `const` 形参的接口（如 SpMV/SpMM 的输入 `mat`/`matA`/`x`/`matB`）。销毁接口（`aclSparseDestroyDnVec` / `aclsparseDestroySpMat` / `aclsparseDestroyDnMat`）统一接收 `const` 变体，因此 const 与非 const 描述符都可销毁。
+只读(const)构造接口：数据指针为 `const`，构造出的描述符是 `const` 变体，只能传给接收 `const` 形参的接口（如 SpMV/SpMM 的输入 `mat`/`matA`/`x`/`matB`）。销毁接口（`aclsparseDestroyDnVec` / `aclsparseDestroySpMat` / `aclsparseDestroyDnMat`）统一接收 `const` 变体，因此 const 与非 const 描述符都可销毁。
 
 ```c
 aclsparseStatus_t aclsparseCreateConstDnVec(aclsparseConstDnVecDescr_t *dnVecDescr, int64_t size,
@@ -280,12 +281,16 @@ aclsparseStatus_t aclsparseCreateConstDnMat(aclsparseConstDnMatDescr_t *dnMatDes
     aclDataType valueType, aclsparseOrder_t order);
 ```
 
+> **支持状态**：`aclsparseCreateConstCsc` 暂未支持。当前版本仅提供头文件声明，库中尚无实现；调用会导致链接失败。
+
 ---
 
-### aclSparseSpmvGetBufferSize
+### aclsparseSpMVGetBufferSize
+
+> **支持状态**：暂未支持。当前版本仅提供头文件声明，库中尚无实现；调用会导致链接失败。
 
 ```c
-aclsparseStatus_t aclSparseSpmvGetBufferSize(
+aclsparseStatus_t aclsparseSpMVGetBufferSize(
     aclsparseHandle_t handle,
     aclsparseOperation_t op,
     const void *alpha,
@@ -321,37 +326,39 @@ aclsparseStatus_t aclSparseSpmvGetBufferSize(
 
 ---
 
-### aclSparseSpmvPreprocess
+### aclsparseSpMVPreprocess
+
+> **支持状态**：暂未支持。当前版本仅提供头文件声明，库中尚无实现；调用会导致链接失败。
 
 ```c
-aclsparseStatus_t aclSparseSpmvPreprocess(
+aclsparseStatus_t aclsparseSpMVPreprocess(
     aclsparseHandle_t handle,
-    aclsparseOperation_t op,
+    aclsparseOperation_t opA,
     const void *alpha,
-    aclsparseConstSpMatDescr_t mat,
-    aclsparseConstDnVecDescr_t x,
+    aclsparseConstSpMatDescr_t matA,
+    aclsparseConstDnVecDescr_t vecX,
     const void *beta,
-    aclsparseDnVecDescr_t y,
+    aclsparseDnVecDescr_t vecY,
     aclDataType computeType,
     aclsparseSpMVAlg_t alg,
-    void *buffer
+    void *externalBuffer
 );
 ```
 
-**功能**：对稀疏矩阵进行预处理，以便在后续的SpMV计算中使用。
+**功能**：对稀疏矩阵进行预处理，以便在后续的 SpMV 计算中复用工作缓冲区、加速计算。
 
 **参数说明**：
 
 - `handle`（IN）：HOST，稀疏计算句柄。
-- `op`（IN）：HOST，稀疏操作类型。
-- `alpha`（IN）：HOST/DEVICE，标量alpha参数。
-- `mat`（IN）：HOST，稀疏矩阵描述符。
-- `x`（IN）：HOST，密集向量x的描述符。
-- `beta`（IN）：HOST/DEVICE，标量beta参数。
-- `y`（IN）：HOST，密集向量y的描述符。
+- `opA`（IN）：HOST，稀疏矩阵操作类型。
+- `alpha`（IN）：HOST/DEVICE，标量 alpha 参数。
+- `matA`（IN）：HOST，稀疏矩阵描述符。
+- `vecX`（IN）：HOST，输入向量 x 的描述符。
+- `beta`（IN）：HOST/DEVICE，标量 beta 参数。
+- `vecY`（IN）：HOST，输出向量 y 的描述符。
 - `computeType`（IN）：HOST，计算的数据类型。
-- `alg`（IN）：HOST，SpMV算法类型。
-- `buffer`（IN）：DEVICE，用于存储预处理结果的缓冲区。
+- `alg`（IN）：HOST，SpMV 算法类型。
+- `externalBuffer`（IN）：DEVICE，工作缓冲区（需先通过 `aclsparseSpMVGetBufferSize` 分配）。
 
 **返回值**：
 
@@ -360,10 +367,10 @@ aclsparseStatus_t aclSparseSpmvPreprocess(
 
 ---
 
-### aclSparseSpmv
+### aclsparseSpMV
 
 ```c
-aclsparseStatus_t aclSparseSpmv(
+aclsparseStatus_t aclsparseSpMV(
     aclsparseHandle_t handle,
     aclsparseOperation_t op,
     const void *alpha,
@@ -390,26 +397,6 @@ aclsparseStatus_t aclSparseSpmv(
 - `y`（IN/OUT）：HOST，密集向量y描述符。
 - `computeType`（IN）：HOST，计算类型。
 - `alg`（IN）：HOST，稀疏矩阵向量乘法算法。
-- `buffer`（IN）：DEVICE，工作缓冲区指针。
-
-**返回值**：
-
-- `ACL_SPARSE_STATUS_SUCCESS`：成功
-- 其他值：失败
-
----
-
-### aclSparseSpmvShowWorkSpace
-
-```c
-aclsparseStatus_t aclSparseSpmvShowWorkSpace(aclsparseHandle_t handle, void *buffer);
-```
-
-**功能**：显示SpMV工作空间信息。
-
-**参数说明**：
-
-- `handle`（IN）：HOST，稀疏矩阵处理器句柄。
 - `buffer`（IN）：DEVICE，工作缓冲区指针。
 
 **返回值**：

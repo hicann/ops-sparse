@@ -41,36 +41,51 @@ static double ElapsedMs(const TimePoint &start, const TimePoint &end)
     return std::chrono::duration<double, std::milli>(end - start).count();
 }
 
-#define CHECK_ACL(x)                                                                        \
-    do {                                                                                    \
-        aclError __ret = x;                                                                 \
-        if (__ret != ACL_ERROR_NONE) {                                                      \
-            std::cerr << __FILE__ << ":" << __LINE__ << " aclError:" << __ret << std::endl; \
-        }                                                                                   \
+struct VerifyResult {
+    bool pass;
+    double mere;
+    double mare;
+    double mae;
+};
+
+static VerifyResult FailVerify()
+{
+    return VerifyResult{false, 0.0, 0.0, 0.0};
+}
+
+#define CHECK_RET(cond, return_expr) \
+    do                               \
+    {                                \
+        if (!(cond))                 \
+        {                            \
+            return_expr;             \
+        }                            \
     } while (0)
 
-#define CHECK_ACL_SPARSE(x)                                                                       \
-    do {                                                                                          \
-        aclsparseStatus_t __ret = x;                                                                \
-        if (__ret != ACL_SPARSE_STATUS_SUCCESS) {                                                 \
-            std::cerr << __FILE__ << ":" << __LINE__ << " aclSparseError:" << __ret << std::endl; \
-        }                                                                                         \
+#define LOG_PRINT(message, ...)     \
+    do                              \
+    {                               \
+        printf(message, ##__VA_ARGS__); \
     } while (0)
 
 namespace {
 
-void Init(int32_t deviceId, aclrtStream *stream)
+int Init(int32_t deviceId, aclrtStream *stream)
 {
-    CHECK_ACL(aclInit(nullptr));
-    CHECK_ACL(aclrtSetDevice(deviceId));
-    CHECK_ACL(aclrtCreateStream(stream));
+    auto ret = aclInit(nullptr);
+    CHECK_RET(ret == ACL_SUCCESS, LOG_PRINT("aclInit failed. ERROR: %d\n", ret); return ret);
+    ret = aclrtSetDevice(deviceId);
+    CHECK_RET(ret == ACL_SUCCESS, LOG_PRINT("aclrtSetDevice failed. ERROR: %d\n", ret); return ret);
+    ret = aclrtCreateStream(stream);
+    CHECK_RET(ret == ACL_SUCCESS, LOG_PRINT("aclrtCreateStream failed. ERROR: %d\n", ret); return ret);
+    return 0;
 }
 
-void Deinit(int32_t deviceId, aclrtStream stream)
+void Finalize(int32_t deviceId, aclrtStream stream)
 {
-    CHECK_ACL(aclrtDestroyStream(stream));
-    CHECK_ACL(aclrtResetDevice(deviceId));
-    CHECK_ACL(aclFinalize());
+    aclrtDestroyStream(stream);
+    aclrtResetDevice(deviceId);
+    aclFinalize();
 }
 
 void GenerateRandomCsr(int32_t m, int32_t k, int32_t nnz,
@@ -183,13 +198,6 @@ void SpmmCpuInt8(int32_t m, int32_t n,
         }
     }
 }
-
-struct VerifyResult {
-    bool pass;
-    double mere;
-    double mare;
-    double mae;
-};
 
 VerifyResult VerifyFloat(const std::vector<float> &got, const std::vector<float> &expect,
                  int32_t m, int32_t n, int32_t ldc, bool cRowMajor, const char *dtypeLabel,
@@ -396,67 +404,98 @@ static VerifyResult RunSpmmTestFp32(int32_t deviceId, aclrtStream stream,
     float   *dVals   = nullptr;
     float   *dB      = nullptr;
     float   *dC      = nullptr;
-    CHECK_ACL(aclrtMalloc((void **)&dRowOff, sizeof(int32_t) * (m + 1), ACL_MEM_MALLOC_HUGE_FIRST));
-    CHECK_ACL(aclrtMalloc((void **)&dColInd, sizeof(int32_t) * nnz, ACL_MEM_MALLOC_HUGE_FIRST));
-    CHECK_ACL(aclrtMalloc((void **)&dVals,   sizeof(float)   * nnz, ACL_MEM_MALLOC_HUGE_FIRST));
-    CHECK_ACL(aclrtMalloc((void **)&dB,      sizeof(float)   * k * ldb, ACL_MEM_MALLOC_HUGE_FIRST));
-    CHECK_ACL(aclrtMalloc((void **)&dC,      sizeof(float)   * m * ldc, ACL_MEM_MALLOC_HUGE_FIRST));
+    aclError aclRet = aclrtMalloc((void **)&dRowOff, sizeof(int32_t) * (m + 1), ACL_MEM_MALLOC_HUGE_FIRST);
+    CHECK_RET(aclRet == ACL_SUCCESS, LOG_PRINT("aclrtMalloc failed. ERROR: %d\n", aclRet); return FailVerify());
+    aclRet = aclrtMalloc((void **)&dColInd, sizeof(int32_t) * nnz, ACL_MEM_MALLOC_HUGE_FIRST);
+    CHECK_RET(aclRet == ACL_SUCCESS, LOG_PRINT("aclrtMalloc failed. ERROR: %d\n", aclRet); return FailVerify());
+    aclRet = aclrtMalloc((void **)&dVals, sizeof(float) * nnz, ACL_MEM_MALLOC_HUGE_FIRST);
+    CHECK_RET(aclRet == ACL_SUCCESS, LOG_PRINT("aclrtMalloc failed. ERROR: %d\n", aclRet); return FailVerify());
+    aclRet = aclrtMalloc((void **)&dB, sizeof(float) * k * ldb, ACL_MEM_MALLOC_HUGE_FIRST);
+    CHECK_RET(aclRet == ACL_SUCCESS, LOG_PRINT("aclrtMalloc failed. ERROR: %d\n", aclRet); return FailVerify());
+    aclRet = aclrtMalloc((void **)&dC, sizeof(float) * m * ldc, ACL_MEM_MALLOC_HUGE_FIRST);
+    CHECK_RET(aclRet == ACL_SUCCESS, LOG_PRINT("aclrtMalloc failed. ERROR: %d\n", aclRet); return FailVerify());
     t1 = Clock::now();
     msDevAlloc = ElapsedMs(t0, t1);
 
     t0 = Clock::now();
-    CHECK_ACL(aclrtMemcpy(dRowOff, sizeof(int32_t) * (m + 1), hRowOff.data(), sizeof(int32_t) * (m + 1), ACL_MEMCPY_HOST_TO_DEVICE));
-    CHECK_ACL(aclrtMemcpy(dColInd, sizeof(int32_t) * nnz, hColInd.data(), sizeof(int32_t) * nnz, ACL_MEMCPY_HOST_TO_DEVICE));
-    CHECK_ACL(aclrtMemcpy(dVals,   sizeof(float)   * nnz, hValsFp32.data(), sizeof(float) * nnz, ACL_MEMCPY_HOST_TO_DEVICE));
-    CHECK_ACL(aclrtMemcpy(dB,      sizeof(float)   * k * ldb, hB.data(), sizeof(float) * k * ldb, ACL_MEMCPY_HOST_TO_DEVICE));
-    CHECK_ACL(aclrtMemcpy(dC,      sizeof(float)   * m * ldc, hC.data(), sizeof(float) * m * ldc, ACL_MEMCPY_HOST_TO_DEVICE));
+    aclRet = aclrtMemcpy(dRowOff, sizeof(int32_t) * (m + 1), hRowOff.data(), sizeof(int32_t) * (m + 1), ACL_MEMCPY_HOST_TO_DEVICE);
+    CHECK_RET(aclRet == ACL_SUCCESS, LOG_PRINT("aclrtMemcpy failed. ERROR: %d\n", aclRet); return FailVerify());
+    aclRet = aclrtMemcpy(dColInd, sizeof(int32_t) * nnz, hColInd.data(), sizeof(int32_t) * nnz, ACL_MEMCPY_HOST_TO_DEVICE);
+    CHECK_RET(aclRet == ACL_SUCCESS, LOG_PRINT("aclrtMemcpy failed. ERROR: %d\n", aclRet); return FailVerify());
+    aclRet = aclrtMemcpy(dVals, sizeof(float) * nnz, hValsFp32.data(), sizeof(float) * nnz, ACL_MEMCPY_HOST_TO_DEVICE);
+    CHECK_RET(aclRet == ACL_SUCCESS, LOG_PRINT("aclrtMemcpy failed. ERROR: %d\n", aclRet); return FailVerify());
+    aclRet = aclrtMemcpy(dB, sizeof(float) * k * ldb, hB.data(), sizeof(float) * k * ldb, ACL_MEMCPY_HOST_TO_DEVICE);
+    CHECK_RET(aclRet == ACL_SUCCESS, LOG_PRINT("aclrtMemcpy failed. ERROR: %d\n", aclRet); return FailVerify());
+    aclRet = aclrtMemcpy(dC, sizeof(float) * m * ldc, hC.data(), sizeof(float) * m * ldc, ACL_MEMCPY_HOST_TO_DEVICE);
+    CHECK_RET(aclRet == ACL_SUCCESS, LOG_PRINT("aclrtMemcpy failed. ERROR: %d\n", aclRet); return FailVerify());
     t1 = Clock::now();
     msH2D = ElapsedMs(t0, t1);
 
     aclsparseHandle_t handle = nullptr;
-    CHECK_ACL_SPARSE(aclsparseCreate(&handle));
+    aclsparseStatus_t sparseRet = aclsparseCreate(&handle);
+    CHECK_RET(sparseRet == ACL_SPARSE_STATUS_SUCCESS,
+              LOG_PRINT("aclsparseCreate failed. ERROR: %d\n", sparseRet);
+              return FailVerify());
+    sparseRet = aclsparseSetStream(handle, stream);
+    CHECK_RET(sparseRet == ACL_SPARSE_STATUS_SUCCESS,
+              LOG_PRINT("aclsparseSetStream failed. ERROR: %d\n", sparseRet);
+              return FailVerify());
 
     aclsparseSpMatDescr_t matA = nullptr;
-    CHECK_ACL_SPARSE(aclsparseCreateCsr(&matA, m, k, nnz, dRowOff, dColInd, dVals,
-                                        ACL_SPARSE_INDEX_32I, ACL_SPARSE_INDEX_32I,
-                                        ACL_SPARSE_INDEX_BASE_ZERO, ACL_FLOAT));
+    sparseRet = aclsparseCreateCsr(&matA, m, k, nnz, dRowOff, dColInd, dVals,
+                                   ACL_SPARSE_INDEX_32I, ACL_SPARSE_INDEX_32I,
+                                   ACL_SPARSE_INDEX_BASE_ZERO, ACL_FLOAT);
+    CHECK_RET(sparseRet == ACL_SPARSE_STATUS_SUCCESS,
+              LOG_PRINT("aclsparseCreateCsr failed. ERROR: %d\n", sparseRet);
+              return FailVerify());
 
     aclsparseDnMatDescr_t matB = nullptr;
     aclsparseDnMatDescr_t matC = nullptr;
-    CHECK_ACL_SPARSE(aclsparseCreateDnMat(&matB, k, n, ldb, dB, ACL_FLOAT, orderB));
-    CHECK_ACL_SPARSE(aclsparseCreateDnMat(&matC, m, n, ldc, dC, ACL_FLOAT, orderC));
+    sparseRet = aclsparseCreateDnMat(&matB, k, n, ldb, dB, ACL_FLOAT, orderB);
+    CHECK_RET(sparseRet == ACL_SPARSE_STATUS_SUCCESS, return FailVerify());
+    sparseRet = aclsparseCreateDnMat(&matC, m, n, ldc, dC, ACL_FLOAT, orderC);
+    CHECK_RET(sparseRet == ACL_SPARSE_STATUS_SUCCESS, return FailVerify());
 
     t0 = Clock::now();
     size_t bufferSize = 0;
-    CHECK_ACL_SPARSE(aclsparseSpMMGetBufferSize(handle,
+    sparseRet = aclsparseSpMMGetBufferSize(handle,
         ACL_SPARSE_OP_NON_TRANSPOSE, opB,
         &alpha, matA, matB, &beta, matC,
-        ACL_FLOAT, ACL_SPARSE_SPMM_CSR_ALG1, &bufferSize));
+        ACL_FLOAT, ACL_SPARSE_SPMM_CSR_ALG1, &bufferSize);
+    CHECK_RET(sparseRet == ACL_SPARSE_STATUS_SUCCESS, return FailVerify());
     t1 = Clock::now();
     msGetBuf = ElapsedMs(t0, t1);
     std::printf("Workspace bytes: %zu\n", bufferSize);
 
     void *dBuffer = nullptr;
-    CHECK_ACL(aclrtMalloc(&dBuffer, bufferSize, ACL_MEM_MALLOC_HUGE_FIRST));
+    aclRet = aclrtMalloc(&dBuffer, bufferSize, ACL_MEM_MALLOC_HUGE_FIRST);
+    CHECK_RET(aclRet == ACL_SUCCESS, LOG_PRINT("aclrtMalloc failed. ERROR: %d\n", aclRet); return FailVerify());
 
     t0 = Clock::now();
-    CHECK_ACL_SPARSE(aclsparseSpMMPreprocess(handle,
+    sparseRet = aclsparseSpMMPreprocess(handle,
         ACL_SPARSE_OP_NON_TRANSPOSE, opB,
         &alpha, matA, matB, &beta, matC,
-        ACL_FLOAT, ACL_SPARSE_SPMM_CSR_ALG1, dBuffer));
+        ACL_FLOAT, ACL_SPARSE_SPMM_CSR_ALG1, dBuffer);
+    CHECK_RET(sparseRet == ACL_SPARSE_STATUS_SUCCESS, return FailVerify());
     t1 = Clock::now();
     msPreprocess = ElapsedMs(t0, t1);
 
     t0 = Clock::now();
-    CHECK_ACL_SPARSE(aclsparseSpMM(handle,
+    sparseRet = aclsparseSpMM(handle,
         ACL_SPARSE_OP_NON_TRANSPOSE, opB,
         &alpha, matA, matB, &beta, matC,
-        ACL_FLOAT, ACL_SPARSE_SPMM_CSR_ALG1, dBuffer));
+        ACL_FLOAT, ACL_SPARSE_SPMM_CSR_ALG1, dBuffer);
+    CHECK_RET(sparseRet == ACL_SPARSE_STATUS_SUCCESS, return FailVerify());
+    aclRet = aclrtSynchronizeStream(stream);
+    CHECK_RET(aclRet == ACL_SUCCESS,
+              LOG_PRINT("[ERROR] aclsparseSpMM: aclrtSynchronizeStream failed, ret=%d\n", aclRet);
+              return FailVerify());
     t1 = Clock::now();
     msSpmm = ElapsedMs(t0, t1);
 
     t0 = Clock::now();
-    CHECK_ACL(aclrtMemcpy(hC.data(), sizeof(float) * m * ldc, dC, sizeof(float) * m * ldc, ACL_MEMCPY_DEVICE_TO_HOST));
+    aclRet = aclrtMemcpy(hC.data(), sizeof(float) * m * ldc, dC, sizeof(float) * m * ldc, ACL_MEMCPY_DEVICE_TO_HOST);
+    CHECK_RET(aclRet == ACL_SUCCESS, LOG_PRINT("aclrtMemcpy failed. ERROR: %d\n", aclRet); return FailVerify());
     t1 = Clock::now();
     msD2H = ElapsedMs(t0, t1);
 
@@ -468,16 +507,16 @@ static VerifyResult RunSpmmTestFp32(int32_t deviceId, aclrtStream stream,
 
     PrintTiming("FP32", msDataGen, msCpuRef, msDevAlloc, msH2D, msGetBuf, msPreprocess, msSpmm, msD2H, msVerify);
 
-    CHECK_ACL_SPARSE(aclsparseDestroyDnMat(matB));
-    CHECK_ACL_SPARSE(aclsparseDestroyDnMat(matC));
-    CHECK_ACL_SPARSE(aclsparseDestroySpMat(matA));
-    CHECK_ACL_SPARSE(aclsparseDestroy(handle));
-    CHECK_ACL(aclrtFree(dBuffer));
-    CHECK_ACL(aclrtFree(dRowOff));
-    CHECK_ACL(aclrtFree(dColInd));
-    CHECK_ACL(aclrtFree(dVals));
-    CHECK_ACL(aclrtFree(dB));
-    CHECK_ACL(aclrtFree(dC));
+    aclsparseDestroyDnMat(matB);
+    aclsparseDestroyDnMat(matC);
+    aclsparseDestroySpMat(matA);
+    aclsparseDestroy(handle);
+    aclrtFree(dBuffer);
+    aclrtFree(dRowOff);
+    aclrtFree(dColInd);
+    aclrtFree(dVals);
+    aclrtFree(dB);
+    aclrtFree(dC);
 
     return vr;
 }
@@ -568,67 +607,98 @@ static VerifyResult RunSpmmTestFp16(int32_t deviceId, aclrtStream stream,
     void     *dVals   = nullptr;
     void     *dB      = nullptr;
     void     *dC      = nullptr;
-    CHECK_ACL(aclrtMalloc((void **)&dRowOff, sizeof(int32_t)  * (m + 1), ACL_MEM_MALLOC_HUGE_FIRST));
-    CHECK_ACL(aclrtMalloc((void **)&dColInd, sizeof(int32_t)  * nnz, ACL_MEM_MALLOC_HUGE_FIRST));
-    CHECK_ACL(aclrtMalloc(&dVals,   sizeof(uint16_t) * nnz, ACL_MEM_MALLOC_HUGE_FIRST));
-    CHECK_ACL(aclrtMalloc(&dB,      sizeof(uint16_t) * k * ldb, ACL_MEM_MALLOC_HUGE_FIRST));
-    CHECK_ACL(aclrtMalloc(&dC,      sizeof(uint16_t) * m * ldc, ACL_MEM_MALLOC_HUGE_FIRST));
+    aclError aclRet = aclrtMalloc((void **)&dRowOff, sizeof(int32_t) * (m + 1), ACL_MEM_MALLOC_HUGE_FIRST);
+    CHECK_RET(aclRet == ACL_SUCCESS, LOG_PRINT("aclrtMalloc failed. ERROR: %d\n", aclRet); return FailVerify());
+    aclRet = aclrtMalloc((void **)&dColInd, sizeof(int32_t) * nnz, ACL_MEM_MALLOC_HUGE_FIRST);
+    CHECK_RET(aclRet == ACL_SUCCESS, LOG_PRINT("aclrtMalloc failed. ERROR: %d\n", aclRet); return FailVerify());
+    aclRet = aclrtMalloc(&dVals, sizeof(uint16_t) * nnz, ACL_MEM_MALLOC_HUGE_FIRST);
+    CHECK_RET(aclRet == ACL_SUCCESS, LOG_PRINT("aclrtMalloc failed. ERROR: %d\n", aclRet); return FailVerify());
+    aclRet = aclrtMalloc(&dB, sizeof(uint16_t) * k * ldb, ACL_MEM_MALLOC_HUGE_FIRST);
+    CHECK_RET(aclRet == ACL_SUCCESS, LOG_PRINT("aclrtMalloc failed. ERROR: %d\n", aclRet); return FailVerify());
+    aclRet = aclrtMalloc(&dC, sizeof(uint16_t) * m * ldc, ACL_MEM_MALLOC_HUGE_FIRST);
+    CHECK_RET(aclRet == ACL_SUCCESS, LOG_PRINT("aclrtMalloc failed. ERROR: %d\n", aclRet); return FailVerify());
     t1 = Clock::now();
     msDevAlloc = ElapsedMs(t0, t1);
 
     t0 = Clock::now();
-    CHECK_ACL(aclrtMemcpy(dRowOff, sizeof(int32_t)  * (m + 1), hRowOff.data(),   sizeof(int32_t) * (m + 1), ACL_MEMCPY_HOST_TO_DEVICE));
-    CHECK_ACL(aclrtMemcpy(dColInd, sizeof(int32_t)  * nnz,     hColInd.data(),   sizeof(int32_t) * nnz, ACL_MEMCPY_HOST_TO_DEVICE));
-    CHECK_ACL(aclrtMemcpy(dVals,   sizeof(uint16_t) * nnz,     hValsFp16.data(), sizeof(uint16_t) * nnz, ACL_MEMCPY_HOST_TO_DEVICE));
-    CHECK_ACL(aclrtMemcpy(dB,      sizeof(uint16_t) * k * ldb, hBFp16.data(),    sizeof(uint16_t) * k * ldb, ACL_MEMCPY_HOST_TO_DEVICE));
-    CHECK_ACL(aclrtMemcpy(dC,      sizeof(uint16_t) * m * ldc, hCFp16.data(),    sizeof(uint16_t) * m * ldc, ACL_MEMCPY_HOST_TO_DEVICE));
+    aclRet = aclrtMemcpy(dRowOff, sizeof(int32_t) * (m + 1), hRowOff.data(), sizeof(int32_t) * (m + 1), ACL_MEMCPY_HOST_TO_DEVICE);
+    CHECK_RET(aclRet == ACL_SUCCESS, LOG_PRINT("aclrtMemcpy failed. ERROR: %d\n", aclRet); return FailVerify());
+    aclRet = aclrtMemcpy(dColInd, sizeof(int32_t) * nnz, hColInd.data(), sizeof(int32_t) * nnz, ACL_MEMCPY_HOST_TO_DEVICE);
+    CHECK_RET(aclRet == ACL_SUCCESS, LOG_PRINT("aclrtMemcpy failed. ERROR: %d\n", aclRet); return FailVerify());
+    aclRet = aclrtMemcpy(dVals, sizeof(uint16_t) * nnz, hValsFp16.data(), sizeof(uint16_t) * nnz, ACL_MEMCPY_HOST_TO_DEVICE);
+    CHECK_RET(aclRet == ACL_SUCCESS, LOG_PRINT("aclrtMemcpy failed. ERROR: %d\n", aclRet); return FailVerify());
+    aclRet = aclrtMemcpy(dB, sizeof(uint16_t) * k * ldb, hBFp16.data(), sizeof(uint16_t) * k * ldb, ACL_MEMCPY_HOST_TO_DEVICE);
+    CHECK_RET(aclRet == ACL_SUCCESS, LOG_PRINT("aclrtMemcpy failed. ERROR: %d\n", aclRet); return FailVerify());
+    aclRet = aclrtMemcpy(dC, sizeof(uint16_t) * m * ldc, hCFp16.data(), sizeof(uint16_t) * m * ldc, ACL_MEMCPY_HOST_TO_DEVICE);
+    CHECK_RET(aclRet == ACL_SUCCESS, LOG_PRINT("aclrtMemcpy failed. ERROR: %d\n", aclRet); return FailVerify());
     t1 = Clock::now();
     msH2D = ElapsedMs(t0, t1);
 
     aclsparseHandle_t handle = nullptr;
-    CHECK_ACL_SPARSE(aclsparseCreate(&handle));
+    aclsparseStatus_t sparseRet = aclsparseCreate(&handle);
+    CHECK_RET(sparseRet == ACL_SPARSE_STATUS_SUCCESS,
+              LOG_PRINT("aclsparseCreate failed. ERROR: %d\n", sparseRet);
+              return FailVerify());
+    sparseRet = aclsparseSetStream(handle, stream);
+    CHECK_RET(sparseRet == ACL_SPARSE_STATUS_SUCCESS,
+              LOG_PRINT("aclsparseSetStream failed. ERROR: %d\n", sparseRet);
+              return FailVerify());
 
     aclsparseSpMatDescr_t matA = nullptr;
-    CHECK_ACL_SPARSE(aclsparseCreateCsr(&matA, m, k, nnz, dRowOff, dColInd, dVals,
-                                        ACL_SPARSE_INDEX_32I, ACL_SPARSE_INDEX_32I,
-                                        ACL_SPARSE_INDEX_BASE_ZERO, ACL_FLOAT16));
+    sparseRet = aclsparseCreateCsr(&matA, m, k, nnz, dRowOff, dColInd, dVals,
+                                   ACL_SPARSE_INDEX_32I, ACL_SPARSE_INDEX_32I,
+                                   ACL_SPARSE_INDEX_BASE_ZERO, ACL_FLOAT16);
+    CHECK_RET(sparseRet == ACL_SPARSE_STATUS_SUCCESS,
+              LOG_PRINT("aclsparseCreateCsr failed. ERROR: %d\n", sparseRet);
+              return FailVerify());
 
     aclsparseDnMatDescr_t matB = nullptr;
     aclsparseDnMatDescr_t matC = nullptr;
-    CHECK_ACL_SPARSE(aclsparseCreateDnMat(&matB, k, n, ldb, dB, ACL_FLOAT16, orderB));
-    CHECK_ACL_SPARSE(aclsparseCreateDnMat(&matC, m, n, ldc, dC, ACL_FLOAT16, orderC));
+    sparseRet = aclsparseCreateDnMat(&matB, k, n, ldb, dB, ACL_FLOAT16, orderB);
+    CHECK_RET(sparseRet == ACL_SPARSE_STATUS_SUCCESS, return FailVerify());
+    sparseRet = aclsparseCreateDnMat(&matC, m, n, ldc, dC, ACL_FLOAT16, orderC);
+    CHECK_RET(sparseRet == ACL_SPARSE_STATUS_SUCCESS, return FailVerify());
 
     t0 = Clock::now();
     size_t bufferSize = 0;
-    CHECK_ACL_SPARSE(aclsparseSpMMGetBufferSize(handle,
+    sparseRet = aclsparseSpMMGetBufferSize(handle,
         ACL_SPARSE_OP_NON_TRANSPOSE, opB,
         &alpha, matA, matB, &beta, matC,
-        ACL_FLOAT, ACL_SPARSE_SPMM_CSR_ALG1, &bufferSize));
+        ACL_FLOAT, ACL_SPARSE_SPMM_CSR_ALG1, &bufferSize);
+    CHECK_RET(sparseRet == ACL_SPARSE_STATUS_SUCCESS, return FailVerify());
     t1 = Clock::now();
     msGetBuf = ElapsedMs(t0, t1);
     std::printf("Workspace bytes: %zu\n", bufferSize);
 
     void *dBuffer = nullptr;
-    CHECK_ACL(aclrtMalloc(&dBuffer, bufferSize, ACL_MEM_MALLOC_HUGE_FIRST));
+    aclRet = aclrtMalloc(&dBuffer, bufferSize, ACL_MEM_MALLOC_HUGE_FIRST);
+    CHECK_RET(aclRet == ACL_SUCCESS, LOG_PRINT("aclrtMalloc failed. ERROR: %d\n", aclRet); return FailVerify());
 
     t0 = Clock::now();
-    CHECK_ACL_SPARSE(aclsparseSpMMPreprocess(handle,
+    sparseRet = aclsparseSpMMPreprocess(handle,
         ACL_SPARSE_OP_NON_TRANSPOSE, opB,
         &alpha, matA, matB, &beta, matC,
-        ACL_FLOAT, ACL_SPARSE_SPMM_CSR_ALG1, dBuffer));
+        ACL_FLOAT, ACL_SPARSE_SPMM_CSR_ALG1, dBuffer);
+    CHECK_RET(sparseRet == ACL_SPARSE_STATUS_SUCCESS, return FailVerify());
     t1 = Clock::now();
     msPreprocess = ElapsedMs(t0, t1);
 
     t0 = Clock::now();
-    CHECK_ACL_SPARSE(aclsparseSpMM(handle,
+    sparseRet = aclsparseSpMM(handle,
         ACL_SPARSE_OP_NON_TRANSPOSE, opB,
         &alpha, matA, matB, &beta, matC,
-        ACL_FLOAT, ACL_SPARSE_SPMM_CSR_ALG1, dBuffer));
+        ACL_FLOAT, ACL_SPARSE_SPMM_CSR_ALG1, dBuffer);
+    CHECK_RET(sparseRet == ACL_SPARSE_STATUS_SUCCESS, return FailVerify());
+    aclRet = aclrtSynchronizeStream(stream);
+    CHECK_RET(aclRet == ACL_SUCCESS,
+              LOG_PRINT("[ERROR] aclsparseSpMM: aclrtSynchronizeStream failed, ret=%d\n", aclRet);
+              return FailVerify());
     t1 = Clock::now();
     msSpmm = ElapsedMs(t0, t1);
 
     t0 = Clock::now();
-    CHECK_ACL(aclrtMemcpy(hCFp16.data(), sizeof(uint16_t) * m * ldc, dC, sizeof(uint16_t) * m * ldc, ACL_MEMCPY_DEVICE_TO_HOST));
+    aclRet = aclrtMemcpy(hCFp16.data(), sizeof(uint16_t) * m * ldc, dC, sizeof(uint16_t) * m * ldc, ACL_MEMCPY_DEVICE_TO_HOST);
+    CHECK_RET(aclRet == ACL_SUCCESS, LOG_PRINT("aclrtMemcpy failed. ERROR: %d\n", aclRet); return FailVerify());
     t1 = Clock::now();
     msD2H = ElapsedMs(t0, t1);
 
@@ -644,16 +714,16 @@ static VerifyResult RunSpmmTestFp16(int32_t deviceId, aclrtStream stream,
 
     PrintTiming("FP16", msDataGen, msCpuRef, msDevAlloc, msH2D, msGetBuf, msPreprocess, msSpmm, msD2H, msVerify);
 
-    CHECK_ACL_SPARSE(aclsparseDestroyDnMat(matB));
-    CHECK_ACL_SPARSE(aclsparseDestroyDnMat(matC));
-    CHECK_ACL_SPARSE(aclsparseDestroySpMat(matA));
-    CHECK_ACL_SPARSE(aclsparseDestroy(handle));
-    CHECK_ACL(aclrtFree(dBuffer));
-    CHECK_ACL(aclrtFree(dRowOff));
-    CHECK_ACL(aclrtFree(dColInd));
-    CHECK_ACL(aclrtFree(dVals));
-    CHECK_ACL(aclrtFree(dB));
-    CHECK_ACL(aclrtFree(dC));
+    aclsparseDestroyDnMat(matB);
+    aclsparseDestroyDnMat(matC);
+    aclsparseDestroySpMat(matA);
+    aclsparseDestroy(handle);
+    aclrtFree(dBuffer);
+    aclrtFree(dRowOff);
+    aclrtFree(dColInd);
+    aclrtFree(dVals);
+    aclrtFree(dB);
+    aclrtFree(dC);
 
     return vr;
 }
@@ -716,67 +786,98 @@ static VerifyResult RunSpmmTestInt8(int32_t deviceId, aclrtStream stream,
     int8_t   *dVals   = nullptr;
     int8_t   *dB      = nullptr;
     int32_t  *dC      = nullptr;
-    CHECK_ACL(aclrtMalloc((void **)&dRowOff, sizeof(int32_t) * (m + 1), ACL_MEM_MALLOC_HUGE_FIRST));
-    CHECK_ACL(aclrtMalloc((void **)&dColInd, sizeof(int32_t) * nnz, ACL_MEM_MALLOC_HUGE_FIRST));
-    CHECK_ACL(aclrtMalloc((void **)&dVals,   sizeof(int8_t)  * nnz, ACL_MEM_MALLOC_HUGE_FIRST));
-    CHECK_ACL(aclrtMalloc((void **)&dB,      sizeof(int8_t)  * k * ldb, ACL_MEM_MALLOC_HUGE_FIRST));
-    CHECK_ACL(aclrtMalloc((void **)&dC,      sizeof(int32_t) * m * ldc, ACL_MEM_MALLOC_HUGE_FIRST));
+    aclError aclRet = aclrtMalloc((void **)&dRowOff, sizeof(int32_t) * (m + 1), ACL_MEM_MALLOC_HUGE_FIRST);
+    CHECK_RET(aclRet == ACL_SUCCESS, LOG_PRINT("aclrtMalloc failed. ERROR: %d\n", aclRet); return FailVerify());
+    aclRet = aclrtMalloc((void **)&dColInd, sizeof(int32_t) * nnz, ACL_MEM_MALLOC_HUGE_FIRST);
+    CHECK_RET(aclRet == ACL_SUCCESS, LOG_PRINT("aclrtMalloc failed. ERROR: %d\n", aclRet); return FailVerify());
+    aclRet = aclrtMalloc((void **)&dVals, sizeof(int8_t) * nnz, ACL_MEM_MALLOC_HUGE_FIRST);
+    CHECK_RET(aclRet == ACL_SUCCESS, LOG_PRINT("aclrtMalloc failed. ERROR: %d\n", aclRet); return FailVerify());
+    aclRet = aclrtMalloc((void **)&dB, sizeof(int8_t) * k * ldb, ACL_MEM_MALLOC_HUGE_FIRST);
+    CHECK_RET(aclRet == ACL_SUCCESS, LOG_PRINT("aclrtMalloc failed. ERROR: %d\n", aclRet); return FailVerify());
+    aclRet = aclrtMalloc((void **)&dC, sizeof(int32_t) * m * ldc, ACL_MEM_MALLOC_HUGE_FIRST);
+    CHECK_RET(aclRet == ACL_SUCCESS, LOG_PRINT("aclrtMalloc failed. ERROR: %d\n", aclRet); return FailVerify());
     t1 = Clock::now();
     msDevAlloc = ElapsedMs(t0, t1);
 
     t0 = Clock::now();
-    CHECK_ACL(aclrtMemcpy(dRowOff, sizeof(int32_t) * (m + 1), hRowOff.data(),   sizeof(int32_t) * (m + 1), ACL_MEMCPY_HOST_TO_DEVICE));
-    CHECK_ACL(aclrtMemcpy(dColInd, sizeof(int32_t) * nnz,     hColInd.data(),   sizeof(int32_t) * nnz, ACL_MEMCPY_HOST_TO_DEVICE));
-    CHECK_ACL(aclrtMemcpy(dVals,   sizeof(int8_t)  * nnz,     hValsInt8.data(), sizeof(int8_t)  * nnz, ACL_MEMCPY_HOST_TO_DEVICE));
-    CHECK_ACL(aclrtMemcpy(dB,      sizeof(int8_t)  * k * ldb, hBInt8.data(),    sizeof(int8_t)  * k * ldb, ACL_MEMCPY_HOST_TO_DEVICE));
-    CHECK_ACL(aclrtMemcpy(dC,      sizeof(int32_t) * m * ldc, hCInt32.data(),   sizeof(int32_t) * m * ldc, ACL_MEMCPY_HOST_TO_DEVICE));
+    aclRet = aclrtMemcpy(dRowOff, sizeof(int32_t) * (m + 1), hRowOff.data(), sizeof(int32_t) * (m + 1), ACL_MEMCPY_HOST_TO_DEVICE);
+    CHECK_RET(aclRet == ACL_SUCCESS, LOG_PRINT("aclrtMemcpy failed. ERROR: %d\n", aclRet); return FailVerify());
+    aclRet = aclrtMemcpy(dColInd, sizeof(int32_t) * nnz, hColInd.data(), sizeof(int32_t) * nnz, ACL_MEMCPY_HOST_TO_DEVICE);
+    CHECK_RET(aclRet == ACL_SUCCESS, LOG_PRINT("aclrtMemcpy failed. ERROR: %d\n", aclRet); return FailVerify());
+    aclRet = aclrtMemcpy(dVals, sizeof(int8_t) * nnz, hValsInt8.data(), sizeof(int8_t) * nnz, ACL_MEMCPY_HOST_TO_DEVICE);
+    CHECK_RET(aclRet == ACL_SUCCESS, LOG_PRINT("aclrtMemcpy failed. ERROR: %d\n", aclRet); return FailVerify());
+    aclRet = aclrtMemcpy(dB, sizeof(int8_t) * k * ldb, hBInt8.data(), sizeof(int8_t) * k * ldb, ACL_MEMCPY_HOST_TO_DEVICE);
+    CHECK_RET(aclRet == ACL_SUCCESS, LOG_PRINT("aclrtMemcpy failed. ERROR: %d\n", aclRet); return FailVerify());
+    aclRet = aclrtMemcpy(dC, sizeof(int32_t) * m * ldc, hCInt32.data(), sizeof(int32_t) * m * ldc, ACL_MEMCPY_HOST_TO_DEVICE);
+    CHECK_RET(aclRet == ACL_SUCCESS, LOG_PRINT("aclrtMemcpy failed. ERROR: %d\n", aclRet); return FailVerify());
     t1 = Clock::now();
     msH2D = ElapsedMs(t0, t1);
 
     aclsparseHandle_t handle = nullptr;
-    CHECK_ACL_SPARSE(aclsparseCreate(&handle));
+    aclsparseStatus_t sparseRet = aclsparseCreate(&handle);
+    CHECK_RET(sparseRet == ACL_SPARSE_STATUS_SUCCESS,
+              LOG_PRINT("aclsparseCreate failed. ERROR: %d\n", sparseRet);
+              return FailVerify());
+    sparseRet = aclsparseSetStream(handle, stream);
+    CHECK_RET(sparseRet == ACL_SPARSE_STATUS_SUCCESS,
+              LOG_PRINT("aclsparseSetStream failed. ERROR: %d\n", sparseRet);
+              return FailVerify());
 
     aclsparseSpMatDescr_t matA = nullptr;
-    CHECK_ACL_SPARSE(aclsparseCreateCsr(&matA, m, k, nnz, dRowOff, dColInd, dVals,
-                                        ACL_SPARSE_INDEX_32I, ACL_SPARSE_INDEX_32I,
-                                        ACL_SPARSE_INDEX_BASE_ZERO, ACL_INT8));
+    sparseRet = aclsparseCreateCsr(&matA, m, k, nnz, dRowOff, dColInd, dVals,
+                                   ACL_SPARSE_INDEX_32I, ACL_SPARSE_INDEX_32I,
+                                   ACL_SPARSE_INDEX_BASE_ZERO, ACL_INT8);
+    CHECK_RET(sparseRet == ACL_SPARSE_STATUS_SUCCESS,
+              LOG_PRINT("aclsparseCreateCsr failed. ERROR: %d\n", sparseRet);
+              return FailVerify());
 
     aclsparseDnMatDescr_t matB = nullptr;
     aclsparseDnMatDescr_t matC = nullptr;
-    CHECK_ACL_SPARSE(aclsparseCreateDnMat(&matB, k, n, ldb, dB, ACL_INT8, orderB));
-    CHECK_ACL_SPARSE(aclsparseCreateDnMat(&matC, m, n, ldc, dC, ACL_INT32, orderC));
+    sparseRet = aclsparseCreateDnMat(&matB, k, n, ldb, dB, ACL_INT8, orderB);
+    CHECK_RET(sparseRet == ACL_SPARSE_STATUS_SUCCESS, return FailVerify());
+    sparseRet = aclsparseCreateDnMat(&matC, m, n, ldc, dC, ACL_INT32, orderC);
+    CHECK_RET(sparseRet == ACL_SPARSE_STATUS_SUCCESS, return FailVerify());
 
     t0 = Clock::now();
     size_t bufferSize = 0;
-    CHECK_ACL_SPARSE(aclsparseSpMMGetBufferSize(handle,
+    sparseRet = aclsparseSpMMGetBufferSize(handle,
         ACL_SPARSE_OP_NON_TRANSPOSE, opB,
         &alpha, matA, matB, &beta, matC,
-        ACL_INT32, ACL_SPARSE_SPMM_CSR_ALG1, &bufferSize));
+        ACL_INT32, ACL_SPARSE_SPMM_CSR_ALG1, &bufferSize);
+    CHECK_RET(sparseRet == ACL_SPARSE_STATUS_SUCCESS, return FailVerify());
     t1 = Clock::now();
     msGetBuf = ElapsedMs(t0, t1);
     std::printf("Workspace bytes: %zu\n", bufferSize);
 
     void *dBuffer = nullptr;
-    CHECK_ACL(aclrtMalloc(&dBuffer, bufferSize, ACL_MEM_MALLOC_HUGE_FIRST));
+    aclRet = aclrtMalloc(&dBuffer, bufferSize, ACL_MEM_MALLOC_HUGE_FIRST);
+    CHECK_RET(aclRet == ACL_SUCCESS, LOG_PRINT("aclrtMalloc failed. ERROR: %d\n", aclRet); return FailVerify());
 
     t0 = Clock::now();
-    CHECK_ACL_SPARSE(aclsparseSpMMPreprocess(handle,
+    sparseRet = aclsparseSpMMPreprocess(handle,
         ACL_SPARSE_OP_NON_TRANSPOSE, opB,
         &alpha, matA, matB, &beta, matC,
-        ACL_INT32, ACL_SPARSE_SPMM_CSR_ALG1, dBuffer));
+        ACL_INT32, ACL_SPARSE_SPMM_CSR_ALG1, dBuffer);
+    CHECK_RET(sparseRet == ACL_SPARSE_STATUS_SUCCESS, return FailVerify());
     t1 = Clock::now();
     msPreprocess = ElapsedMs(t0, t1);
 
     t0 = Clock::now();
-    CHECK_ACL_SPARSE(aclsparseSpMM(handle,
+    sparseRet = aclsparseSpMM(handle,
         ACL_SPARSE_OP_NON_TRANSPOSE, opB,
         &alpha, matA, matB, &beta, matC,
-        ACL_INT32, ACL_SPARSE_SPMM_CSR_ALG1, dBuffer));
+        ACL_INT32, ACL_SPARSE_SPMM_CSR_ALG1, dBuffer);
+    CHECK_RET(sparseRet == ACL_SPARSE_STATUS_SUCCESS, return FailVerify());
+    aclRet = aclrtSynchronizeStream(stream);
+    CHECK_RET(aclRet == ACL_SUCCESS,
+              LOG_PRINT("[ERROR] aclsparseSpMM: aclrtSynchronizeStream failed, ret=%d\n", aclRet);
+              return FailVerify());
     t1 = Clock::now();
     msSpmm = ElapsedMs(t0, t1);
 
     t0 = Clock::now();
-    CHECK_ACL(aclrtMemcpy(hCInt32.data(), sizeof(int32_t) * m * ldc, dC, sizeof(int32_t) * m * ldc, ACL_MEMCPY_DEVICE_TO_HOST));
+    aclRet = aclrtMemcpy(hCInt32.data(), sizeof(int32_t) * m * ldc, dC, sizeof(int32_t) * m * ldc, ACL_MEMCPY_DEVICE_TO_HOST);
+    CHECK_RET(aclRet == ACL_SUCCESS, LOG_PRINT("aclrtMemcpy failed. ERROR: %d\n", aclRet); return FailVerify());
     t1 = Clock::now();
     msD2H = ElapsedMs(t0, t1);
 
@@ -787,16 +888,16 @@ static VerifyResult RunSpmmTestInt8(int32_t deviceId, aclrtStream stream,
 
     PrintTiming("INT8", msDataGen, msCpuRef, msDevAlloc, msH2D, msGetBuf, msPreprocess, msSpmm, msD2H, msVerify);
 
-    CHECK_ACL_SPARSE(aclsparseDestroyDnMat(matB));
-    CHECK_ACL_SPARSE(aclsparseDestroyDnMat(matC));
-    CHECK_ACL_SPARSE(aclsparseDestroySpMat(matA));
-    CHECK_ACL_SPARSE(aclsparseDestroy(handle));
-    CHECK_ACL(aclrtFree(dBuffer));
-    CHECK_ACL(aclrtFree(dRowOff));
-    CHECK_ACL(aclrtFree(dColInd));
-    CHECK_ACL(aclrtFree(dVals));
-    CHECK_ACL(aclrtFree(dB));
-    CHECK_ACL(aclrtFree(dC));
+    aclsparseDestroyDnMat(matB);
+    aclsparseDestroyDnMat(matC);
+    aclsparseDestroySpMat(matA);
+    aclsparseDestroy(handle);
+    aclrtFree(dBuffer);
+    aclrtFree(dRowOff);
+    aclrtFree(dColInd);
+    aclrtFree(dVals);
+    aclrtFree(dB);
+    aclrtFree(dC);
 
     return vr;
 }
@@ -810,7 +911,8 @@ int main()
 
     int32_t deviceId = 0;
     aclrtStream stream = nullptr;
-    Init(deviceId, &stream);
+    int ret = Init(deviceId, &stream);
+    CHECK_RET(ret == ACL_SUCCESS, return EXIT_FAILURE);
 
     constexpr int32_t kM   = 256;
     constexpr int32_t kK   = 256;
@@ -847,6 +949,6 @@ int main()
     bool allPass = rFp32.pass && rFp16.pass && rInt8.pass;
     std::printf("  Overall: %s\n", allPass ? "PASS" : "FAIL");
 
-    Deinit(deviceId, stream);
+    Finalize(deviceId, stream);
     return allPass ? EXIT_SUCCESS : EXIT_FAILURE;
 }

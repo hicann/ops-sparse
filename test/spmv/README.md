@@ -116,11 +116,10 @@ $$
 2. **CPU 参考计算**：非转置使用 `SpmvCpu`，转置使用 `SpmvTransCpu`
 3. **初始化 ACL 环境**：初始化 ACL 环境，设置设备和创建流
 4. **创建设备内存**：使用 `CreateDeviceTensor` 拷贝矩阵和向量数据到 device，用 `unique_ptr` 托管生命周期
-5. **创建描述符**：使用 `aclSparseCreateCsr` 和 `aclSparseCreateDnVec` 创建矩阵和向量描述符
-6. **查询 Buffer 大小**：调用 `aclsparseSpMVGetBufferSize` 获取所需工作空间大小
-7. **执行 SpMV**：调用 `aclsparseSpMV` 执行稀疏矩阵向量乘法
-8. **结果验证**：将 device 结果回读到 host，与 CPU 参考结果比较。float 类型使用相对误差（MARE/MERE），int32 类型使用绝对误差（逐元素完全匹配检查）
-9. **清理资源**：销毁描述符，unique_ptr 自动释放设备/主机内存
+5. **创建描述符**：使用 `aclsparseCreateCsr` 和 `aclsparseCreateDnVec` 创建矩阵和向量描述符
+6. **执行 SpMV**：调用 `aclsparseSpMV` 执行稀疏矩阵向量乘法（当前测试传入 `externalBuffer = nullptr`；`aclsparseSpMVGetBufferSize` / `aclsparseSpMVPreprocess` **暂未支持**，见下方接口说明）
+7. **结果验证**：将 device 结果回读到 host，与 CPU 参考结果比较。float 类型使用相对误差（MARE/MERE），int32 类型使用绝对误差（逐元素完全匹配检查）
+8. **清理资源**：销毁描述符，unique_ptr 自动释放设备/主机内存
 
 - **测试覆盖**
 
@@ -234,6 +233,8 @@ Mean Absolute Error = 0; Max Absolute Error = 0
 
 ### aclsparseSpMVGetBufferSize
 
+> **支持状态**：暂未支持。当前版本仅提供头文件声明，库中尚无实现；调用会导致链接失败。
+
 **函数原型**：
 
 ```cpp
@@ -264,6 +265,26 @@ aclsparseStatus_t aclsparseSpMVGetBufferSize(
 | computeType | IN | 计算数据类型（`ACL_FLOAT` / `ACL_INT32`） |
 | alg | IN | 算法类型，当前仅支持 `ACL_SPARSE_SPMV_ALG_DEFAULT` |
 | bufferSize | OUT | 所需工作缓冲区大小 |
+
+### aclsparseSpMVPreprocess
+
+> **支持状态**：暂未支持。当前版本仅提供头文件声明，库中尚无实现；调用会导致链接失败。
+
+**函数原型**：
+
+```cpp
+aclsparseStatus_t aclsparseSpMVPreprocess(
+    aclsparseHandle_t handle,
+    aclsparseOperation_t opA,
+    const void *alpha,
+    aclsparseConstSpMatDescr_t matA,
+    aclsparseConstDnVecDescr_t vecX,
+    const void *beta,
+    aclsparseDnVecDescr_t vecY,
+    aclDataType computeType,
+    aclsparseSpMVAlg_t alg,
+    void *externalBuffer);
+```
 
 ### aclsparseSpMV
 
