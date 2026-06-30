@@ -15,10 +15,10 @@ $$
 
 ## 支持的 AI 处理器
 
-| 产品 | 是否支持 |
-| ---- | :----: |
-| Atlas A3 训练系列产品/Atlas A3 推理系列产品 | √ |
-| Atlas A2 训练系列产品/Atlas A2 推理系列产品 | √ |
+| 产品                                        | 是否支持 |
+| ------------------------------------------- | :------: |
+| Atlas A3 训练系列产品/Atlas A3 推理系列产品 |    √    |
+| Atlas A2 训练系列产品/Atlas A2 推理系列产品 |    √    |
 
 ## 目录结构介绍
 
@@ -56,15 +56,15 @@ $$
 
 算子支持多种输入精度、计算精度与输出精度的组合：
 
-| 输入 A、X 类型 | 计算类型 (computeType) | 输出 Y 类型 | 文件名中的模板参数 |
-| :---: | :---: | :---: | :--- |
-| float32 | float32 | float32 | `<float>` |
-| int32 | int32 | int32 | `<int32_t>` |
-| int32 | float32 | float32 | `<float, int32_t, float>` |
-| float16 | float32 | float32 | `<float, half, float>` |
-| float16 | float32 | float16 | `<float, half, half>` |
-| bfloat16 | float32 | float32 | `<float, bfloat16_t, float>` |
-| bfloat16 | float32 | bfloat16 | `<float, bfloat16_t, bfloat16_t>` |
+| 输入 A、X 类型 | 计算类型 (computeType) | 输出 Y 类型 | 文件名中的模板参数                  |
+| :------------: | :--------------------: | :---------: | :---------------------------------- |
+|    float32    |        float32        |   float32   | `<float>`                         |
+|     int32     |         int32         |    int32    | `<int32_t>`                       |
+|     int32     |        float32        |   float32   | `<float, int32_t, float>`         |
+|    float16    |        float32        |   float32   | `<float, half, float>`            |
+|    float16    |        float32        |   float16   | `<float, half, half>`             |
+|    bfloat16    |        float32        |   float32   | `<float, bfloat16_t, float>`      |
+|    bfloat16    |        float32        |  bfloat16  | `<float, bfloat16_t, bfloat16_t>` |
 
 > **注意**：`alpha`/`beta` 的类型必须与 `computeType` 一致：`computeType=float32` 时传 `float` 指针，`computeType=int32` 时传 `int32_t` 指针，否则会导致类型双关错误。
 
@@ -87,16 +87,16 @@ $$
 
 ### 算子规格参数说明
 
-| 参数名 | 输入/输出/属性 | 描述 | 数据类型 | 数据格式 |
-| ------ | ------------ | ---- | -------- | ------- |
-| csrRowPtr | 输入 | 矩阵中每一行的第一个非零元素在 csrVal 中的位置 | int32_t | ND |
-| csrColInd | 输入 | csrVal 中每个非零元素的列索引 | int32_t | ND |
-| csrVal | 输入 | 稀疏矩阵中所有非零元素的值 | float / int32_t / half / bfloat16 | ND |
-| xVec | 输入 | 被乘稠密向量 | 与 csrVal 一致 | ND |
-| yVec | 输入/输出 | 结果向量（也作为 beta*y 的输入） | float / int32_t / half / bfloat16 | ND |
-| alpha | 输入 | 标量系数 alpha | 与 computeType 一致 | scalar |
-| beta | 输入 | 标量系数 beta | 与 computeType 一致 | scalar |
-| opA | 属性 | 矩阵操作类型（NON_TRANSPOSE / TRANSPOSE） | enum | — |
+| 参数名    | 输入/输出/属性 | 描述                                           | 数据类型                          | 数据格式 |
+| --------- | -------------- | ---------------------------------------------- | --------------------------------- | -------- |
+| csrRowPtr | 输入           | 矩阵中每一行的第一个非零元素在 csrVal 中的位置 | int32_t                           | ND       |
+| csrColInd | 输入           | csrVal 中每个非零元素的列索引                  | int32_t                           | ND       |
+| csrVal    | 输入           | 稀疏矩阵中所有非零元素的值                     | float / int32_t / half / bfloat16 | ND       |
+| xVec      | 输入           | 被乘稠密向量                                   | 与 csrVal 一致                    | ND       |
+| yVec      | 输入/输出      | 结果向量（也作为 beta*y 的输入）               | float / int32_t / half / bfloat16 | ND       |
+| alpha     | 输入           | 标量系数 alpha                                 | 与 computeType 一致               | scalar   |
+| beta      | 输入           | 标量系数 beta                                  | 与 computeType 一致               | scalar   |
+| opA       | 属性           | 矩阵操作类型（NON_TRANSPOSE / TRANSPOSE）      | enum                              | —       |
 
 ### 约束说明
 
@@ -105,9 +105,18 @@ $$
 - **算法类型**：当前仅支持 `ACL_SPARSE_SPMV_ALG_DEFAULT`，传入其他算法会提示错误并返回 `ACL_SPARSE_STATUS_NOT_SUPPORTED`
 - **转置支持**：支持非转置和转置，暂不支持共轭转置
 - **UB 容量限制**：稀疏矩阵单行最大非零元数受 UB 容量限制，计算公式如下：
-  $$maxTileLength = \left\lfloor \frac{UB\_SIZE - kFixed}{perElem} \right\rfloor_{\text{align}}$$
-  $$perElem = \text{sizeof}(int32\_t) + 2 \cdot \text{sizeof}(CompT) + 2 \cdot \text{sizeof}(float)$$
-  $$kFixed = kYLocalBytes + kSystemReserved + kAlignSlack \approx 4KB$$
+
+  $$
+  maxTileLength = \left\lfloor \frac{UB\_SIZE - kFixed}{perElem} \right\rfloor_{\text{align}}
+  $$
+
+  $$
+  perElem = \text{sizeof}(int32\_t) + 2 \cdot \text{sizeof}(CompT) + 2 \cdot \text{sizeof}(float)
+  $$
+
+  $$
+  kFixed = kYLocalBytes + kSystemReserved + kAlignSlack \approx 4KB
+  $$
 
 ### 测试实现
 
@@ -124,37 +133,43 @@ $$
 
 - **测试覆盖**
 
-| 测试组 | 用例数 | 说明 |
-| --- | :---: | --- |
-| Float 基础测试 | 6 | 不同稀疏度和形状，alpha=1.0, beta=0.0 |
-| Float Alpha/Beta 测试 | 7 | alpha/beta 组合，含负值、pass-through 等 |
-| Float 随机采样 | 30 | 随机 M/N/sparsity/alpha/beta |
-| Int32 基础测试 | 5 | 不同稀疏度和形状，alpha=1, beta=0 |
-| Int32 Alpha/Beta 测试 | 4 | alpha/beta 组合，含负值 |
-| Int32 随机采样 | 30 | 随机 M/N/sparsity/alpha/beta |
-| Int32→Float32 Non-Transpose | 13 | 混合精度，int32 输入 float32 计算 |
-| Int32→Float32 Transpose | 12 | 混合精度 + 转置 |
-| Float16→Float32 Non-Transpose | 8 | 混合精度，half 输入 float32 输出 |
-| Float16→Float32 Transpose | 8 | 混合精度 + 转置 |
-| BF16→Float32 Non-Transpose | 8 | 混合精度，bfloat16 输入 float32 输出 |
-| BF16→Float32 Transpose | 8 | 混合精度 + 转置 |
-| Float Transpose | 17 | 转置全场景覆盖 |
-| Int32 Transpose | 11 | int32 转置全场景覆盖 |
+| 测试组                         | 用例数 | 说明                                     |
+| ------------------------------ | :----: | ---------------------------------------- |
+| Float 基础测试                 |   6   | 不同稀疏度和形状，alpha=1.0, beta=0.0    |
+| Float Alpha/Beta 测试          |   7   | alpha/beta 组合，含负值、pass-through 等 |
+| Float 随机采样                 |   30   | 随机 M/N/sparsity/alpha/beta             |
+| Int32 基础测试                 |   5   | 不同稀疏度和形状，alpha=1, beta=0        |
+| Int32 Alpha/Beta 测试          |   4   | alpha/beta 组合，含负值                  |
+| Int32 随机采样                 |   30   | 随机 M/N/sparsity/alpha/beta             |
+| Int32→Float32 Non-Transpose   |   13   | 混合精度，int32 输入 float32 计算        |
+| Int32→Float32 Transpose       |   12   | 混合精度 + 转置                          |
+| Float16→Float32 Non-Transpose |   8   | 混合精度，half 输入 float32 输出         |
+| Float16→Float32 Transpose     |   8   | 混合精度 + 转置                          |
+| BF16→Float32 Non-Transpose    |   8   | 混合精度，bfloat16 输入 float32 输出     |
+| BF16→Float32 Transpose        |   8   | 混合精度 + 转置                          |
+| Float Transpose                |   15   | 转置全场景覆盖                           |
+| Int32 Transpose                |   11   | int32 转置全场景覆盖                     |
 
 ### 精度验证方法
 
 - **float / half / bfloat16**：采用相对误差（Relative Error），计算公式：
-  $$rError_i = \frac{|npu_i - golden_i|}{|golden_i| + 10^{-7}}$$
+
+  $$
+  rError_i = \frac{|npu_i - golden_i|}{|golden_i| + 10^{-7}}
+  $$
+
   - MARE（Max Absolute Relative Error）：所有元素中最大的 rError
   - MERE（Mean Relative Error）：所有元素 rError 的平均值
   - 半精度类型 cast 到 float 后再计算
-
 - **int32_t**：采用绝对误差（Absolute Error）和逐元素精确匹配：
-  $$aError_i = |npu_i - golden_i|$$
+
+  $$
+  aError_i = |npu_i - golden_i|
+  $$
+
   - 所有元素必须精确相等才算通过
   - MARE：最大绝对误差
   - MERE：平均绝对误差
-
 - **关键代码片段**
 
 ```cpp
@@ -191,13 +206,11 @@ sparseRet = aclsparseSpMV(spHandle, op, &alphaTyped,
   ```bash
   source /usr/local/Ascend/cann/set_env.sh
   ```
-
 - 默认路径，非 root 用户安装 CANN 软件包
 
   ```bash
   source $HOME/Ascend/cann/set_env.sh
   ```
-
 - 指定路径 install_path，安装 CANN 软件包
 
   ```bash
@@ -254,18 +267,18 @@ aclsparseStatus_t aclsparseSpMVGetBufferSize(
 
 **参数说明**：
 
-| 参数 | 方向 | 描述 |
-| --- | :---: | --- |
-| handle | IN | aclsparse 句柄 |
-| opA | IN | 矩阵操作类型（`ACL_SPARSE_OP_NON_TRANSPOSE` / `ACL_SPARSE_OP_TRANSPOSE`） |
-| alpha | IN | 标量 alpha 指针，类型必须与 computeType 一致 |
-| matA | IN | 稀疏矩阵描述符 |
-| vecX | IN | 输入稠密向量 x 描述符 |
-| beta | IN | 标量 beta 指针，类型必须与 computeType 一致 |
-| vecY | IN | 输出稠密向量 y 描述符 |
-| computeType | IN | 计算数据类型（`ACL_FLOAT` / `ACL_INT32`） |
-| alg | IN | 算法类型，当前仅支持 `ACL_SPARSE_SPMV_ALG_DEFAULT` |
-| bufferSize | OUT | 所需工作缓冲区大小 |
+| 参数        | 方向 | 描述                                                                          |
+| ----------- | :--: | ----------------------------------------------------------------------------- |
+| handle      |  IN  | aclsparse 句柄                                                                |
+| opA         |  IN  | 矩阵操作类型（`ACL_SPARSE_OP_NON_TRANSPOSE` / `ACL_SPARSE_OP_TRANSPOSE`） |
+| alpha       |  IN  | 标量 alpha 指针，类型必须与 computeType 一致                                  |
+| matA        |  IN  | 稀疏矩阵描述符                                                                |
+| vecX        |  IN  | 输入稠密向量 x 描述符                                                         |
+| beta        |  IN  | 标量 beta 指针，类型必须与 computeType 一致                                   |
+| vecY        |  IN  | 输出稠密向量 y 描述符                                                         |
+| computeType |  IN  | 计算数据类型（`ACL_FLOAT` / `ACL_INT32`）                                 |
+| alg         |  IN  | 算法类型，当前仅支持`ACL_SPARSE_SPMV_ALG_DEFAULT`                           |
+| bufferSize  | OUT | 所需工作缓冲区大小                                                            |
 
 ### aclsparseSpMVPreprocess
 
@@ -307,26 +320,26 @@ aclsparseStatus_t aclsparseSpMV(
 
 **参数说明**：
 
-| 参数 | 方向 | 描述 |
-| --- | :---: | --- |
-| handle | IN | aclsparse 句柄 |
-| opA | IN | 矩阵操作类型（`ACL_SPARSE_OP_NON_TRANSPOSE` / `ACL_SPARSE_OP_TRANSPOSE`） |
-| alpha | IN | 标量 alpha 指针，类型必须与 computeType 一致 |
-| matA | IN | 稀疏矩阵描述符 |
-| vecX | IN | 输入稠密向量 x 描述符 |
-| beta | IN | 标量 beta 指针，类型必须与 computeType 一致 |
-| vecY | IN/OUT | 稠密向量 y 描述符（y 为被乘向量，结果覆盖写入 y） |
-| computeType | IN | 计算数据类型（`ACL_FLOAT` / `ACL_INT32`） |
-| alg | IN | 算法类型，当前仅支持 `ACL_SPARSE_SPMV_ALG_DEFAULT` |
-| externalBuffer | IN | 工作缓冲区（大小由 `GetBufferSize` 获取） |
+| 参数           |  方向  | 描述                                                                          |
+| -------------- | :----: | ----------------------------------------------------------------------------- |
+| handle         |   IN   | aclsparse 句柄                                                                |
+| opA            |   IN   | 矩阵操作类型（`ACL_SPARSE_OP_NON_TRANSPOSE` / `ACL_SPARSE_OP_TRANSPOSE`） |
+| alpha          |   IN   | 标量 alpha 指针，类型必须与 computeType 一致                                  |
+| matA           |   IN   | 稀疏矩阵描述符                                                                |
+| vecX           |   IN   | 输入稠密向量 x 描述符                                                         |
+| beta           |   IN   | 标量 beta 指针，类型必须与 computeType 一致                                   |
+| vecY           | IN/OUT | 稠密向量 y 描述符（y 为被乘向量，结果覆盖写入 y）                             |
+| computeType    |   IN   | 计算数据类型（`ACL_FLOAT` / `ACL_INT32`）                                 |
+| alg            |   IN   | 算法类型，当前仅支持`ACL_SPARSE_SPMV_ALG_DEFAULT`                           |
+| externalBuffer |   IN   | 工作缓冲区（大小由`GetBufferSize` 获取）                                    |
 
 **返回值**：
 
-| 返回值 | 说明 |
-| --- | --- |
-| `ACL_SPARSE_STATUS_SUCCESS` | 成功 |
-| `ACL_SPARSE_STATUS_HANDLE_IS_NULLPTR` | handle 为空 |
-| `ACL_SPARSE_STATUS_INVALID_VALUE` | matA / vecX / vecY / externalBuffer 为空，或向量大小不满足要求 |
-| `ACL_SPARSE_STATUS_NOT_SUPPORTED` | 矩阵格式非 CSR、computeType 不支持、算法不支持、或 valType/outType 组合不支持 |
-| `ACL_SPARSE_STATUS_INSUFFICIENT_RESOURCES` | 单行非零元数超过 UB 容量 |
-| `ACL_SPARSE_STATUS_EXECUTION_FAILED` | stream 同步失败 |
+| 返回值                                       | 说明                                                                          |
+| -------------------------------------------- | ----------------------------------------------------------------------------- |
+| `ACL_SPARSE_STATUS_SUCCESS`                | 成功                                                                          |
+| `ACL_SPARSE_STATUS_HANDLE_IS_NULLPTR`      | handle 为空                                                                   |
+| `ACL_SPARSE_STATUS_INVALID_VALUE`          | matA / vecX / vecY / externalBuffer 为空，或向量大小不满足要求                |
+| `ACL_SPARSE_STATUS_NOT_SUPPORTED`          | 矩阵格式非 CSR、computeType 不支持、算法不支持、或 valType/outType 组合不支持 |
+| `ACL_SPARSE_STATUS_INSUFFICIENT_RESOURCES` | 单行非零元数超过 UB 容量                                                      |
+| `ACL_SPARSE_STATUS_EXECUTION_FAILED`       | stream 同步失败                                                               |
