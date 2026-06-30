@@ -903,50 +903,98 @@ static VerifyResult RunSpmmTestInt8(int32_t deviceId, aclrtStream stream,
 }
 
 // ============================================================================
-// main: one functional case per dtype (FP32 / FP16 / INT8)
+// FP32 case runner + main
 // ============================================================================
+struct SpmmFp32CaseConfig {
+    const char *name;
+    int32_t m;
+    int32_t k;
+    int32_t n;
+    int32_t nnzTarget; // 0 -> m * k / 10
+    float alpha;
+    float beta;
+    aclsparseOperation_t opB;
+    aclsparseOrder_t orderB;
+    aclsparseOrder_t orderC;
+    unsigned seed;
+};
+
+static bool RunOneFp32Case(int32_t deviceId, aclrtStream stream, const SpmmFp32CaseConfig &cfg)
+{
+    std::srand(cfg.seed);
+    const int32_t nnzTarget = (cfg.nnzTarget > 0) ? cfg.nnzTarget : cfg.m * cfg.k / 10;
+    std::vector<int32_t> hRowOff;
+    std::vector<int32_t> hColInd;
+    std::vector<float> hValsFp32;
+    GenerateRandomCsr(cfg.m, cfg.k, nnzTarget, &hRowOff, &hColInd, &hValsFp32);
+    const int32_t actualNnz = hRowOff.back();
+    std::printf("\n--- FP32 case: %s (m=%d k=%d n=%d nnz=%d) ---\n",
+                cfg.name, cfg.m, cfg.k, cfg.n, actualNnz);
+    VerifyResult r = RunSpmmTestFp32(deviceId, stream, cfg.m, cfg.k, cfg.n, actualNnz,
+        hRowOff, hColInd, hValsFp32, cfg.alpha, cfg.beta, cfg.opB, cfg.orderB, cfg.orderC);
+    std::printf("  [%s] %s\n", cfg.name, r.pass ? "PASS" : "FAIL");
+    return r.pass;
+}
+
 int main()
 {
-    std::srand(42);
-
     int32_t deviceId = 0;
     aclrtStream stream = nullptr;
     int ret = Init(deviceId, &stream);
     CHECK_RET(ret == ACL_SUCCESS, return EXIT_FAILURE);
 
-    constexpr int32_t kM   = 256;
-    constexpr int32_t kK   = 256;
-    constexpr int32_t kN   = 64;
-    constexpr int32_t kNnz = 256 * 256 / 10;
+    static const SpmmFp32CaseConfig kFp32Cases[] = {
+        {"baseline_row_N_beta0", 256, 256, 64, 0, 1.0f, 0.0f,
+            ACL_SPARSE_OP_NON_TRANSPOSE, ACL_SPARSE_ORDER_ROW, ACL_SPARSE_ORDER_ROW, 42u},
+        {"opB_transpose", 256, 256, 64, 0, 1.0f, 0.0f,
+            ACL_SPARSE_OP_TRANSPOSE, ACL_SPARSE_ORDER_ROW, ACL_SPARSE_ORDER_ROW, 43u},
+        {"B_C_col_major", 256, 256, 64, 0, 1.0f, 0.0f,
+            ACL_SPARSE_OP_NON_TRANSPOSE, ACL_SPARSE_ORDER_COL, ACL_SPARSE_ORDER_COL, 44u},
+        {"beta_nonzero", 256, 256, 64, 0, 1.0f, 0.5f,
+            ACL_SPARSE_OP_NON_TRANSPOSE, ACL_SPARSE_ORDER_ROW, ACL_SPARSE_ORDER_ROW, 45u},
+        {"small_shape", 32, 32, 16, 80, 1.0f, 0.0f,
+            ACL_SPARSE_OP_NON_TRANSPOSE, ACL_SPARSE_ORDER_ROW, ACL_SPARSE_ORDER_ROW, 46u},
+    };
 
-    // Default layout: opB = N, B / C row-major, alpha = 1, beta = 0.
+    std::printf("\n========== SPMM FP32 cases (%zu configs) ==========\n", sizeof(kFp32Cases) / sizeof(kFp32Cases[0]));
+    bool allFp32Pass = true;
+    for (const auto &cfg : kFp32Cases) {
+        allFp32Pass = RunOneFp32Case(deviceId, stream, cfg) && allFp32Pass;
+    }
+
+    // One functional case per remaining dtype (FP16 / INT8), baseline layout
+    constexpr int32_t kM = 256;
+    constexpr int32_t kK = 256;
+    constexpr int32_t kN = 64;
+    constexpr int32_t kNnz = 256 * 256 / 10;
     const aclsparseOperation_t opB = ACL_SPARSE_OP_NON_TRANSPOSE;
     const aclsparseOrder_t orderB = ACL_SPARSE_ORDER_ROW;
     const aclsparseOrder_t orderC = ACL_SPARSE_ORDER_ROW;
 
-    std::printf("\n========== SPMM Test (one case per dtype) ==========\n");
-    std::vector<int32_t> hRowOff, hColInd;
-    std::vector<float>   hValsFp32;
+    std::printf("\n========== SPMM FP16 / INT8 (baseline per dtype) ==========\n");
+    std::srand(42);
+    std::vector<int32_t> hRowOff;
+    std::vector<int32_t> hColInd;
+    std::vector<float> hValsFp32;
     GenerateRandomCsr(kM, kK, kNnz, &hRowOff, &hColInd, &hValsFp32);
     const int32_t actualNnz = hRowOff.back();
     std::printf("Generated CSR: m=%d, k=%d, nnz=%d, density=%.4f\n",
                 kM, kK, actualNnz,
                 static_cast<float>(actualNnz) / (static_cast<float>(kM) * kK));
 
-    VerifyResult rFp32 = RunSpmmTestFp32(deviceId, stream, kM, kK, kN, actualNnz,
-        hRowOff, hColInd, hValsFp32, 1.0f, 0.0f, opB, orderB, orderC);
     VerifyResult rFp16 = RunSpmmTestFp16(deviceId, stream, kM, kK, kN, actualNnz,
         hRowOff, hColInd, hValsFp32, 1.0f, 0.0f, opB, orderB, orderC);
     VerifyResult rInt8 = RunSpmmTestInt8(deviceId, stream, kM, kK, kN, actualNnz,
         hRowOff, hColInd, 1, 0, opB, orderB, orderC);
 
     std::printf("\n========== Results ==========\n");
-    std::printf("  FP32: %s  FP16: %s  INT8: %s\n",
-                rFp32.pass ? "PASS" : "FAIL",
+    std::printf("  FP32 (%zu cases): %s\n", sizeof(kFp32Cases) / sizeof(kFp32Cases[0]),
+                allFp32Pass ? "PASS" : "FAIL");
+    std::printf("  FP16: %s  INT8: %s\n",
                 rFp16.pass ? "PASS" : "FAIL",
                 rInt8.pass ? "PASS" : "FAIL");
 
-    bool allPass = rFp32.pass && rFp16.pass && rInt8.pass;
+    bool allPass = allFp32Pass && rFp16.pass && rInt8.pass;
     std::printf("  Overall: %s\n", allPass ? "PASS" : "FAIL");
 
     Finalize(deviceId, stream);

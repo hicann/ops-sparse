@@ -177,6 +177,8 @@ aclsparseStatus_t aclsparseCreateCsr(
 
 **功能**：创建一个CSR（Compressed Sparse Row）格式的稀疏矩阵。
 
+> **索引类型支持**：当前版本 SpMV / SpMM 仅支持 `ACL_SPARSE_INDEX_32I`，且 `csrRowOffsetsType` 与 `csrColIndType` 必须相同。传入 `ACL_SPARSE_INDEX_64I` 或 ptr/col 类型不一致时，`aclsparseCreateCsr` 返回 `ACL_SPARSE_STATUS_NOT_SUPPORTED`。
+
 **参数说明**：
 
 - `spMatDescr`（IN/OUT）：HOST，稀疏矩阵描述符。
@@ -186,8 +188,8 @@ aclsparseStatus_t aclsparseCreateCsr(
 - `csrRowOffsets`（IN）：DEVICE，指向CSR格式行偏移量数组的指针。
 - `csrColInd`（IN）：DEVICE，指向CSR格式列索引数组的指针。
 - `csrValues`（IN）：DEVICE，指向CSR格式非零元素数组的指针。
-- `csrRowOffsetsType`（IN）：HOST，行偏移量数组的数据类型。
-- `csrColIndType`（IN）：HOST，列索引数组的数据类型。
+- `csrRowOffsetsType`（IN）：HOST，行偏移量数组的数据类型（当前仅支持 `ACL_SPARSE_INDEX_32I`）。
+- `csrColIndType`（IN）：HOST，列索引数组的数据类型（当前仅支持 `ACL_SPARSE_INDEX_32I`，且须与 `csrRowOffsetsType` 一致）。
 - `idxBase`（IN）：HOST，索引的基值（0或1）。
 - `valueType`（IN）：HOST，非零元素的数据类型。
 
@@ -200,7 +202,7 @@ aclsparseStatus_t aclsparseCreateCsr(
 
 ### aclsparseCreateCsc
 
-> **支持状态**：暂未支持。当前版本仅提供头文件声明，库中尚无实现；调用会导致链接失败。
+> **支持状态**：暂未支持。当前版本 SpMV / SpMM 仅实现 CSR 稀疏矩阵；CSC / COO 等格式未提供算子路径。调用本接口返回 `ACL_SPARSE_STATUS_NOT_SUPPORTED`。
 
 ```c
 aclsparseStatus_t aclsparseCreateCsc(
@@ -218,7 +220,7 @@ aclsparseStatus_t aclsparseCreateCsc(
 );
 ```
 
-**功能**：创建一个CSC（Compressed Sparse Column）格式的稀疏矩阵。
+**功能**：创建一个CSC（Compressed Sparse Column）格式的稀疏矩阵（**当前版本暂未支持**，见上方说明）。
 
 **参数说明**：
 
@@ -262,7 +264,7 @@ aclsparseStatus_t aclsparseDestroySpMat(aclsparseConstSpMatDescr_t spMatDescr);
 
 ### 只读(const)描述符构造接口
 
-只读(const)构造接口：数据指针为 `const`，构造出的描述符是 `const` 变体，只能传给接收 `const` 形参的接口（如 SpMV/SpMM 的输入 `mat`/`matA`/`x`/`matB`）。销毁接口（`aclsparseDestroyDnVec` / `aclsparseDestroySpMat` / `aclsparseDestroyDnMat`）统一接收 `const` 变体，因此 const 与非 const 描述符都可销毁。
+只读(const)构造接口：数据指针为 `const`，构造出的描述符是 `const` 变体，只能传给接收 `const` 形参的接口（如 SpMV/SpMM 的输入 `mat`/`matA`/`x`/`matB`）。销毁接口（`aclsparseDestroyDnVec` / `aclsparseDestroySpMat` / `aclsparseDestroyDnMat`）统一接收 `const` 变体，因此 const 与非 const 描述符都可销毁。`aclsparseCreateConstCsc` 当前版本暂未支持，调用返回 `ACL_SPARSE_STATUS_NOT_SUPPORTED`。
 
 ```c
 aclsparseStatus_t aclsparseCreateConstDnVec(aclsparseConstDnVecDescr_t *dnVecDescr, int64_t size,
@@ -281,7 +283,7 @@ aclsparseStatus_t aclsparseCreateConstDnMat(aclsparseConstDnMatDescr_t *dnMatDes
     aclDataType valueType, aclsparseOrder_t order);
 ```
 
-> **支持状态**：`aclsparseCreateConstCsc` 暂未支持。当前版本仅提供头文件声明，库中尚无实现；调用会导致链接失败。
+> **支持状态**：`aclsparseCreateConstCsc` 暂未支持。调用返回 `ACL_SPARSE_STATUS_NOT_SUPPORTED`。
 
 ---
 
@@ -384,7 +386,7 @@ aclsparseStatus_t aclsparseSpMV(
 );
 ```
 
-**功能**：稀疏矩阵向量乘法（SpMV）。
+**功能**：稀疏矩阵向量乘法（SpMV）。稀疏矩阵 `mat` 须为 **CSR** 格式（CSC / COO 等格式将返回 `ACL_SPARSE_STATUS_NOT_SUPPORTED`）。
 
 **参数说明**：
 
@@ -558,7 +560,7 @@ aclsparseStatus_t aclsparseSpMM(
 );
 ```
 
-**功能**：稀疏矩阵-稠密矩阵乘法（SpMM），计算 `C = alpha * op(A) * op(B) + beta * C`。
+**功能**：稀疏矩阵-稠密矩阵乘法（SpMM），计算 `C = alpha * op(A) * op(B) + beta * C`。稀疏矩阵 A 须为 **CSR** 格式（CSC / COO 等格式传入 `matA` 将返回 `ACL_SPARSE_STATUS_NOT_SUPPORTED`）。
 
 **参数说明**：
 
@@ -648,8 +650,8 @@ SpMM算法枚举：
 
 | 枚举值 | 说明 |
 |--------|------|
-| `ACL_SPARSE_INDEX_32I` | 32位无符号整数 [0, 2^31 - 1] |
-| `ACL_SPARSE_INDEX_64I` | 64位无符号整数 [0, 2^63 - 1] |
+| `ACL_SPARSE_INDEX_32I` | 32位无符号整数 [0, 2^31 - 1]；**当前 SpMV / SpMM 已实现** |
+| `ACL_SPARSE_INDEX_64I` | 64位无符号整数 [0, 2^63 - 1]；**暂未支持**（`aclsparseCreateCsr` 传入时返回 `ACL_SPARSE_STATUS_NOT_SUPPORTED`） |
 
 ### aclsparseIndexBase_t
 

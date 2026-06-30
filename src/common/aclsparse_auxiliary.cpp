@@ -107,4 +107,20 @@ aclsparseStatus_t aclsparseGetVersion(aclsparseHandle_t handle, int *version)
     return ACL_SPARSE_STATUS_SUCCESS;
 }
 
+aclsparseStatus_t aclsparseCreateCsc(aclsparseSpMatDescr_t * /*spMatDescr*/, int64_t /*rows*/, int64_t /*cols*/,
+    int64_t /*nnz*/, void * /*cscColOffsets*/, void * /*cscRowInd*/, void * /*cscValues*/,
+    aclsparseIndexType_t /*cscColOffsetsType*/, aclsparseIndexType_t /*cscRowIndType*/,
+    aclsparseIndexBase_t /*idxBase*/, aclDataType /*valueType*/)
+{
+    return ACL_SPARSE_STATUS_NOT_SUPPORTED;
+}
+
+aclsparseStatus_t aclsparseCreateConstCsc(aclsparseConstSpMatDescr_t * /*spMatDescr*/, int64_t /*rows*/,
+    int64_t /*cols*/, int64_t /*nnz*/, const void * /*cscColOffsets*/, const void * /*cscRowInd*/,
+    const void * /*cscValues*/, aclsparseIndexType_t /*cscColOffsetsType*/,
+    aclsparseIndexType_t /*cscRowIndType*/, aclsparseIndexBase_t /*idxBase*/, aclDataType /*valueType*/)
+{
+    return ACL_SPARSE_STATUS_NOT_SUPPORTED;
+}
+
 } // extern "C"

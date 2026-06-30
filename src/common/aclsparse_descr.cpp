@@ -70,6 +70,11 @@ aclsparseStatus_t aclsparseCreateCsr(aclsparseSpMatDescr_t *spMatDescr, int64_t 
     if (spMatDescr == nullptr) {
         return ACL_SPARSE_STATUS_INVALID_VALUE;
     }
+    aclsparseStatus_t idxSt =
+        AclsparseValidateSupportedCsrIndexTypes(csrRowOffsetsType, csrColIndType);
+    if (idxSt != ACL_SPARSE_STATUS_SUCCESS) {
+        return idxSt;
+    }
     auto *inner = new (std::nothrow) aclsparseSpMatDescr();
     if (inner == nullptr) {
         return ACL_SPARSE_STATUS_ALLOC_FAILED;

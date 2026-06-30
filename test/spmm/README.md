@@ -90,7 +90,7 @@ $$
   - 稀疏矩阵 A 当前仅支持 CSR 格式
   - `opA` 当前仅支持 `ACL_SPARSE_OP_NON_TRANSPOSE`（非转置）
   - `opB` 支持 `ACL_SPARSE_OP_NON_TRANSPOSE` 与 `ACL_SPARSE_OP_TRANSPOSE`
-  - 索引类型当前仅支持 `ACL_SPARSE_INDEX_32I`
+  - 索引类型当前仅支持 `ACL_SPARSE_INDEX_32I`（`ACL_SPARSE_INDEX_64I` 暂未支持）
   - `beta = 0` 时会跳过 C 的读取，提供快路径
   - fp32 高精度算法（`ACL_SPARSE_SPMM_CSR_FP32_HIGH_PRECISION_ALG`）仅对 fp32 生效，fp16 / int8 会自动忽略
 

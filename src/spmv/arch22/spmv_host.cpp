@@ -156,6 +156,16 @@ extern "C" {
                   LOG_PRINT("[ERROR] aclsparseSpMV: unsupported matrix format %d\n", matInner->format);
                   return ACL_SPARSE_STATUS_NOT_SUPPORTED);
 
+        {
+            aclsparseStatus_t idxSt =
+                AclsparseValidateSupportedCsrIndexTypes(matInner->ptrType, matInner->IdxType);
+            CHECK_RET(idxSt == ACL_SPARSE_STATUS_SUCCESS,
+                      LOG_PRINT("[ERROR] aclsparseSpMV: unsupported index type ptr=%d idx=%d "
+                                "(only ACL_SPARSE_INDEX_32I)\n",
+                                matInner->ptrType, matInner->IdxType);
+                      return idxSt);
+        }
+
         CHECK_RET(opA == ACL_SPARSE_OP_NON_TRANSPOSE || opA == ACL_SPARSE_OP_TRANSPOSE,
                   LOG_PRINT("[ERROR] aclsparseSpMV: opA conjugate not supported yet\n");
                   return ACL_SPARSE_STATUS_NOT_SUPPORTED);

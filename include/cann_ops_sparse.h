@@ -139,8 +139,8 @@ typedef enum aclsparseSpMVAlg_t {
 
 // This type indicates the index type for representing the sparse matrix indices.
 typedef enum aclsparseIndexType_t {
-    ACL_SPARSE_INDEX_32I = 0,  // 32-bit unsigned integer [0, 2^31 - 1]
-    ACL_SPARSE_INDEX_64I       // 64-bit unsigned integer [0, 2^63 - 1]
+    ACL_SPARSE_INDEX_32I = 0,  // 32-bit unsigned integer [0, 2^31 - 1]（当前 SpMV/SpMM 已实现）
+    ACL_SPARSE_INDEX_64I       // 64-bit unsigned integer [0, 2^63 - 1]（暂未支持，CreateCsr 将返回 NOT_SUPPORTED）
 } aclsparseIndexType_t;
 
 // This type indicates if the base of the matrix indices is zero or one.
@@ -228,6 +228,8 @@ aclsparseStatus_t aclsparseCreateConstCsr(aclsparseConstSpMatDescr_t *spMatDescr
 /**
  * @brief 创建一个CSC（Compressed Sparse Column）稀疏矩阵。
  *
+ * @note 当前版本暂未支持：SpMV / SpMM 仅实现 CSR 路径，调用本接口返回 ACL_SPARSE_STATUS_NOT_SUPPORTED。
+ *
  * @param spMatDescr IN, HOST, 稀疏矩阵描述符，用于存储稀疏矩阵的元数据。
  * @param rows IN, HOST, 矩阵的行数。
  * @param cols IN, HOST, 矩阵的列数。
@@ -247,6 +249,8 @@ aclsparseStatus_t aclsparseCreateCsc(aclsparseSpMatDescr_t *spMatDescr, int64_t 
 
 /**
  * @brief 创建只读(const)CSC 稀疏矩阵描述符。
+ *
+ * @note 当前版本暂未支持，调用返回 ACL_SPARSE_STATUS_NOT_SUPPORTED。
  */
 aclsparseStatus_t aclsparseCreateConstCsc(aclsparseConstSpMatDescr_t *spMatDescr, int64_t rows, int64_t cols, int64_t nnz,
     const void *cscColOffsets, const void *cscRowInd, const void *cscValues, aclsparseIndexType_t cscColOffsetsType,

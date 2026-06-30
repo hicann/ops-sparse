@@ -100,7 +100,8 @@ $$
 
 ### 约束说明
 
-- **矩阵格式**：当前仅支持 CSR 格式，CSC 格式校验后会直接返回 `ACL_SPARSE_STATUS_NOT_SUPPORTED`
+- **矩阵格式**：当前仅支持 CSR 格式；CSC / COO 等格式在 SpMV / SpMM 路径上会返回 `ACL_SPARSE_STATUS_NOT_SUPPORTED`（`aclsparseCreateCsc` 亦暂未实现）
+- **索引类型**：当前仅支持 `ACL_SPARSE_INDEX_32I`；`ACL_SPARSE_INDEX_64I` 暂未支持
 - **算法类型**：当前仅支持 `ACL_SPARSE_SPMV_ALG_DEFAULT`，传入其他算法会提示错误并返回 `ACL_SPARSE_STATUS_NOT_SUPPORTED`
 - **转置支持**：支持非转置和转置，暂不支持共轭转置
 - **UB 容量限制**：稀疏矩阵单行最大非零元数受 UB 容量限制，计算公式如下：

@@ -46,6 +46,19 @@ struct aclsparseSpMatDescr {
     aclDataType valueType{};
 };
 
+// 校验 CSR 稀疏矩阵索引类型：当前仅支持 32 位且 ptr/col 类型一致。
+inline aclsparseStatus_t AclsparseValidateSupportedCsrIndexTypes(aclsparseIndexType_t ptrType,
+                                                                 aclsparseIndexType_t idxType)
+{
+    if (ptrType != idxType) {
+        return ACL_SPARSE_STATUS_NOT_SUPPORTED;
+    }
+    if (ptrType == ACL_SPARSE_INDEX_32I) {
+        return ACL_SPARSE_STATUS_SUCCESS;
+    }
+    return ACL_SPARSE_STATUS_NOT_SUPPORTED;
+}
+
 // 稠密向量描述符内部结构（SpMV 的 x / y）。
 struct aclsparseDnVecDescr {
     uint64_t nums = 0;

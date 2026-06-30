@@ -166,6 +166,10 @@ aclsparseStatus_t ValidateSpmmInputs(const aclsparseSpMatDescr *matA,
     if (matA->format != ACL_SPARSE_FORMAT_CSR) {
         return ACL_SPARSE_STATUS_MATRIX_TYPE_NOT_SUPPORTED;
     }
+    aclsparseStatus_t idxSt = AclsparseValidateSupportedCsrIndexTypes(matA->ptrType, matA->IdxType);
+    if (idxSt != ACL_SPARSE_STATUS_SUCCESS) {
+        return idxSt;
+    }
     if (!IsSupportedSpmmDtypeCombo(matA, matB, matC, computeType)) {
         return ACL_SPARSE_STATUS_NOT_SUPPORTED;
     }
