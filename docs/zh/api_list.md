@@ -17,8 +17,9 @@
 | [aclsparseDestroy](#aclsparsedestroy) | 销毁稀疏矩阵处理器 |
 | [aclsparseSetStream](#aclsparsesetstream) | 设置处理器使用的 stream |
 | [aclsparseGetStream](#aclsparsegetstream) | 获取处理器当前的 stream |
+| [aclsparseGetVersion](#aclsparsegetversion) | 获取版本号 |
 | [aclsparseCreateDnVec](#aclsparsecreatednvec) | 创建稠密向量 |
-| [aclsparseDestroyDnVec](#aclsparsedestroydnvec) | 销毁稀疏向量描述符 |
+| [aclsparseDestroyDnVec](#aclsparsedestroydnvec) | 销毁稠密向量描述符 |
 | [aclsparseCreateCsr](#aclsparsecreatecsr) | 创建CSR格式稀疏矩阵 |
 | [aclsparseCreateCsc](#aclsparsecreatecsc) | 创建CSC格式稀疏矩阵（**暂未支持**） |
 | [aclsparseDestroySpMat](#aclsparsedestroyspmat) | 销毁稀疏矩阵对象 |
@@ -111,6 +112,27 @@ aclsparseStatus_t aclsparseGetStream(aclsparseHandle_t handle, aclrtStream *stre
 
 ---
 
+### aclsparseGetVersion
+
+```c
+aclsparseStatus_t aclsparseGetVersion(aclsparseHandle_t handle, int *version);
+```
+
+**功能**：获取 ops-sparse 版本号。版本号编码为 `MAJOR * 10000 + MINOR * 100 + PATCH`，如 `10000` 表示 1.0.0。
+
+**参数说明**：
+
+- `handle`（IN）：HOST，稀疏矩阵处理器句柄，可为 `nullptr`。
+- `version`（OUT）：HOST，输出参数，接收版本号。
+
+**返回值**：
+
+- `ACL_SPARSE_STATUS_SUCCESS`：成功
+- `ACL_SPARSE_STATUS_INVALID_VALUE`：`version` 为空
+- 其他值：失败
+
+---
+
 ### aclsparseCreateDnVec
 
 ```c
@@ -144,11 +166,11 @@ aclsparseStatus_t aclsparseCreateDnVec(
 aclsparseStatus_t aclsparseDestroyDnVec(aclsparseConstDnVecDescr_t dnVecDescr);
 ```
 
-**功能**：销毁稀疏向量描述符。
+**功能**：销毁稠密向量描述符。
 
 **参数说明**：
 
-- `dnVecDescr`（IN）：HOST，要销毁的稀疏向量描述符。
+- `dnVecDescr`（IN）：HOST，要销毁的稠密向量描述符。
 
 **返回值**：
 
@@ -202,7 +224,7 @@ aclsparseStatus_t aclsparseCreateCsr(
 
 ### aclsparseCreateCsc
 
-> **支持状态**：暂未支持。当前版本 SpMV / SpMM 仅实现 CSR 稀疏矩阵；CSC / COO 等格式未提供算子路径。调用本接口返回 `ACL_SPARSE_STATUS_NOT_SUPPORTED`。
+> **支持状态**：当前版本暂未实现，敬请期待。当前版本 SpMV / SpMM 仅实现 CSR 稀疏矩阵；CSC / COO 等格式未提供算子路径。调用本接口返回 `ACL_SPARSE_STATUS_NOT_SUPPORTED`。
 
 ```c
 aclsparseStatus_t aclsparseCreateCsc(
@@ -431,7 +453,7 @@ aclsparseStatus_t aclsparseCreateDnMat(
 - `cols`（IN）：HOST，矩阵的列数。
 - `ld`（IN）：HOST，leading dimension。行主序时需 `>= cols`；列主序时需 `>= rows`。
 - `values`（IN）：DEVICE，矩阵数据指针。
-- `valueType`（IN）：HOST，元素数据类型（支持 `ACL_FLOAT` / `ACL_FLOAT16` / `ACL_INT8` / `ACL_INT32`）。
+- `valueType`（IN）：HOST，元素数据类型。作为 B 矩阵时支持 `ACL_FLOAT` / `ACL_FLOAT16` / `ACL_INT8`；作为 C 矩阵时支持 `ACL_FLOAT` / `ACL_FLOAT16` / `ACL_INT32`（`ACL_INT32` 仅在 int8 计算路径中作为 C 矩阵类型使用）。
 - `order`（IN）：HOST，布局：`ACL_SPARSE_ORDER_ROW`（行主序）/ `ACL_SPARSE_ORDER_COL`（列主序）。
 
 **返回值**：
@@ -611,6 +633,7 @@ aclsparseStatus_t aclsparseSpMM(
 | `ACL_SPARSE_STATUS_MATRIX_TYPE_NOT_SUPPORTED` | 不支持的矩阵类型 |
 | `ACL_SPARSE_STATUS_NOT_SUPPORTED` | 当前不支持该操作或数据类型组合 |
 | `ACL_SPARSE_STATUS_INSUFFICIENT_RESOURCES` | 资源不足 |
+| `ACL_SPARSE_STATUS_HANDLE_IS_NULLPTR` | handle 为空 |
 
 ### aclsparseSpMVAlg_t
 
@@ -650,8 +673,8 @@ SpMM算法枚举：
 
 | 枚举值 | 说明 |
 |--------|------|
-| `ACL_SPARSE_INDEX_32I` | 32位无符号整数 [0, 2^31 - 1]；**当前 SpMV / SpMM 已实现** |
-| `ACL_SPARSE_INDEX_64I` | 64位无符号整数 [0, 2^63 - 1]；**暂未支持**（`aclsparseCreateCsr` 传入时返回 `ACL_SPARSE_STATUS_NOT_SUPPORTED`） |
+| `ACL_SPARSE_INDEX_32I` | 32位有符号整数 [0, 2^31 - 1]；**当前 SpMV / SpMM 已实现** |
+| `ACL_SPARSE_INDEX_64I` | 64位有符号整数 [0, 2^63 - 1]；**暂未支持**（`aclsparseCreateCsr` 传入时返回 `ACL_SPARSE_STATUS_NOT_SUPPORTED`） |
 
 ### aclsparseIndexBase_t
 

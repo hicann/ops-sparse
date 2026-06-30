@@ -139,8 +139,8 @@ typedef enum aclsparseSpMVAlg_t {
 
 // This type indicates the index type for representing the sparse matrix indices.
 typedef enum aclsparseIndexType_t {
-    ACL_SPARSE_INDEX_32I = 0,  // 32-bit unsigned integer [0, 2^31 - 1]（当前 SpMV/SpMM 已实现）
-    ACL_SPARSE_INDEX_64I       // 64-bit unsigned integer [0, 2^63 - 1]（暂未支持，CreateCsr 将返回 NOT_SUPPORTED）
+    ACL_SPARSE_INDEX_32I = 0,  // 32-bit signed integer [0, 2^31 - 1]（当前 SpMV/SpMM 已实现）
+    ACL_SPARSE_INDEX_64I       // 64-bit signed integer [0, 2^63 - 1]（暂未支持，CreateCsr 将返回 NOT_SUPPORTED）
 } aclsparseIndexType_t;
 
 // This type indicates if the base of the matrix indices is zero or one.
