@@ -334,7 +334,8 @@ aclsparseStatus_t aclsparseSpMV(aclsparseHandle_t handle, aclsparseOperation_t o
  * @param cols       IN, HOST，矩阵的列数。
  * @param ld         IN, HOST，leading dimension。行主序时需 >= cols；列主序时需 >= rows。
  * @param values     IN, DEVICE，矩阵数据指针。
- * @param valueType  IN, HOST，元素数据类型（V1 支持 ACL_FLOAT；后续扩展 ACL_FLOAT16 / ACL_INT8）。
+ * @param valueType  IN, HOST，元素数据类型。支持 ACL_FLOAT / ACL_FLOAT16 / ACL_INT8
+ *                   （用于 B 矩阵）；C 矩阵在 INT8 路径下为 ACL_INT32。
  * @param order      IN, HOST，布局：ACL_SPARSE_ORDER_ROW / ACL_SPARSE_ORDER_COL。
  * @return aclsparseStatus_t
  */
