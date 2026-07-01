@@ -496,7 +496,7 @@ int RunAndTrack(size_t M, size_t N, float sparsity, CompT alpha, CompT beta,
             << "          status=" << ret;
         stats.failedCases.push_back(oss.str());
     }
-    return 0;
+    return ret;
 }
 
 // ===================== 随机测试辅助函数 =====================
