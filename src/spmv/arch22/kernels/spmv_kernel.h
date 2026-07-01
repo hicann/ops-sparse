@@ -99,7 +99,11 @@ __aicore__ inline void SpmvKernel<CompT, ValT, OutT>::Init(
 
     this->startValIdx = csrRowPtrGm(0);
     this->endValIdx = csrRowPtrGm(this->blockRowNum);
-    this->blockLength = endValIdx - startValIdx;
+    if (endValIdx >= startValIdx) {
+        this->blockLength = endValIdx - startValIdx;
+    } else {
+        this->blockLength = 0;
+    }
 
     csrColIndGm.SetGlobalBuffer((__gm__ int32_t *)csrColInd + startValIdx, this->blockLength);
     csrValGm.SetGlobalBuffer((__gm__ ValT *)csrVal + startValIdx, this->blockLength);
@@ -406,7 +410,11 @@ __aicore__ inline void SpmvKernelTrans<CompT, ValT, OutT>::Init(
 
         this->startValIdx = csrRowPtrGm(0);
         this->endValIdx = csrRowPtrGm(this->blockRowNum);
-        this->blockLength = endValIdx - startValIdx;
+        if (endValIdx >= startValIdx) {
+            this->blockLength = endValIdx - startValIdx;
+        } else {
+            this->blockLength = 0;
+        }
 
         csrColIndGm.SetGlobalBuffer((__gm__ int32_t *)csrColInd + startValIdx, this->blockLength);
         csrValGm.SetGlobalBuffer((__gm__ ValT *)csrVal + startValIdx, this->blockLength);

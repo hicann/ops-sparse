@@ -50,6 +50,9 @@ namespace {
         constexpr uint64_t kAlignSlack = kBufferCount * kAlignBytes;
 
         auto platform = platform_ascendc::PlatformAscendCManager::GetInstance();
+        CHECK_RET(platform != nullptr,
+                  LOG_PRINT("[ERROR] ComputeMaxRowLength: platform instance is nullptr\n");
+                  return 0);
         uint64_t ubSize = 0;
         platform->GetCoreMemSize(platform_ascendc::CoreMemType::UB, ubSize);
         CHECK_RET(ubSize > 0,
@@ -146,6 +149,8 @@ extern "C" {
                   LOG_PRINT("[ERROR] aclsparseSpMV: unsupported computeType %d\n", computeType);
                   return ACL_SPARSE_STATUS_NOT_SUPPORTED);
 
+        (void)externalBuffer;
+
         // ==================== 解包描述符 ====================
         auto *h = ToInternalHandle(handle);
         auto *matInner = ToMatInner(matA);
@@ -156,6 +161,9 @@ extern "C" {
                   LOG_PRINT("[ERROR] aclsparseSpMV: unsupported matrix format %d\n", matInner->format);
                   return ACL_SPARSE_STATUS_NOT_SUPPORTED);
 
+        CHECK_RET(matInner->baseType == ACL_SPARSE_INDEX_BASE_ZERO,
+                  LOG_PRINT("[ERROR] aclsparseSpMV: 1-based index base not supported\n");
+                  return ACL_SPARSE_STATUS_NOT_SUPPORTED);
         {
             aclsparseStatus_t idxSt =
                 AclsparseValidateSupportedCsrIndexTypes(matInner->ptrType, matInner->IdxType);
@@ -198,6 +206,9 @@ extern "C" {
 
         // ==================== 平台参数 ====================
         auto ascendcPlatform = platform_ascendc::PlatformAscendCManager::GetInstance();
+        CHECK_RET(ascendcPlatform != nullptr,
+                  LOG_PRINT("[ERROR] aclsparseSpMV: platform instance is nullptr\n");
+                  return ACL_SPARSE_STATUS_INTERNAL_ERROR);
         uint32_t blockDim = ascendcPlatform->GetCoreNumAiv();
         CHECK_RET(blockDim > 0,
                   LOG_PRINT("[ERROR] aclsparseSpMV: GetCoreNumAiv returned 0\n");
@@ -252,6 +263,9 @@ extern "C" {
         // ==================== 启动内核 ====================
         auto valType = xInner->valueType;
         auto outType = yInner->valueType;
+        CHECK_RET(computeType != ACL_INT32 || (valType == ACL_INT32 && outType == ACL_INT32),
+                  LOG_PRINT("[ERROR] aclsparseSpMV: computeType INT32 requires valType and outType INT32\n");
+                  return ACL_SPARSE_STATUS_NOT_SUPPORTED);
         bool trans = (opA == ACL_SPARSE_OP_TRANSPOSE);
 
         int32_t cType, vType, oType;
