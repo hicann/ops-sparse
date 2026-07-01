@@ -359,7 +359,7 @@ install_patch() {
 
     echo "Installing patch..."
     case "$OS" in
-        debian|rhel)
+        debian|rhel|euler)
             run_command sudo $PKG_MANAGER install -y patch
             ;;
         macos)

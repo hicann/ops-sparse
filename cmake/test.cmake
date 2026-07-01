@@ -8,6 +8,13 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # ----------------------------------------------------------------------------------------------------------
 
+if(DEFINED ENV{EAGER_LIBRARY_PATH} AND NOT "$ENV{EAGER_LIBRARY_PATH}" STREQUAL "")
+    set(_ops_sparse_ascendcl_lib "$ENV{EAGER_LIBRARY_PATH}/libascendcl.so")
+else()
+    set(ASCENDCL_PATH "${ASCEND_CANN_PACKAGE_PATH}/lib64" CACHE PATH "Directory containing libascendcl.so")
+    set(_ops_sparse_ascendcl_lib "${ASCENDCL_PATH}/libascendcl.so")
+endif()
+
 # Register operator test from test/${operator}/${arch_dir}/${operator}_test.cpp.
 # Picks the first matching arch dir in SOC_ARCH_DIRS; skips if none found.
 function(ops_sparse_add_test operator link_lib)
@@ -43,6 +50,6 @@ function(ops_sparse_add_test operator link_lib)
 
     target_link_libraries(${target} PRIVATE
         ${link_lib}
-        $ENV{EAGER_LIBRARY_PATH}/libascendcl.so
+        ${_ops_sparse_ascendcl_lib}
     )
 endfunction()
