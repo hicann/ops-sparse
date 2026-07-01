@@ -14,6 +14,8 @@
 #define SPMM_CSR_MAT_H
 
 #include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
 #include "spmm.h"
 #include "cann_ops_sparse.h"
 #include "cann_ops_sparse_common.h"
@@ -23,10 +25,16 @@ class SpmmCsrMat {
 public:
     SpmmCsrMat(aclsparseSpMatDescr *inner, int32_t blockDim)
         : matDesc(inner),
-          m(static_cast<int64_t>(inner->rows)),
-          k(static_cast<int64_t>(inner->cols)),
-          nnz(static_cast<int64_t>(inner->nnz)),
-          blockDim(blockDim) {}
+          blockDim(blockDim)
+    {
+        if (inner == nullptr) {
+            printf("[SpmmCsrMat] inner descriptor is nullptr\n");
+            abort();
+        }
+        m = static_cast<int64_t>(inner->rows);
+        k = static_cast<int64_t>(inner->cols);
+        nnz = static_cast<int64_t>(inner->nnz);
+    }
 
     // Build the reorder table + row-bin edges into the device workspace,
     // and return them in host buffers so the caller can also fill TilingData.

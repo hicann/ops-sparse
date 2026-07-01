@@ -87,6 +87,9 @@ uint32_t BuildGreedyRowReorderFromCsr(const aclsparseSpMatDescr *matDesc,
     std::vector<int32_t> *reorder,
     std::vector<int32_t> *binEdges)
 {
+    if (matDesc->ptrType != ACL_SPARSE_INDEX_32I) {
+        return ACL_SPARSE_STATUS_NOT_SUPPORTED;
+    }
     std::vector<int32_t> rowOff(static_cast<size_t>(m) + 1);
     aclError aclRet = aclrtMemcpy(rowOff.data(),
                                   sizeof(int32_t) * (m + 1),
