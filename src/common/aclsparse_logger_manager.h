@@ -31,4 +31,4 @@ aclsparseStatus_t aclsparseLoggerSetLevel(aclsparseLogLevel_t logLevel);
 
 }
 
-#endif // ACLBLAS_LOGGER_MANAGER_H_
+#endif // ACLSPARSE_LOGGER_MANAGER_H_

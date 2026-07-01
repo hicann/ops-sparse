@@ -22,6 +22,7 @@
         aclError __ret = x;                                                                 \
         if (__ret != ACL_ERROR_NONE) {                                                      \
             std::cerr << __FILE__ << ":" << __LINE__ << " aclError:" << __ret << std::endl; \
+            return ACL_SPARSE_STATUS_INTERNAL_ERROR;                                         \
         }                                                                                   \
     } while (0);
 
