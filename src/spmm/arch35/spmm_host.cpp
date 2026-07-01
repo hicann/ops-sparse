@@ -14,6 +14,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <new>
+#include <mutex>
 
 #include "cann_ops_sparse.h"
 #include "cann_ops_sparse_common.h"
@@ -41,20 +42,20 @@ constexpr uint32_t kSpmmBlockDimFallback = 24u;
 uint32_t GetSpmmBlockDim()
 {
     static uint32_t cached = 0u;
-    if (cached != 0u) {
-        return cached;
-    }
+    static std::once_flag onceFlag;
+    std::call_once(onceFlag, [&]() {
 #ifndef __CCE_AICORE__
-    auto *plat = platform_ascendc::PlatformAscendCManager::GetInstance();
-    if (plat != nullptr) {
-        const uint32_t aiv = plat->GetCoreNumAiv();
-        if (aiv > 0u) {
-            cached = aiv;
-            return cached;
+        auto *plat = platform_ascendc::PlatformAscendCManager::GetInstance();
+        if (plat != nullptr) {
+            const uint32_t aiv = plat->GetCoreNumAiv();
+            if (aiv > 0u) {
+                cached = aiv;
+                return;
+            }
         }
-    }
 #endif
-    cached = kSpmmBlockDimFallback;
+        cached = kSpmmBlockDimFallback;
+    });
     return cached;
 }
 
@@ -170,6 +171,9 @@ aclsparseStatus_t ValidateSpmmInputs(const aclsparseSpMatDescr *matA,
     if (idxSt != ACL_SPARSE_STATUS_SUCCESS) {
         return idxSt;
     }
+    if (matA->baseType != ACL_SPARSE_INDEX_BASE_ZERO) {
+        return ACL_SPARSE_STATUS_NOT_SUPPORTED;
+    }
     if (!IsSupportedSpmmDtypeCombo(matA, matB, matC, computeType)) {
         return ACL_SPARSE_STATUS_NOT_SUPPORTED;
     }
@@ -177,6 +181,10 @@ aclsparseStatus_t ValidateSpmmInputs(const aclsparseSpMatDescr *matA,
         return ACL_SPARSE_STATUS_INVALID_VALUE;
     }
     if (!IsSupportedSpmmAlg(alg)) {
+        return ACL_SPARSE_STATUS_NOT_SUPPORTED;
+    }
+    if (matA->rows > static_cast<uint64_t>(INT32_MAX) ||
+        matC->cols > static_cast<int64_t>(INT32_MAX)) {
         return ACL_SPARSE_STATUS_NOT_SUPPORTED;
     }
     return ACL_SPARSE_STATUS_SUCCESS;

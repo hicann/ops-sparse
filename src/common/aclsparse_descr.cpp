@@ -130,6 +130,12 @@ aclsparseStatus_t aclsparseCreateDnMat(aclsparseDnMatDescr_t *dnMatDescr,
     if (rows <= 0 || cols <= 0 || ld <= 0) {
         return ACL_SPARSE_STATUS_INVALID_VALUE;
     }
+    if (values == nullptr) {
+        return ACL_SPARSE_STATUS_INVALID_VALUE;
+    }
+    if (order != ACL_SPARSE_ORDER_ROW && order != ACL_SPARSE_ORDER_COL) {
+        return ACL_SPARSE_STATUS_INVALID_VALUE;
+    }
     // ld 约束：行主序需 >= cols；列主序需 >= rows。
     if (order == ACL_SPARSE_ORDER_ROW && ld < cols) {
         return ACL_SPARSE_STATUS_INVALID_VALUE;
@@ -164,6 +170,9 @@ aclsparseStatus_t aclsparseCreateConstDnMat(aclsparseConstDnMatDescr_t *dnMatDes
     int64_t rows, int64_t cols, int64_t ld, const void *values,
     aclDataType valueType, aclsparseOrder_t order)
 {
+    if (dnMatDescr == nullptr) {
+        return ACL_SPARSE_STATUS_HANDLE_IS_NULLPTR;
+    }
     aclsparseDnMatDescr_t tmp = nullptr;
     aclsparseStatus_t st = aclsparseCreateDnMat(&tmp, rows, cols, ld,
         const_cast<void *>(values), valueType, order);
