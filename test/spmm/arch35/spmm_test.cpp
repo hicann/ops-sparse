@@ -432,8 +432,14 @@ static VerifyResult RunSpmmTestFp32(int32_t deviceId, aclrtStream stream,
     msH2D = ElapsedMs(t0, t1);
 
     aclsparseHandle_t handle = nullptr;
-    CHECK_ACL_SPARSE(aclsparseCreate(&handle));
-    CHECK_ACL_SPARSE(aclsparseSetStream(handle, stream));
+    aclsparseStatus_t sparseRet = aclsparseCreate(&handle);
+    CHECK_RET(sparseRet == ACL_SPARSE_STATUS_SUCCESS,
+              LOG_PRINT("aclsparseCreate failed. ERROR: %d\n", sparseRet);
+              return FailVerify());
+    sparseRet = aclsparseSetStream(handle, stream);
+    CHECK_RET(sparseRet == ACL_SPARSE_STATUS_SUCCESS,
+              LOG_PRINT("aclsparseSetStream failed. ERROR: %d\n", sparseRet);
+              return FailVerify());
 
     aclsparseSpMatDescr_t matA = nullptr;
     sparseRet = aclsparseCreateCsr(&matA, m, k, nnz, dRowOff, dColInd, dVals,
@@ -629,8 +635,14 @@ static VerifyResult RunSpmmTestFp16(int32_t deviceId, aclrtStream stream,
     msH2D = ElapsedMs(t0, t1);
 
     aclsparseHandle_t handle = nullptr;
-    CHECK_ACL_SPARSE(aclsparseCreate(&handle));
-    CHECK_ACL_SPARSE(aclsparseSetStream(handle, stream));
+    aclsparseStatus_t sparseRet = aclsparseCreate(&handle);
+    CHECK_RET(sparseRet == ACL_SPARSE_STATUS_SUCCESS,
+              LOG_PRINT("aclsparseCreate failed. ERROR: %d\n", sparseRet);
+              return FailVerify());
+    sparseRet = aclsparseSetStream(handle, stream);
+    CHECK_RET(sparseRet == ACL_SPARSE_STATUS_SUCCESS,
+              LOG_PRINT("aclsparseSetStream failed. ERROR: %d\n", sparseRet);
+              return FailVerify());
 
     aclsparseSpMatDescr_t matA = nullptr;
     sparseRet = aclsparseCreateCsr(&matA, m, k, nnz, dRowOff, dColInd, dVals,
@@ -802,8 +814,14 @@ static VerifyResult RunSpmmTestInt8(int32_t deviceId, aclrtStream stream,
     msH2D = ElapsedMs(t0, t1);
 
     aclsparseHandle_t handle = nullptr;
-    CHECK_ACL_SPARSE(aclsparseCreate(&handle));
-    CHECK_ACL_SPARSE(aclsparseSetStream(handle, stream));
+    aclsparseStatus_t sparseRet = aclsparseCreate(&handle);
+    CHECK_RET(sparseRet == ACL_SPARSE_STATUS_SUCCESS,
+              LOG_PRINT("aclsparseCreate failed. ERROR: %d\n", sparseRet);
+              return FailVerify());
+    sparseRet = aclsparseSetStream(handle, stream);
+    CHECK_RET(sparseRet == ACL_SPARSE_STATUS_SUCCESS,
+              LOG_PRINT("aclsparseSetStream failed. ERROR: %d\n", sparseRet);
+              return FailVerify());
 
     aclsparseSpMatDescr_t matA = nullptr;
     sparseRet = aclsparseCreateCsr(&matA, m, k, nnz, dRowOff, dColInd, dVals,
