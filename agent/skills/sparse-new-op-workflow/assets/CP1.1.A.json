@@ -1,0 +1,83 @@
+{
+  "checkpoint": "CP1.1.A",
+  "title": "API 体系与算子基础信息对齐",
+  "questions": [
+    {
+      "question": "该算子对标的 cuSPARSE 接口属于哪种 API 体系？",
+      "header": "API 体系",
+      "options": [
+        {
+          "label": "Generic API（推荐）",
+          "description": "新标准（Descriptor + 三阶段），cuSPARSE 主推方向。如 SpMV/SpMM/SpGEMM/SDDMM"
+        },
+        {
+          "label": "Legacy API",
+          "description": "旧标准（直接传参，带 MatDescr 描述符），仅对标 cuSPARSE 尚未迁移到 Generic 的接口。如 gtsv2（三对角求解）、格式转换 coo2csr/csr2coo 等"
+        }
+      ]
+    },
+    {
+      "question": "请确认要开发的算子是否为 {aclsparseXxx}（目录名: {op_name}）？",
+      "header": "算子名确认",
+      "options": [
+        {
+          "label": "是，{aclsparseXxx}（{op_name}）",
+          "description": "使用此名称开发"
+        },
+        {
+          "label": "否，需要修改名称",
+          "description": "请在自由输入中提供正确的 API 名和目录名"
+        }
+      ]
+    },
+    {
+      "question": "该算子需要支持哪些数据类型？",
+      "header": "数据类型",
+      "options": [
+        {
+          "label": "FP32",
+          "description": "单精度浮点"
+        },
+        {
+          "label": "FP16",
+          "description": "半精度浮点"
+        },
+        {
+          "label": "BF16",
+          "description": "BFloat16"
+        },
+        {
+          "label": "INT32",
+          "description": "32位整数"
+        },
+        {
+          "label": "混合精度",
+          "description": "computeType 与 valueType/outType 不同"
+        }
+      ],
+      "multiple": true
+    },
+    {
+      "question": "目标芯片型号是什么？",
+      "header": "目标芯片",
+      "options": [
+        {
+          "label": "Ascend910B",
+          "description": "NPU_ARCH: dav-2201, 算子目录: arch22"
+        },
+        {
+          "label": "Ascend910_93",
+          "description": "NPU_ARCH: dav-2201, 算子目录: arch22"
+        },
+        {
+          "label": "Ascend950",
+          "description": "NPU_ARCH: dav-3510, 算子目录: arch35"
+        },
+        {
+          "label": "Ascend310P",
+          "description": "NPU_ARCH: dav-2002, 算子目录: arch20"
+        }
+      ]
+    }
+  ]
+}

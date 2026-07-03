@@ -1,0 +1,20 @@
+{
+  "checkpoint": "CP1.2",
+  "title": "需求分析确认",
+  "questions": [
+    {
+      "question": "需求分析文档已生成，请确认是否可以进入方案设计阶段？",
+      "header": "需求分析审批",
+      "options": [
+        {
+          "label": "确认，进入方案设计",
+          "description": "需求分析文档符合预期"
+        },
+        {
+          "label": "需要修改",
+          "description": "请在自由输入中说明需要修改的内容"
+        }
+      ]
+    }
+  ]
+}

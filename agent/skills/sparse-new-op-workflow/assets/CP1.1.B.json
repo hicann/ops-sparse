@@ -1,0 +1,42 @@
+{
+  "checkpoint": "CP1.1.B",
+  "title": "精度与编程模型对齐",
+  "questions": [
+    {
+      "question": "该算子的精度标准是什么？",
+      "header": "精度标准",
+      "options": [
+        {
+          "label": "社区标准（推荐）",
+          "description": "FP32: rtol ≤ 1e-5, FP16: rtol ≤ 1e-3"
+        },
+        {
+          "label": "高精度",
+          "description": "FP32: rtol ≤ 1e-6, FP16: rtol ≤ 5e-4"
+        },
+        {
+          "label": "位精确",
+          "description": "适用于整数运算"
+        }
+      ]
+    },
+    {
+      "question": "目标芯片架构对应的编程模型是什么？（本题仅当目标芯片为 Ascend950/arch35 时展示）",
+      "header": "编程模型",
+      "options": [
+        {
+          "label": "SIMD",
+          "description": "向量编程模型，规整数据访问，适合大多数稀疏算子（如 SpMV/SpMM 的行列规整路径）"
+        },
+        {
+          "label": "RegBase",
+          "description": "寄存器编程模型，细粒度寄存器控制，适合对 UB 利用率高、需极致优化的核心算子"
+        },
+        {
+          "label": "SIMT",
+          "description": "单指令多线程模型，每个线程处理独立数据，适合稀疏结构 irregular 的算子（如 COO 格式的 SpMV）"
+        }
+      ]
+    }
+  ]
+}

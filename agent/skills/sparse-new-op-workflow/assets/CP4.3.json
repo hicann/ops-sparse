@@ -1,0 +1,24 @@
+{
+  "checkpoint": "CP4.3",
+  "title": "最终审批",
+  "questions": [
+    {
+      "question": "算子开发和验收已完成，是否可以上库？",
+      "header": "上库审批",
+      "options": [
+        {
+          "label": "确认，可以上库",
+          "description": "squash commit 合入主分支"
+        },
+        {
+          "label": "需要修改",
+          "description": "请在自由输入中说明需要修改的内容"
+        },
+        {
+          "label": "暂不上库",
+          "description": "保留分支，后续再处理"
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,24 @@
+{
+  "checkpoint": "CP3.2",
+  "title": "验收审批",
+  "questions": [
+    {
+      "question": "代码检视和性能验收已完成，是否可以结束开发流程？",
+      "header": "验收审批",
+      "options": [
+        {
+          "label": "确认，完成开发",
+          "description": "代码检视和性能均达标，进入上库阶段"
+        },
+        {
+          "label": "需要修改",
+          "description": "请在自由输入中说明需要修改的内容"
+        },
+        {
+          "label": "精简大 shape 用例",
+          "description": "仅保留 1 条代表性大 shape 用例后继续"
+        }
+      ]
+    }
+  ]
+}

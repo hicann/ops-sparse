@@ -71,3 +71,8 @@ tbetoolkits-*.log
 single/
 scripts/ci/tmp/
 pr_filelist.txt
+
+# agent workflow local files
+agent/agents/model_config.json
+opencode.json
+.agent/
