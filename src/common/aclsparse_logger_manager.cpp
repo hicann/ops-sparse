@@ -14,6 +14,7 @@
  */
 
 #include "aclsparse_logger_manager.h"
+#include "dlog_pub.h"
 
 namespace AclSparse {
 
@@ -21,16 +22,16 @@ aclsparseStatus_t aclsparseLoggerSetLevel(aclsparseLogLevel_t logLevel)
 {
     switch (logLevel) {
         case aclsparseLogLevel_t::LOG_LEVEL_INFO:
-            dlog_setlevel(OP, DLOG_INFO, 1);
+            dlog_setlevel(OP_MODULE_ID, DLOG_INFO, 1);
             break;
         case aclsparseLogLevel_t::LOG_LEVEL_ERROR:
-            dlog_setlevel(OP, DLOG_ERROR, 1);
+            dlog_setlevel(OP_MODULE_ID, DLOG_ERROR, 1);
             break;
         case aclsparseLogLevel_t::LOG_LEVEL_DEBUG:
-            dlog_setlevel(OP, DLOG_DEBUG, 1);
+            dlog_setlevel(OP_MODULE_ID, DLOG_DEBUG, 1);
             break;
         default:
-            dlog_setlevel(OP, DLOG_INFO, 1);
+            dlog_setlevel(OP_MODULE_ID, DLOG_INFO, 1);
             break;
     }
     return aclsparseStatus_t::ACL_SPARSE_STATUS_SUCCESS;
