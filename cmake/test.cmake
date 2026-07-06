@@ -45,6 +45,8 @@ function(ops_sparse_add_test operator link_lib)
     target_include_directories(${target} PRIVATE
         ${CMAKE_SOURCE_DIR}/include
         ${CMAKE_SOURCE_DIR}/src/${operator}/${_src_arch}
+        ${CMAKE_SOURCE_DIR}/src/common
+        ${CMAKE_SOURCE_DIR}/test/frame
         $ENV{LINUX_INCLUDE_PATH}
     )
 
@@ -52,4 +54,12 @@ function(ops_sparse_add_test operator link_lib)
         ${link_lib}
         ${_ops_sparse_ascendcl_lib}
     )
+
+    if(TEST_USE_EIGEN)
+        find_package(Eigen3 3.3 QUIET)
+        if(Eigen3_FOUND)
+            target_link_libraries(${target} PRIVATE Eigen3::Eigen)
+            target_compile_definitions(${target} PRIVATE SPARSE_TEST_USE_EIGEN)
+        endif()
+    endif()
 endfunction()

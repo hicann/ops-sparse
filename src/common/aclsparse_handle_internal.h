@@ -38,11 +38,17 @@
     ACLSPARSE_MAKE_VERSION(ACLSPARSE_VERSION_MAJOR, ACLSPARSE_VERSION_MINOR, ACLSPARSE_VERSION_PATCH)
 
 /**
+ * @brief Default initial workspace size: 4 MiB.
+ */
+constexpr size_t ACLSPARSE_DEFAULT_WORKSPACE_SIZE = 4U * 1024U * 1024U;
+
+/**
  * @brief ops-sparse handle 内部结构体
  *
  * 仅包含 kernel 执行所需的最小化字段：
  *   - stream：当前 stream，用于 kernel 异步执行
- *   - workspace / workspaceSize：内部 workspace，供算子临时存储
+ *   - pointerMode：指针模式（HOST 或 DEVICE）
+ *   - workspace：内部 workspace，供算子临时存储
  *
  * 该结构体定义仅在实现文件中可见，对外部用户完全不可见。
  * 对外接口使用 void* / void** 作为 handle 类型。
@@ -50,4 +56,45 @@
 struct aclsparseContext {
     /* ========== Stream ========== */
     aclrtStream stream = nullptr;     ///< 当前 stream，用于 kernel 执行
+
+    /* ========== Pointer Mode ========== */
+    aclsparsePointerMode_t pointerMode = ACL_SPARSE_POINTER_MODE_HOST;
+
+    /* ========== Default workspace (library managed) ========== */
+    void* default_workspace = nullptr;
+    size_t default_workspace_size = 0;
+
+    /* ========== User workspace (user managed) ========== */
+    void* user_workspace = nullptr;
+    size_t user_workspace_size = 0;
+
+    bool use_user_workspace = false;
 };
+
+/**
+ * @brief 获取当前活跃 workspace 指针
+ */
+inline void* aclsparseGetEffectiveWorkspace(const aclsparseContext* h)
+{
+    if (h == nullptr) return nullptr;
+    return h->use_user_workspace ? h->user_workspace : h->default_workspace;
+}
+
+/**
+ * @brief 获取当前活跃 workspace 大小
+ */
+inline size_t aclsparseGetEffectiveWorkspaceSize(const aclsparseContext* h)
+{
+    if (h == nullptr) return 0;
+    return h->use_user_workspace ? h->user_workspace_size : h->default_workspace_size;
+}
+
+/**
+ * @brief 切回默认 workspace（不清除用户 workspace 缓存字段）
+ */
+inline void aclsparseResetToDefaultWorkspace(aclsparseContext* h)
+{
+    if (h != nullptr) {
+        h->use_user_workspace = false;
+    }
+}

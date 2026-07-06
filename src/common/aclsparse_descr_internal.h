@@ -76,4 +76,12 @@ struct aclsparseDnMatDescr {
     aclDataType valueType{};
 };
 
+// Legacy 矩阵描述符内部结构（Format Conversion / nnz 等 Legacy API 使用）。
+struct aclsparseMatDescr {
+    aclsparseMatrixType_t type = ACL_SPARSE_MATRIX_TYPE_GENERAL;
+    aclsparseIndexBase_t indexBase = ACL_SPARSE_INDEX_BASE_ZERO;
+    aclsparseDiagType_t diagType = ACL_SPARSE_DIAG_TYPE_NON_UNIT;
+    aclsparseFillMode_t fillMode = ACL_SPARSE_FILL_MODE_LOWER;
+};
+
 #endif // ACLSPARSE_DESCR_INTERNAL_H

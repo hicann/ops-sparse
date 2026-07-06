@@ -137,6 +137,36 @@ typedef enum aclsparseSpMVAlg_t {
     // (bit-wise) results for each run.
 } aclsparseSpMVAlg_t;
 
+// Computation direction (used by Legacy API, e.g. aclsparseSnnz).
+typedef enum aclsparseDirection_t {
+    ACL_SPARSE_DIRECTION_ROW = 0,
+    ACL_SPARSE_DIRECTION_COLUMN = 1
+} aclsparseDirection_t;
+
+// Forward declaration for Legacy matrix descriptor.
+struct aclsparseMatDescr;
+typedef struct aclsparseMatDescr *aclsparseMatDescr_t;
+
+// Matrix type for Legacy MatDescr.
+typedef enum aclsparseMatrixType_t {
+    ACL_SPARSE_MATRIX_TYPE_GENERAL = 0,
+    ACL_SPARSE_MATRIX_TYPE_SYMMETRIC,
+    ACL_SPARSE_MATRIX_TYPE_HERMITIAN,
+    ACL_SPARSE_MATRIX_TYPE_TRIANGULAR
+} aclsparseMatrixType_t;
+
+// Diagonal type for Legacy MatDescr.
+typedef enum aclsparseDiagType_t {
+    ACL_SPARSE_DIAG_TYPE_NON_UNIT = 0,
+    ACL_SPARSE_DIAG_TYPE_UNIT
+} aclsparseDiagType_t;
+
+// Fill mode for Legacy MatDescr.
+typedef enum aclsparseFillMode_t {
+    ACL_SPARSE_FILL_MODE_LOWER = 0,
+    ACL_SPARSE_FILL_MODE_UPPER
+} aclsparseFillMode_t;
+
 // This type indicates the index type for representing the sparse matrix indices.
 typedef enum aclsparseIndexType_t {
     ACL_SPARSE_INDEX_32I = 0,  // 32-bit signed integer [0, 2^31 - 1]（当前 SpMV/SpMM 已实现）
@@ -427,6 +457,39 @@ aclsparseStatus_t aclsparseSetStream(aclsparseHandle_t handle, aclrtStream strea
 aclsparseStatus_t aclsparseGetStream(aclsparseHandle_t handle, aclrtStream *stream);
 
 /**
+ * @brief 设置用户 workspace
+ *
+ * 允许用户提供预分配的设备内存作为 workspace，避免算子内部频繁 malloc/free。
+ * 库仅借用用户内存，不获取所有权。
+ *
+ * 采用 grow-only 策略：当新 workspaceSize 不大于当前 user workspace size 时，
+ * 保持原有 workspace 不变（仍返回 SUCCESS）。如需替换为更小的 workspace，
+ * 请先传入 nullptr 切回默认 workspace，再重新设置。
+ *
+ * @param handle aclsparse handle
+ * @param workspace 用户分配的设备内存指针，nullptr 表示切回默认 workspace
+ * @param workspaceSize workspace 大小（字节）
+ * @return ACL_SPARSE_STATUS_SUCCESS 成功
+ *         ACL_SPARSE_STATUS_HANDLE_IS_NULLPTR handle 为空
+ *         ACL_SPARSE_STATUS_INVALID_VALUE workspaceSize 为 0（当 workspace 非空时）
+ */
+aclsparseStatus_t aclsparseSetWorkspace(aclsparseHandle_t handle, void *workspace, size_t workspaceSize);
+
+/**
+ * @brief 获取当前活跃 workspace
+ *
+ * 返回当前使用的 workspace 指针和大小（可能是默认 workspace 或用户 workspace）。
+ *
+ * @param handle aclsparse handle
+ * @param workspace 输出参数，返回当前 workspace 指针
+ * @param workspaceSize 输出参数，返回当前 workspace 大小
+ * @return ACL_SPARSE_STATUS_SUCCESS 成功
+ *         ACL_SPARSE_STATUS_HANDLE_IS_NULLPTR handle 为空
+ *         ACL_SPARSE_STATUS_INVALID_VALUE 输出参数为空
+ */
+aclsparseStatus_t aclsparseGetWorkspace(aclsparseHandle_t handle, void **workspace, size_t *workspaceSize);
+
+/**
  * @brief 获取 ops-sparse 版本号
  *
  * 版本号编码为 MAJOR * 10000 + MINOR * 100 + PATCH，如 10000 表示 1.0.0。
@@ -437,6 +500,62 @@ aclsparseStatus_t aclsparseGetStream(aclsparseHandle_t handle, aclrtStream *stre
  *         ACL_SPARSE_STATUS_INVALID_VALUE 参数无效
  */
 aclsparseStatus_t aclsparseGetVersion(aclsparseHandle_t handle, int *version);
+
+// ============================================================================
+// Pointer Mode
+// ============================================================================
+
+typedef enum aclsparsePointerMode_t {
+    ACL_SPARSE_POINTER_MODE_HOST = 0,
+    ACL_SPARSE_POINTER_MODE_DEVICE = 1
+} aclsparsePointerMode_t;
+
+aclsparseStatus_t aclsparseSetPointerMode(aclsparseHandle_t handle, aclsparsePointerMode_t mode);
+aclsparseStatus_t aclsparseGetPointerMode(aclsparseHandle_t handle, aclsparsePointerMode_t *mode);
+
+// ============================================================================
+// Legacy API: MatDescr management
+// ============================================================================
+
+aclsparseStatus_t aclsparseCreateMatDescr(aclsparseMatDescr_t *descr);
+aclsparseStatus_t aclsparseDestroyMatDescr(aclsparseMatDescr_t descr);
+void aclsparseSetMatType(aclsparseMatDescr_t descr, aclsparseMatrixType_t type);
+void aclsparseSetMatIndexBase(aclsparseMatDescr_t descr, aclsparseIndexBase_t base);
+void aclsparseSetMatDiagType(aclsparseMatDescr_t descr, aclsparseDiagType_t diagType);
+void aclsparseSetMatFillMode(aclsparseMatDescr_t descr, aclsparseFillMode_t fillMode);
+aclsparseMatrixType_t aclsparseGetMatType(aclsparseMatDescr_t descr);
+aclsparseIndexBase_t aclsparseGetMatIndexBase(aclsparseMatDescr_t descr);
+aclsparseDiagType_t aclsparseGetMatDiagType(aclsparseMatDescr_t descr);
+aclsparseFillMode_t aclsparseGetMatFillMode(aclsparseMatDescr_t descr);
+
+// ============================================================================
+// Legacy API: aclsparseSnnz
+// ============================================================================
+
+/**
+ * @brief Count the number of nonzero elements per row or column in a dense matrix.
+ *
+ * @param handle             IN, HOST, aclsparse handle.
+ * @param dirA               IN, HOST, direction: ROW or COLUMN.
+ * @param m                  IN, HOST, number of rows.
+ * @param n                  IN, HOST, number of columns.
+ * @param descrA             IN, HOST, matrix descriptor.
+ * @param A                  IN, DEVICE, dense matrix data (column-major).
+ * @param lda                IN, HOST, leading dimension (>= max(1, m)).
+ * @param nnzPerRowColumn    OUT, DEVICE, array of size m (ROW) or n (COLUMN).
+ * @param nnzTotalDevHostPtr OUT, DEVICE/HOST, total nonzero count.
+ *                           Memory location depends on aclsparseSetPointerMode:
+ *                           HOST mode -> host memory, DEVICE mode -> device memory.
+ * @return aclsparseStatus_t
+ */
+aclsparseStatus_t aclsparseSnnz(
+    aclsparseHandle_t handle,
+    aclsparseDirection_t dirA,
+    int m, int n,
+    const aclsparseMatDescr_t descrA,
+    const float *A, int lda,
+    int *nnzPerRowColumn,
+    int *nnzTotalDevHostPtr);
 
 #ifdef __cplusplus
 }

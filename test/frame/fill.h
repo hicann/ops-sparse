@@ -1,0 +1,343 @@
+/**
+ * Copyright (c) 2026 Huawei Technologies Co., Ltd.
+ * This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+ * CANN Open Software License Agreement Version 2.0 (the "License").
+ * Please refer to the License for details. You may not use this file except in compliance with the License.
+ * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+ * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+ * See LICENSE in the root of the software repository for the full text of the License.
+ */
+
+#ifndef TEST_FRAME_FILL_H_
+#define TEST_FRAME_FILL_H_
+
+#include <algorithm>
+#include <cmath>
+#include <cstdint>
+#include <random>
+#include <set>
+#include <vector>
+
+namespace sparse_test {
+
+struct CsrMatrix {
+    std::vector<int32_t> rowOffsets;
+    std::vector<int32_t> colIndices;
+    std::vector<float> values;
+    int64_t rows = 0;
+    int64_t cols = 0;
+    int64_t nnz = 0;
+
+    template <typename T>
+    std::vector<T> valuesAs() const {
+        std::vector<T> out(values.size());
+        for (size_t i = 0; i < values.size(); i++) out[i] = static_cast<T>(values[i]);
+        return out;
+    }
+};
+
+struct CooMatrix {
+    std::vector<int32_t> rowIndices;
+    std::vector<int32_t> colIndices;
+    std::vector<float> values;
+    int64_t rows = 0;
+    int64_t cols = 0;
+    int64_t nnz = 0;
+};
+
+struct CscMatrix {
+    std::vector<int32_t> colOffsets;
+    std::vector<int32_t> rowIndices;
+    std::vector<float> values;
+    int64_t rows = 0;
+    int64_t cols = 0;
+    int64_t nnz = 0;
+};
+
+class SparseFillGenerator {
+public:
+    explicit SparseFillGenerator(uint32_t seed = 42) : rng_(seed) {}
+
+    void setSparsity(double sparsity) {
+        sparsity_ = std::clamp(sparsity, 0.0, 1.0);
+    }
+    void setEmptyRowProb(double p) {
+        emptyRowProb_ = std::clamp(p, 0.0, 1.0);
+    }
+    void setValueRange(double lo, double hi) {
+        valueLo_ = lo;
+        valueHi_ = hi;
+    }
+    void setSeed(uint32_t seed) {
+        rng_.seed(seed);
+    }
+
+    CsrMatrix generateCsr(int64_t rows, int64_t cols, int64_t nnzHint = -1) {
+        CsrMatrix out;
+        out.rows = rows;
+        out.cols = cols;
+        out.rowOffsets.assign(rows + 1, 0);
+        if (rows <= 0 || cols <= 0) return out;
+
+        std::uniform_real_distribution<float> emptyDist(0.0f, 1.0f);
+        std::uniform_real_distribution<float> valDist(static_cast<float>(valueLo_), static_cast<float>(valueHi_));
+
+        double density = 1.0 - sparsity_;
+        std::binomial_distribution<int> nnzDist(static_cast<int>(cols), density);
+
+        int64_t currentNnz = 0;
+        std::vector<int> visited(cols, -1);
+        std::vector<int> rowCols;
+
+        for (int64_t i = 0; i < rows; i++) {
+            out.rowOffsets[i] = static_cast<int32_t>(currentNnz);
+            if (emptyRowProb_ > 0.0 && emptyDist(rng_) < static_cast<float>(emptyRowProb_)) continue;
+
+            int targetNnz = (nnzHint > 0) ? static_cast<int>(nnzHint / std::max<int64_t>(1, rows)) : nnzDist(rng_);
+            targetNnz = std::min(targetNnz, static_cast<int>(cols));
+            if (targetNnz <= 0) continue;
+
+            int attempt = 0;
+            while (static_cast<int>(rowCols.size()) < targetNnz && attempt < targetNnz * 4) {
+                std::uniform_int_distribution<int32_t> colDist(0, static_cast<int32_t>(cols) - 1);
+                int32_t c = colDist(rng_);
+                if (visited[c] != static_cast<int>(i)) {
+                    visited[c] = static_cast<int>(i);
+                    rowCols.push_back(c);
+                }
+                attempt++;
+            }
+            std::sort(rowCols.begin(), rowCols.end());
+            for (int32_t c : rowCols) {
+                out.colIndices.push_back(c);
+                out.values.push_back(valDist(rng_));
+                currentNnz++;
+            }
+            rowCols.clear();
+        }
+        out.rowOffsets[rows] = static_cast<int32_t>(currentNnz);
+        out.nnz = currentNnz;
+        return out;
+    }
+
+    CooMatrix generateCoo(int64_t rows, int64_t cols, int64_t nnzHint) {
+        CsrMatrix csr = generateCsr(rows, cols, nnzHint);
+        return csrToCoo(csr, rows, cols);
+    }
+
+    CscMatrix generateCsc(int64_t rows, int64_t cols, int64_t nnzHint) {
+        CsrMatrix csr = generateCsr(rows, cols, nnzHint);
+        return csrToCsc(csr, rows, cols);
+    }
+
+    template <typename T>
+    std::vector<T> generateDenseVector(int64_t size) {
+        std::uniform_real_distribution<float> dist(static_cast<float>(valueLo_), static_cast<float>(valueHi_));
+        std::vector<T> out(size);
+        for (int64_t i = 0; i < size; i++) out[i] = static_cast<T>(dist(rng_));
+        return out;
+    }
+
+    std::vector<float> generateDenseFloat(int64_t size) {
+        return generateDenseVector<float>(size);
+    }
+
+    template <typename T>
+    std::vector<T> generateConstant(int64_t size, T val) {
+        return std::vector<T>(size, val);
+    }
+
+private:
+    std::mt19937 rng_;
+    double sparsity_ = 0.9;
+    double emptyRowProb_ = 0.0;
+    double valueLo_ = -2.0;
+    double valueHi_ = 2.0;
+
+    CooMatrix csrToCoo(const CsrMatrix& csr, int64_t rows, int64_t cols) {
+        CooMatrix out;
+        out.rows = rows;
+        out.cols = cols;
+        out.nnz = csr.nnz;
+        out.rowIndices.reserve(csr.nnz);
+        out.colIndices.reserve(csr.nnz);
+        out.values.reserve(csr.nnz);
+        for (int64_t i = 0; i < rows; i++) {
+            for (int32_t j = csr.rowOffsets[i]; j < csr.rowOffsets[i + 1]; j++) {
+                out.rowIndices.push_back(static_cast<int32_t>(i));
+                out.colIndices.push_back(csr.colIndices[j]);
+                out.values.push_back(csr.values[j]);
+            }
+        }
+        return out;
+    }
+
+    CscMatrix csrToCsc(const CsrMatrix& csr, int64_t rows, int64_t cols) {
+        CscMatrix out;
+        out.rows = rows;
+        out.cols = cols;
+        out.nnz = csr.nnz;
+        out.colOffsets.assign(cols + 1, 0);
+        out.rowIndices.assign(csr.nnz, 0);
+        out.values.assign(csr.nnz, 0.0f);
+
+        for (int32_t c : csr.colIndices) out.colOffsets[c + 1]++;
+        for (int64_t c = 0; c < cols; c++) out.colOffsets[c + 1] += out.colOffsets[c];
+
+        for (int64_t i = 0; i < rows; i++) {
+            for (int32_t j = csr.rowOffsets[i]; j < csr.rowOffsets[i + 1]; j++) {
+                int32_t c = csr.colIndices[j];
+                int32_t dest = out.colOffsets[c];
+                out.rowIndices[dest] = static_cast<int32_t>(i);
+                out.values[dest] = csr.values[j];
+                out.colOffsets[c]++;
+            }
+        }
+        for (int64_t c = cols; c > 0; c--) out.colOffsets[c] = out.colOffsets[c - 1];
+        out.colOffsets[0] = 0;
+        return out;
+    }
+};
+
+inline CsrMatrix makeSparseCsr(int64_t rows, int64_t cols, double sparsity = 0.9, uint32_t seed = 42) {
+    SparseFillGenerator gen(seed);
+    gen.setSparsity(sparsity);
+    return gen.generateCsr(rows, cols);
+}
+
+inline CooMatrix makeSparseCoo(int64_t rows, int64_t cols, double sparsity = 0.9, uint32_t seed = 42) {
+    SparseFillGenerator gen(seed);
+    gen.setSparsity(sparsity);
+    return gen.generateCoo(rows, cols, -1);
+}
+
+inline CscMatrix makeSparseCsc(int64_t rows, int64_t cols, double sparsity = 0.9, uint32_t seed = 42) {
+    SparseFillGenerator gen(seed);
+    gen.setSparsity(sparsity);
+    return gen.generateCsc(rows, cols, -1);
+}
+
+inline std::vector<float> makeDenseFloat(int64_t size, double lo = -2.0, double hi = 2.0, uint32_t seed = 42) {
+    SparseFillGenerator gen(seed);
+    gen.setValueRange(lo, hi);
+    return gen.generateDenseFloat(size);
+}
+
+template <typename T>
+inline std::vector<T> makeDense(int64_t size, double lo = -2.0, double hi = 2.0, uint32_t seed = 42) {
+    SparseFillGenerator gen(seed);
+    gen.setValueRange(lo, hi);
+    return gen.generateDenseVector<T>(size);
+}
+
+inline CsrMatrix makeDiagCsr(int64_t n, float diagValue = 1.0f) {
+    CsrMatrix out;
+    out.rows = n;
+    out.cols = n;
+    out.nnz = n;
+    out.rowOffsets.resize(n + 1);
+    out.colIndices.resize(n);
+    out.values.resize(n, diagValue);
+    for (int64_t i = 0; i < n; i++) {
+        out.rowOffsets[i] = static_cast<int32_t>(i);
+        out.colIndices[i] = static_cast<int32_t>(i);
+    }
+    out.rowOffsets[n] = static_cast<int32_t>(n);
+    return out;
+}
+
+inline CsrMatrix makeEmptyCsr(int64_t rows, int64_t cols) {
+    CsrMatrix out;
+    out.rows = rows;
+    out.cols = cols;
+    out.nnz = 0;
+    out.rowOffsets.assign(rows + 1, 0);
+    return out;
+}
+
+// ============================================================================
+// Dense column-major matrix generators
+// ============================================================================
+
+inline std::vector<float> makeDenseColMajor(int m, int n, int lda,
+                                             double density, uint32_t seed = 42,
+                                             double lo = -5.0, double hi = 5.0) {
+    std::vector<float> A(static_cast<int64_t>(lda) * n, 0.0f);
+    if (m <= 0 || n <= 0) return A;
+
+    std::mt19937 rng(seed);
+    std::uniform_real_distribution<float> valDist(static_cast<float>(lo), static_cast<float>(hi));
+    std::uniform_real_distribution<float> zeroDist(0.0f, 1.0f);
+
+    for (int j = 0; j < n; j++) {
+        for (int i = 0; i < m; i++) {
+            if (zeroDist(rng) < static_cast<float>(density)) {
+                float v = valDist(rng);
+                if (v == 0.0f) v = 1.0f;
+                A[static_cast<int64_t>(j) * lda + i] = v;
+            }
+        }
+    }
+    return A;
+}
+
+inline std::vector<float> makeZeroColMajor(int m, int n, int lda) {
+    return std::vector<float>(static_cast<int64_t>(lda) * n, 0.0f);
+}
+
+inline std::vector<float> makeFullColMajor(int m, int n, int lda, uint32_t seed = 42,
+                                            double lo = 1.0, double hi = 10.0) {
+    std::vector<float> A(static_cast<int64_t>(lda) * n, 0.0f);
+    if (m <= 0 || n <= 0) return A;
+    std::mt19937 rng(seed);
+    std::uniform_real_distribution<float> valDist(static_cast<float>(lo), static_cast<float>(hi));
+    for (int j = 0; j < n; j++) {
+        for (int i = 0; i < m; i++) {
+            A[static_cast<int64_t>(j) * lda + i] = valDist(rng);
+        }
+    }
+    return A;
+}
+
+inline std::vector<float> makeDiagColMajor(int m, int n, int lda, uint32_t seed = 42,
+                                            double lo = 1.0, double hi = 10.0,
+                                            double offDiagDensity = 0.05) {
+    std::vector<float> A(static_cast<int64_t>(lda) * n, 0.0f);
+    if (m <= 0 || n <= 0) return A;
+    std::mt19937 rng(seed);
+    std::uniform_real_distribution<float> valDist(static_cast<float>(lo), static_cast<float>(hi));
+    std::uniform_real_distribution<float> zeroDist(0.0f, 1.0f);
+
+    int minDim = std::min(m, n);
+    for (int i = 0; i < minDim; i++) {
+        A[static_cast<int64_t>(i) * lda + i] = valDist(rng);
+    }
+    for (int j = 0; j < n; j++) {
+        for (int i = 0; i < m; i++) {
+            if (i == j) continue;
+            if (zeroDist(rng) < static_cast<float>(offDiagDensity)) {
+                float v = valDist(rng);
+                if (v == 0.0f) v = 1.0f;
+                A[static_cast<int64_t>(j) * lda + i] = v;
+            }
+        }
+    }
+    return A;
+}
+
+inline std::vector<float> makeExtremelySparseColMajor(int m, int n, int lda,
+                                                       uint32_t seed = 42, float value = 42.0f) {
+    std::vector<float> A(static_cast<int64_t>(lda) * n, 0.0f);
+    if (m <= 0 || n <= 0) return A;
+    std::mt19937 rng(seed);
+    std::uniform_int_distribution<int> rowDist(0, m - 1);
+    std::uniform_int_distribution<int> colDist(0, n - 1);
+    int r = rowDist(rng);
+    int c = colDist(rng);
+    A[static_cast<int64_t>(c) * lda + r] = value;
+    return A;
+}
+
+}
+
+#endif

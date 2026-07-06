@@ -31,6 +31,31 @@ inline aclsparseContext *ToInternal(aclsparseHandle_t handle)
     return reinterpret_cast<aclsparseContext *>(handle);
 }
 
+/**
+ * @brief 释放默认 workspace 设备内存
+ */
+void freeDefaultWorkspace(aclsparseContext *h)
+{
+    if (h == nullptr || h->default_workspace == nullptr) return;
+    aclrtFree(h->default_workspace);
+    h->default_workspace = nullptr;
+    h->default_workspace_size = 0;
+}
+
+/**
+ * @brief 分配默认 workspace
+ */
+aclsparseStatus_t allocateDefaultWorkspace(aclsparseContext *h, size_t size)
+{
+    if (h == nullptr || size == 0) return ACL_SPARSE_STATUS_INVALID_VALUE;
+    void *ptr = nullptr;
+    const aclError aclRet = aclrtMalloc(&ptr, size, ACL_MEM_MALLOC_HUGE_FIRST);
+    if (aclRet != ACL_SUCCESS) return ACL_SPARSE_STATUS_ALLOC_FAILED;
+    h->default_workspace = ptr;
+    h->default_workspace_size = size;
+    return ACL_SPARSE_STATUS_SUCCESS;
+}
+
 } // namespace
 
 extern "C" {
@@ -53,6 +78,13 @@ aclsparseStatus_t aclsparseCreate(aclsparseHandle_t *handle)
 
     h->stream = nullptr;
 
+    // 分配默认 workspace
+    aclsparseStatus_t wsStatus = allocateDefaultWorkspace(h, ACLSPARSE_DEFAULT_WORKSPACE_SIZE);
+    if (wsStatus != ACL_SPARSE_STATUS_SUCCESS) {
+        delete h;
+        return wsStatus;
+    }
+
     *handle = reinterpret_cast<aclsparseHandle_t>(h);
     return ACL_SPARSE_STATUS_SUCCESS;
 }
@@ -64,6 +96,19 @@ aclsparseStatus_t aclsparseDestroy(aclsparseHandle_t handle)
     }
 
     auto *h = ToInternal(handle);
+
+    // 同步 stream，等待设备完成所有操作
+    if (h->stream != nullptr) {
+        aclrtSynchronizeStream(h->stream);
+    }
+
+    // 释放默认 workspace
+    freeDefaultWorkspace(h);
+
+    // 清除用户 workspace 引用（不释放用户内存）
+    h->user_workspace = nullptr;
+    h->user_workspace_size = 0;
+    h->use_user_workspace = false;
 
     // stream 由用户托管，此处仅清理句柄自身字段。
     h->stream = nullptr;
@@ -97,6 +142,50 @@ aclsparseStatus_t aclsparseGetStream(aclsparseHandle_t handle, aclrtStream *stre
     return ACL_SPARSE_STATUS_SUCCESS;
 }
 
+aclsparseStatus_t aclsparseSetWorkspace(aclsparseHandle_t handle, void *workspace, size_t workspaceSize)
+{
+    if (handle == nullptr) {
+        return ACL_SPARSE_STATUS_HANDLE_IS_NULLPTR;
+    }
+
+    auto *h = ToInternal(handle);
+
+    // workspace == nullptr: 切回默认 workspace
+    if (workspace == nullptr) {
+        aclsparseResetToDefaultWorkspace(h);
+        return ACL_SPARSE_STATUS_SUCCESS;
+    }
+
+    if (workspaceSize == 0) {
+        return ACL_SPARSE_STATUS_INVALID_VALUE;
+    }
+
+    // Grow-only 策略：新 size 不大于当前 user workspace size 时保持不变
+    if (h->use_user_workspace && workspaceSize <= h->user_workspace_size) {
+        return ACL_SPARSE_STATUS_SUCCESS;
+    }
+
+    h->user_workspace = workspace;
+    h->user_workspace_size = workspaceSize;
+    h->use_user_workspace = true;
+    return ACL_SPARSE_STATUS_SUCCESS;
+}
+
+aclsparseStatus_t aclsparseGetWorkspace(aclsparseHandle_t handle, void **workspace, size_t *workspaceSize)
+{
+    if (handle == nullptr) {
+        return ACL_SPARSE_STATUS_HANDLE_IS_NULLPTR;
+    }
+    if (workspace == nullptr || workspaceSize == nullptr) {
+        return ACL_SPARSE_STATUS_INVALID_VALUE;
+    }
+
+    auto *h = ToInternal(handle);
+    *workspace = aclsparseGetEffectiveWorkspace(h);
+    *workspaceSize = aclsparseGetEffectiveWorkspaceSize(h);
+    return ACL_SPARSE_STATUS_SUCCESS;
+}
+
 aclsparseStatus_t aclsparseGetVersion(aclsparseHandle_t handle, int *version)
 {
     if (version == nullptr) {
@@ -121,6 +210,34 @@ aclsparseStatus_t aclsparseCreateConstCsc(aclsparseConstSpMatDescr_t * /*spMatDe
     aclsparseIndexType_t /*cscRowIndType*/, aclsparseIndexBase_t /*idxBase*/, aclDataType /*valueType*/)
 {
     return ACL_SPARSE_STATUS_NOT_SUPPORTED;
+}
+
+aclsparseStatus_t aclsparseSetPointerMode(aclsparseHandle_t handle, aclsparsePointerMode_t mode)
+{
+    if (handle == nullptr) {
+        return ACL_SPARSE_STATUS_HANDLE_IS_NULLPTR;
+    }
+    if (mode != ACL_SPARSE_POINTER_MODE_HOST && mode != ACL_SPARSE_POINTER_MODE_DEVICE) {
+        return ACL_SPARSE_STATUS_INVALID_VALUE;
+    }
+
+    auto *h = ToInternal(handle);
+    h->pointerMode = mode;
+    return ACL_SPARSE_STATUS_SUCCESS;
+}
+
+aclsparseStatus_t aclsparseGetPointerMode(aclsparseHandle_t handle, aclsparsePointerMode_t *mode)
+{
+    if (handle == nullptr) {
+        return ACL_SPARSE_STATUS_HANDLE_IS_NULLPTR;
+    }
+    if (mode == nullptr) {
+        return ACL_SPARSE_STATUS_INVALID_VALUE;
+    }
+
+    auto *h = ToInternal(handle);
+    *mode = h->pointerMode;
+    return ACL_SPARSE_STATUS_SUCCESS;
 }
 
 } // extern "C"
