@@ -19,6 +19,10 @@
 #include "cann_ops_sparse.h"
 #include "log/log.h"
 
+#ifndef OP_MODULE_ID
+#define OP_MODULE_ID 63
+#endif
+
 namespace AclSparse {
 
 typedef enum aclsparseLogLevel {
