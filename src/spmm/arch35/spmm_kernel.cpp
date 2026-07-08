@@ -29,6 +29,7 @@
 // are selected on the host in spmm_kernel_launch by dataType parameter.
 
 #include <stdint.h>
+#include <cstdio>
 
 #include "kernel_operator.h"
 #include "simt_api/asc_simt.h"
@@ -247,16 +248,22 @@ __simt_vf__ __aicore__ __launch_bounds__(kMaxSimtThreadsPerBlock) inline void Sp
                           static_cast<uint64_t>(colIdx)
                     : static_cast<uint64_t>(colIdx) * static_cast<uint64_t>(ldc) +
                           static_cast<uint64_t>(row);
-                int32_t cNew;
+                // 在 int64 中计算 alpha*acc + beta*C，再饱和到 int32，
+                // 避免 int32 相乘/相加溢出导致的回绕（wrap-around）。
+                int64_t cWide;
                 if (alpha == 1) {
-                    cNew = acc[j];
+                    cWide = static_cast<int64_t>(acc[j]);
                 } else {
-                    cNew = alpha * acc[j];
+                    cWide = static_cast<int64_t>(alpha) * static_cast<int64_t>(acc[j]);
                 }
                 if (!betaZero) {
-                    cNew += beta * matC[cIdx];
+                    cWide += static_cast<int64_t>(beta) * static_cast<int64_t>(matC[cIdx]);
                 }
-                matC[cIdx] = cNew;
+                constexpr int64_t kInt32Max = 2147483647LL;
+                constexpr int64_t kInt32Min = -2147483648LL;
+                if (cWide > kInt32Max) cWide = kInt32Max;
+                if (cWide < kInt32Min) cWide = kInt32Min;
+                matC[cIdx] = static_cast<int32_t>(cWide);
             }
         }
     }
@@ -457,9 +464,14 @@ extern "C" void spmm_kernel_launch(
         spmm_custom_fp16<<<blockDim, nullptr, stream>>>(
             (GM_ADDR)csrRowOffsets, (GM_ADDR)csrColInd, (GM_ADDR)csrValues,
             (GM_ADDR)matB, (GM_ADDR)matC, (GM_ADDR)workspaceGM, (GM_ADDR)tilingGM);
-    } else {
+    } else if (dataType == SPMM_DTYPE_INT8) {
         spmm_custom_int8<<<blockDim, nullptr, stream>>>(
             (GM_ADDR)csrRowOffsets, (GM_ADDR)csrColInd, (GM_ADDR)csrValues,
             (GM_ADDR)matB, (GM_ADDR)matC, (GM_ADDR)workspaceGM, (GM_ADDR)tilingGM);
+    } else {
+        // 未知 dtype：显式报错并拒绝启动，避免静默按 int8 处理导致错误结果。
+        fprintf(stderr, "[ERROR] spmm_kernel_launch: unsupported dataType %d "
+                        "(expected FP32=%d/FP16=%d/INT8=%d), kernel not launched\n",
+                dataType, SPMM_DTYPE_FP32, SPMM_DTYPE_FP16, SPMM_DTYPE_INT8);
     }
 }

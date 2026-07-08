@@ -305,22 +305,46 @@ inline uint16_t Fp32ToFp16Bits(float v)
     uint32_t bits;
     __builtin_memcpy(&bits, &v, sizeof(float));
     uint32_t sign = (bits >> 16) & 0x8000u;
-    int32_t exp = static_cast<int32_t>((bits >> 23) & 0xFFu) - 127;
+    uint32_t rawExp = (bits >> 23) & 0xFFu;
+    int32_t exp = static_cast<int32_t>(rawExp) - 127;
     uint32_t mant = bits & 0x007FFFFFu;
+
+    // NaN / Inf: 保留 NaN（尾数非零）与 Inf 语义。
+    if (rawExp == 0xFFu) {
+        uint32_t nanBit = (mant != 0u) ? 0x0200u : 0u;
+        return static_cast<uint16_t>(sign | 0x7C00u | nanBit);
+    }
+
+    // 溢出到 Inf。
     if (exp >= 16) {
         return static_cast<uint16_t>(sign | 0x7C00u);
     }
-    if (exp <= -15) {
-        if (exp >= -25) {
-            uint32_t shift = static_cast<uint32_t>(14 - exp);
-            uint32_t frac = (0x00400000u | mant) >> shift;
-            return static_cast<uint16_t>(sign | frac);
+
+    // 规格化 fp16：exp ∈ [-14, 15]。使用 IEEE 754 就近偶数舍入。
+    if (exp >= -14) {
+        uint32_t mant10 = mant >> 13;          // 高 10 位尾数
+        uint32_t remainder = mant & 0x1FFFu;   // 低 13 位舍入判据
+        uint32_t result = (static_cast<uint32_t>(exp + 15) << 10) | mant10;
+        // remainder > 半个 ULP，或恰为半个 ULP 且当前位为奇数时进位。
+        if (remainder > 0x1000u || (remainder == 0x1000u && (mant10 & 1u))) {
+            result += 1u;  // 进位可自然溢出到指数域（含规格化->Inf）
         }
-        return static_cast<uint16_t>(sign);
+        return static_cast<uint16_t>(sign | result);
     }
-    uint32_t newExp = static_cast<uint32_t>(exp + 15);
-    uint32_t newMant = mant >> 13;
-    return static_cast<uint16_t>(sign | (newExp << 10) | newMant);
+
+    // 次规格化 fp16：exp ∈ [-25, -15]，否则下溢为 0。
+    if (exp >= -25) {
+        uint32_t significand = 0x00800000u | mant;      // 含隐含位的 24 位有效数
+        uint32_t shift = static_cast<uint32_t>(-exp - 1); // 14..24
+        uint32_t frac = significand >> shift;
+        uint32_t remainder = significand & ((1u << shift) - 1u);
+        uint32_t half = 1u << (shift - 1u);
+        if (remainder > half || (remainder == half && (frac & 1u))) {
+            frac += 1u;  // 进位可自然升为最小规格化数
+        }
+        return static_cast<uint16_t>(sign | frac);
+    }
+    return static_cast<uint16_t>(sign);
 }
 
 inline float Fp16BitsToFp32(uint16_t h)
@@ -434,12 +458,10 @@ static VerifyResult RunSpmmTestFp32(int32_t deviceId, aclrtStream stream,
     aclsparseHandle_t handle = nullptr;
     aclsparseStatus_t sparseRet = aclsparseCreate(&handle);
     CHECK_RET(sparseRet == ACL_SPARSE_STATUS_SUCCESS,
-              LOG_PRINT("aclsparseCreate failed. ERROR: %d\n", sparseRet);
-              return FailVerify());
+              LOG_PRINT("aclsparseCreate failed. ERROR: %d\n", sparseRet); return FailVerify());
     sparseRet = aclsparseSetStream(handle, stream);
     CHECK_RET(sparseRet == ACL_SPARSE_STATUS_SUCCESS,
-              LOG_PRINT("aclsparseSetStream failed. ERROR: %d\n", sparseRet);
-              return FailVerify());
+              LOG_PRINT("aclsparseSetStream failed. ERROR: %d\n", sparseRet); return FailVerify());
 
     aclsparseSpMatDescr_t matA = nullptr;
     sparseRet = aclsparseCreateCsr(&matA, m, k, nnz, dRowOff, dColInd, dVals,
@@ -637,12 +659,10 @@ static VerifyResult RunSpmmTestFp16(int32_t deviceId, aclrtStream stream,
     aclsparseHandle_t handle = nullptr;
     aclsparseStatus_t sparseRet = aclsparseCreate(&handle);
     CHECK_RET(sparseRet == ACL_SPARSE_STATUS_SUCCESS,
-              LOG_PRINT("aclsparseCreate failed. ERROR: %d\n", sparseRet);
-              return FailVerify());
+              LOG_PRINT("aclsparseCreate failed. ERROR: %d\n", sparseRet); return FailVerify());
     sparseRet = aclsparseSetStream(handle, stream);
     CHECK_RET(sparseRet == ACL_SPARSE_STATUS_SUCCESS,
-              LOG_PRINT("aclsparseSetStream failed. ERROR: %d\n", sparseRet);
-              return FailVerify());
+              LOG_PRINT("aclsparseSetStream failed. ERROR: %d\n", sparseRet); return FailVerify());
 
     aclsparseSpMatDescr_t matA = nullptr;
     sparseRet = aclsparseCreateCsr(&matA, m, k, nnz, dRowOff, dColInd, dVals,
@@ -816,12 +836,10 @@ static VerifyResult RunSpmmTestInt8(int32_t deviceId, aclrtStream stream,
     aclsparseHandle_t handle = nullptr;
     aclsparseStatus_t sparseRet = aclsparseCreate(&handle);
     CHECK_RET(sparseRet == ACL_SPARSE_STATUS_SUCCESS,
-              LOG_PRINT("aclsparseCreate failed. ERROR: %d\n", sparseRet);
-              return FailVerify());
+              LOG_PRINT("aclsparseCreate failed. ERROR: %d\n", sparseRet); return FailVerify());
     sparseRet = aclsparseSetStream(handle, stream);
     CHECK_RET(sparseRet == ACL_SPARSE_STATUS_SUCCESS,
-              LOG_PRINT("aclsparseSetStream failed. ERROR: %d\n", sparseRet);
-              return FailVerify());
+              LOG_PRINT("aclsparseSetStream failed. ERROR: %d\n", sparseRet); return FailVerify());
 
     aclsparseSpMatDescr_t matA = nullptr;
     sparseRet = aclsparseCreateCsr(&matA, m, k, nnz, dRowOff, dColInd, dVals,

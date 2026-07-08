@@ -32,6 +32,7 @@
 #define SPMM_ORDER_CC 3
 
 // Data type encoding for host-side kernel dispatch.
+#define SPMM_DTYPE_INVALID (-1)
 #define SPMM_DTYPE_FP32 0
 #define SPMM_DTYPE_FP16 1
 #define SPMM_DTYPE_INT8 2
@@ -40,7 +41,7 @@ static inline int32_t SpmmDataTypeFromAcl(aclDataType valueType) {
     if (valueType == ACL_FLOAT)       return SPMM_DTYPE_FP32;
     if (valueType == ACL_FLOAT16)     return SPMM_DTYPE_FP16;
     if (valueType == ACL_INT8)        return SPMM_DTYPE_INT8;
-    return SPMM_DTYPE_FP32;
+    return SPMM_DTYPE_INVALID;
 }
 
 // SpmmTilingData is laid out at the start of workspace, right after a 64-byte

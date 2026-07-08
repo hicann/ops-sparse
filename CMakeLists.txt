@@ -75,7 +75,6 @@ set(ARCH_SPECIFIC_DIRS arch35 arch22 arch20 CACHE INTERNAL "Architecture specifi
 
 set(ASCEND_CANN_PACKAGE_PATH $ENV{ASCEND_HOME_PATH})
 set(RUN_MODE "npu" CACHE STRING "run mode: npu")
-set(CMAKE_BUILD_TYPE "Debug" CACHE STRING "Build type Release/Debug")
 set(CMAKE_INSTALL_PREFIX "${CMAKE_CURRENT_LIST_DIR}/build_out" CACHE STRING "install path" FORCE)
 
 # 外部传参
@@ -91,6 +90,12 @@ set(OPS_SPARSE ops_sparse)
 add_subdirectory(src)
 
 project(${OPS_SPARSE} LANGUAGES ASC CXX)
+
+# Default Debug when unspecified; FORCE only here so an empty cache entry is corrected,
+# while -DCMAKE_BUILD_TYPE=Release from the command line is still honored (#26).
+if(NOT CMAKE_BUILD_TYPE)
+    set(CMAKE_BUILD_TYPE "Debug" CACHE STRING "Build type Release/Debug" FORCE)
+endif()
 
 add_library(${OPS_SPARSE} SHARED ${ALL_SPARSE_SRC_FILES})
 

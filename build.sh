@@ -144,7 +144,9 @@ if [ -z "${matched}" ]; then
     exit 1
 fi
 
-CMAKE_OPTIONS="-DSOC_VERSION=${SOC_VERSION} -DASCEND_CANN_PACKAGE_PATH=${ASCEND_HOME}"
+# Default Debug for AscendC kernel correctness; override via CMAKE_BUILD_TYPE=Release.
+BUILD_TYPE="${CMAKE_BUILD_TYPE:-Debug}"
+CMAKE_OPTIONS="-DSOC_VERSION=${SOC_VERSION} -DASCEND_CANN_PACKAGE_PATH=${ASCEND_HOME} -DCMAKE_BUILD_TYPE=${BUILD_TYPE}"
 
 # 帮助 find_package(ASC) 定位 ASCConfig.cmake（CMake 查找 ASC/ASCConfig.cmake 或 ASC/asc-config.cmake）
 if [ -z "${ASC_DIR}" ]; then

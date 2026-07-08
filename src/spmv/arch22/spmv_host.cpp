@@ -261,8 +261,14 @@ extern "C" {
         size_t yByteSize = (opA == ACL_SPARSE_OP_TRANSPOSE ? cols : rows) * elemSize;
 
         // ==================== 启动内核 ====================
-        auto valType = xInner->valueType;
+        // ValT 在 kernel 中同时用于 csrValGm 与 xVecGm（见 spmv_kernel.h），
+        // 因此矩阵非零值类型须取自稀疏矩阵描述符，且与稠密向量 x 的类型一致。
+        auto valType = matInner->valueType;
         auto outType = yInner->valueType;
+        CHECK_RET(xInner->valueType == valType,
+                  LOG_PRINT("[ERROR] aclsparseSpMV: matrix value type %d and vecX type %d must match\n",
+                            valType, xInner->valueType);
+                  return ACL_SPARSE_STATUS_NOT_SUPPORTED);
         CHECK_RET(computeType != ACL_INT32 || (valType == ACL_INT32 && outType == ACL_INT32),
                   LOG_PRINT("[ERROR] aclsparseSpMV: computeType INT32 requires valType and outType INT32\n");
                   return ACL_SPARSE_STATUS_NOT_SUPPORTED);
