@@ -20,6 +20,9 @@
 | [aclsparseGetVersion](#aclsparsegetversion) | 获取版本号 |
 | [aclsparseCreateDnVec](#aclsparsecreatednvec) | 创建稠密向量 |
 | [aclsparseDestroyDnVec](#aclsparsedestroydnvec) | 销毁稠密向量描述符 |
+| [aclsparseDnVecGet](#aclsparsednvecget) | 获取稠密向量描述符的全部字段 |
+| [aclsparseDnVecGetValues](#aclsparsednvecgetvalues) | 获取稠密向量描述符的 values 指针 |
+| [aclsparseDnVecSetValues](#aclsparsednvecsetvalues) | 设置稠密向量描述符的 values 指针 |
 | [aclsparseCreateCsr](#aclsparsecreatecsr) | 创建CSR格式稀疏矩阵 |
 | [aclsparseCreateCsc](#aclsparsecreatecsc) | 创建CSC格式稀疏矩阵（**暂未支持**） |
 | [aclsparseDestroySpMat](#aclsparsedestroyspmat) | 销毁稀疏矩阵对象 |
@@ -28,6 +31,9 @@
 | [aclsparseSpMV](#aclsparsespmv) | 稀疏矩阵向量乘法 |
 | [aclsparseCreateDnMat](#aclsparsecreatednmat) | 创建稠密矩阵 |
 | [aclsparseDestroyDnMat](#aclsparsedestroydnmat) | 销毁稠密矩阵描述符 |
+| [aclsparseDnMatGet](#aclsparsednmatget) | 获取稠密矩阵描述符的全部字段 |
+| [aclsparseDnMatGetValues](#aclsparsednmatgetvalues) | 获取稠密矩阵描述符的 values 指针 |
+| [aclsparseDnMatSetValues](#aclsparsednmatsetvalues) | 设置稠密矩阵描述符的 values 指针 |
 | [aclsparseSpMMGetBufferSize](#aclsparsespmmgetbuffersize) | 获取SpMM缓冲区大小 |
 | [aclsparseSpMMPreprocess](#aclsparsespmmpreprocess) | SpMM预处理 |
 | [aclsparseSpMM](#aclsparsespmm) | 稀疏矩阵-稠密矩阵乘法 |
@@ -176,6 +182,79 @@ aclsparseStatus_t aclsparseDestroyDnVec(aclsparseConstDnVecDescr_t dnVecDescr);
 
 - `ACL_SPARSE_STATUS_SUCCESS`：成功
 - 其他值：失败
+
+---
+
+### aclsparseDnVecGet
+
+```c
+aclsparseStatus_t aclsparseDnVecGet(
+    aclsparseDnVecDescr_t dnVecDescr,
+    int64_t *size,
+    void **values,
+    aclDataType *valueType
+);
+```
+
+**功能**：获取稠密向量描述符的全部字段。
+
+**参数说明**：
+
+- `dnVecDescr`（IN）：HOST，稠密向量描述符。
+- `size`（OUT）：HOST，向量的大小。
+- `values`（OUT）：DEVICE，向量的值指针。
+- `valueType`（OUT）：HOST，值的数据类型。
+
+**返回值**：
+
+- `ACL_SPARSE_STATUS_SUCCESS`：成功
+- `ACL_SPARSE_STATUS_INVALID_VALUE`：`dnVecDescr` 为空指针
+
+---
+
+### aclsparseDnVecGetValues
+
+```c
+aclsparseStatus_t aclsparseDnVecGetValues(
+    aclsparseDnVecDescr_t dnVecDescr,
+    void **values
+);
+```
+
+**功能**：获取稠密向量描述符的 values 指针。
+
+**参数说明**：
+
+- `dnVecDescr`（IN）：HOST，稠密向量描述符。
+- `values`（OUT）：DEVICE，向量的值指针。
+
+**返回值**：
+
+- `ACL_SPARSE_STATUS_SUCCESS`：成功
+- `ACL_SPARSE_STATUS_INVALID_VALUE`：`dnVecDescr` 为空指针
+
+---
+
+### aclsparseDnVecSetValues
+
+```c
+aclsparseStatus_t aclsparseDnVecSetValues(
+    aclsparseDnVecDescr_t dnVecDescr,
+    void *values
+);
+```
+
+**功能**：设置稠密向量描述符的 values 指针。
+
+**参数说明**：
+
+- `dnVecDescr`（IN）：HOST，稠密向量描述符。
+- `values`（IN）：DEVICE，向量的值指针。
+
+**返回值**：
+
+- `ACL_SPARSE_STATUS_SUCCESS`：成功
+- `ACL_SPARSE_STATUS_INVALID_VALUE`：`dnVecDescr` 为空指针
 
 ---
 
@@ -479,6 +558,85 @@ aclsparseStatus_t aclsparseDestroyDnMat(aclsparseConstDnMatDescr_t dnMatDescr);
 
 - `ACL_SPARSE_STATUS_SUCCESS`：成功
 - 其他值：失败
+
+---
+
+### aclsparseDnMatGet
+
+```c
+aclsparseStatus_t aclsparseDnMatGet(
+    aclsparseDnMatDescr_t dnMatDescr,
+    int64_t *rows,
+    int64_t *cols,
+    int64_t *ld,
+    void **values,
+    aclDataType *valueType,
+    aclsparseOrder_t *order
+);
+```
+
+**功能**：获取稠密矩阵描述符的全部字段。
+
+**参数说明**：
+
+- `dnMatDescr`（IN）：HOST，稠密矩阵描述符。
+- `rows`（OUT）：HOST，矩阵的行数。
+- `cols`（OUT）：HOST，矩阵的列数。
+- `ld`（OUT）：HOST，leading dimension。
+- `values`（OUT）：DEVICE，矩阵数据指针。
+- `valueType`（OUT）：HOST，元素数据类型。
+- `order`（OUT）：HOST，内存布局。
+
+**返回值**：
+
+- `ACL_SPARSE_STATUS_SUCCESS`：成功
+- `ACL_SPARSE_STATUS_INVALID_VALUE`：`dnMatDescr` 为空指针
+
+---
+
+### aclsparseDnMatGetValues
+
+```c
+aclsparseStatus_t aclsparseDnMatGetValues(
+    aclsparseDnMatDescr_t dnMatDescr,
+    void **values
+);
+```
+
+**功能**：获取稠密矩阵描述符的 values 指针。
+
+**参数说明**：
+
+- `dnMatDescr`（IN）：HOST，稠密矩阵描述符。
+- `values`（OUT）：DEVICE，矩阵数据指针。
+
+**返回值**：
+
+- `ACL_SPARSE_STATUS_SUCCESS`：成功
+- `ACL_SPARSE_STATUS_INVALID_VALUE`：`dnMatDescr` 为空指针
+
+---
+
+### aclsparseDnMatSetValues
+
+```c
+aclsparseStatus_t aclsparseDnMatSetValues(
+    aclsparseDnMatDescr_t dnMatDescr,
+    void *values
+);
+```
+
+**功能**：设置稠密矩阵描述符的 values 指针。
+
+**参数说明**：
+
+- `dnMatDescr`（IN）：HOST，稠密矩阵描述符。
+- `values`（IN）：DEVICE，矩阵数据指针。
+
+**返回值**：
+
+- `ACL_SPARSE_STATUS_SUCCESS`：成功
+- `ACL_SPARSE_STATUS_INVALID_VALUE`：`dnMatDescr` 为空指针
 
 ---
 

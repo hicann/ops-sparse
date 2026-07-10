@@ -221,6 +221,48 @@ aclsparseStatus_t aclsparseCreateConstDnVec(aclsparseConstDnVecDescr_t *dnVecDes
 aclsparseStatus_t aclsparseDestroyDnVec(aclsparseConstDnVecDescr_t dnVecDescr);
 
 /**
+ * @brief 获取稠密向量描述符的全部字段。
+ *
+ * @param dnVecDescr IN, HOST, 稠密向量描述符。
+ * @param size OUT, HOST, 向量的大小。
+ * @param values OUT, DEVICE, 向量的值指针。
+ * @param valueType OUT, HOST, 值的数据类型。
+ * @return aclsparseStatus_t
+ */
+aclsparseStatus_t aclsparseDnVecGet(aclsparseDnVecDescr_t dnVecDescr, int64_t *size,
+                                    void **values, aclDataType *valueType);
+
+/**
+ * @brief 获取只读(const)稠密向量描述符的全部字段。
+ */
+aclsparseStatus_t aclsparseConstDnVecGet(aclsparseConstDnVecDescr_t dnVecDescr, int64_t *size,
+                                         const void **values, aclDataType *valueType);
+
+/**
+ * @brief 获取稠密向量描述符的 values 指针。
+ *
+ * @param dnVecDescr IN, HOST, 稠密向量描述符。
+ * @param values OUT, DEVICE, 向量的值指针。
+ * @return aclsparseStatus_t
+ */
+aclsparseStatus_t aclsparseDnVecGetValues(aclsparseDnVecDescr_t dnVecDescr, void **values);
+
+/**
+ * @brief 获取只读(const)稠密向量描述符的 values 指针。
+ */
+aclsparseStatus_t aclsparseConstDnVecGetValues(aclsparseConstDnVecDescr_t dnVecDescr,
+                                               const void **values);
+
+/**
+ * @brief 设置稠密向量描述符的 values 指针。
+ *
+ * @param dnVecDescr IN, HOST, 稠密向量描述符。
+ * @param values IN, DEVICE, 向量的值指针。
+ * @return aclsparseStatus_t
+ */
+aclsparseStatus_t aclsparseDnVecSetValues(aclsparseDnVecDescr_t dnVecDescr, void *values);
+
+/**
  * @brief 创建稀疏矩阵的CSR格式。
  *
  * 该函数用于创建一个稀疏矩阵的CSR（Compressed Sparse Row）格式。
@@ -384,6 +426,53 @@ aclsparseStatus_t aclsparseCreateConstDnMat(aclsparseConstDnMatDescr_t *dnMatDes
  * @brief 销毁稠密矩阵描述符。
  */
 aclsparseStatus_t aclsparseDestroyDnMat(aclsparseConstDnMatDescr_t dnMatDescr);
+
+/**
+ * @brief 获取稠密矩阵描述符的全部字段。
+ *
+ * @param dnMatDescr  IN, HOST, 稠密矩阵描述符。
+ * @param rows        OUT, HOST, 矩阵的行数。
+ * @param cols        OUT, HOST, 矩阵的列数。
+ * @param ld          OUT, HOST, leading dimension。
+ * @param values      OUT, DEVICE, 矩阵数据指针。
+ * @param valueType   OUT, HOST, 元素数据类型。
+ * @param order       OUT, HOST, 内存布局。
+ * @return aclsparseStatus_t
+ */
+aclsparseStatus_t aclsparseDnMatGet(aclsparseDnMatDescr_t dnMatDescr, int64_t *rows, int64_t *cols,
+                                    int64_t *ld, void **values, aclDataType *valueType,
+                                    aclsparseOrder_t *order);
+
+/**
+ * @brief 获取只读(const)稠密矩阵描述符的全部字段。
+ */
+aclsparseStatus_t aclsparseConstDnMatGet(aclsparseConstDnMatDescr_t dnMatDescr, int64_t *rows,
+                                         int64_t *cols, int64_t *ld, const void **values,
+                                         aclDataType *valueType, aclsparseOrder_t *order);
+
+/**
+ * @brief 获取稠密矩阵描述符的 values 指针。
+ *
+ * @param dnMatDescr IN, HOST, 稠密矩阵描述符。
+ * @param values     OUT, DEVICE, 矩阵数据指针。
+ * @return aclsparseStatus_t
+ */
+aclsparseStatus_t aclsparseDnMatGetValues(aclsparseDnMatDescr_t dnMatDescr, void **values);
+
+/**
+ * @brief 获取只读(const)稠密矩阵描述符的 values 指针。
+ */
+aclsparseStatus_t aclsparseConstDnMatGetValues(aclsparseConstDnMatDescr_t dnMatDescr,
+                                               const void **values);
+
+/**
+ * @brief 设置稠密矩阵描述符的 values 指针。
+ *
+ * @param dnMatDescr IN, HOST, 稠密矩阵描述符。
+ * @param values     IN, DEVICE, 矩阵数据指针。
+ * @return aclsparseStatus_t
+ */
+aclsparseStatus_t aclsparseDnMatSetValues(aclsparseDnMatDescr_t dnMatDescr, void *values);
 
 /**
  * @brief 计算 SpMM 所需 workspace 字节数。

@@ -30,6 +30,9 @@ aclsparseStatus_t aclsparseCreateDnVec(aclsparseDnVecDescr_t *dnVecDescr, int64_
     if (dnVecDescr == nullptr) {
         return ACL_SPARSE_STATUS_INVALID_VALUE;
     }
+    if (size < 0) {
+        return ACL_SPARSE_STATUS_INVALID_VALUE;
+    }
     auto *inner = new (std::nothrow) aclsparseDnVecDescr();
     if (inner == nullptr) {
         return ACL_SPARSE_STATUS_ALLOC_FAILED;
@@ -60,6 +63,74 @@ aclsparseStatus_t aclsparseDestroyDnVec(aclsparseConstDnVecDescr_t dnVecDescr)
         return ACL_SPARSE_STATUS_SUCCESS;
     }
     delete const_cast<aclsparseDnVecDescr *>(dnVecDescr);
+    return ACL_SPARSE_STATUS_SUCCESS;
+}
+
+aclsparseStatus_t aclsparseDnVecGet(aclsparseDnVecDescr_t dnVecDescr, int64_t *size,
+                                    void **values, aclDataType *valueType)
+{
+    if (dnVecDescr == nullptr) {
+        return ACL_SPARSE_STATUS_INVALID_VALUE;
+    }
+    if (size != nullptr) {
+        *size = static_cast<int64_t>(dnVecDescr->nums);
+    }
+    if (values != nullptr) {
+        *values = dnVecDescr->values;
+    }
+    if (valueType != nullptr) {
+        *valueType = dnVecDescr->valueType;
+    }
+    return ACL_SPARSE_STATUS_SUCCESS;
+}
+
+aclsparseStatus_t aclsparseConstDnVecGet(aclsparseConstDnVecDescr_t dnVecDescr, int64_t *size,
+                                         const void **values, aclDataType *valueType)
+{
+    if (dnVecDescr == nullptr) {
+        return ACL_SPARSE_STATUS_INVALID_VALUE;
+    }
+    if (size != nullptr) {
+        *size = static_cast<int64_t>(dnVecDescr->nums);
+    }
+    if (values != nullptr) {
+        *values = dnVecDescr->values;
+    }
+    if (valueType != nullptr) {
+        *valueType = dnVecDescr->valueType;
+    }
+    return ACL_SPARSE_STATUS_SUCCESS;
+}
+
+aclsparseStatus_t aclsparseDnVecGetValues(aclsparseDnVecDescr_t dnVecDescr, void **values)
+{
+    if (dnVecDescr == nullptr) {
+        return ACL_SPARSE_STATUS_INVALID_VALUE;
+    }
+    if (values != nullptr) {
+        *values = dnVecDescr->values;
+    }
+    return ACL_SPARSE_STATUS_SUCCESS;
+}
+
+aclsparseStatus_t aclsparseConstDnVecGetValues(aclsparseConstDnVecDescr_t dnVecDescr,
+                                               const void **values)
+{
+    if (dnVecDescr == nullptr) {
+        return ACL_SPARSE_STATUS_INVALID_VALUE;
+    }
+    if (values != nullptr) {
+        *values = dnVecDescr->values;
+    }
+    return ACL_SPARSE_STATUS_SUCCESS;
+}
+
+aclsparseStatus_t aclsparseDnVecSetValues(aclsparseDnVecDescr_t dnVecDescr, void *values)
+{
+    if (dnVecDescr == nullptr) {
+        return ACL_SPARSE_STATUS_INVALID_VALUE;
+    }
+    dnVecDescr->values = values;
     return ACL_SPARSE_STATUS_SUCCESS;
 }
 
@@ -125,7 +196,7 @@ aclsparseStatus_t aclsparseCreateDnMat(aclsparseDnMatDescr_t *dnMatDescr,
     aclDataType valueType, aclsparseOrder_t order)
 {
     if (dnMatDescr == nullptr) {
-        return ACL_SPARSE_STATUS_HANDLE_IS_NULLPTR;
+        return ACL_SPARSE_STATUS_INVALID_VALUE;
     }
     if (rows <= 0 || cols <= 0 || ld <= 0) {
         return ACL_SPARSE_STATUS_INVALID_VALUE;
@@ -166,12 +237,100 @@ aclsparseStatus_t aclsparseDestroyDnMat(aclsparseConstDnMatDescr_t dnMatDescr)
     return ACL_SPARSE_STATUS_SUCCESS;
 }
 
+aclsparseStatus_t aclsparseDnMatGet(aclsparseDnMatDescr_t dnMatDescr, int64_t *rows, int64_t *cols,
+                                    int64_t *ld, void **values, aclDataType *valueType,
+                                    aclsparseOrder_t *order)
+{
+    if (dnMatDescr == nullptr) {
+        return ACL_SPARSE_STATUS_INVALID_VALUE;
+    }
+    if (rows != nullptr) {
+        *rows = dnMatDescr->rows;
+    }
+    if (cols != nullptr) {
+        *cols = dnMatDescr->cols;
+    }
+    if (ld != nullptr) {
+        *ld = dnMatDescr->ld;
+    }
+    if (values != nullptr) {
+        *values = dnMatDescr->values;
+    }
+    if (valueType != nullptr) {
+        *valueType = dnMatDescr->valueType;
+    }
+    if (order != nullptr) {
+        *order = dnMatDescr->order;
+    }
+    return ACL_SPARSE_STATUS_SUCCESS;
+}
+
+aclsparseStatus_t aclsparseConstDnMatGet(aclsparseConstDnMatDescr_t dnMatDescr, int64_t *rows,
+                                         int64_t *cols, int64_t *ld, const void **values,
+                                         aclDataType *valueType, aclsparseOrder_t *order)
+{
+    if (dnMatDescr == nullptr) {
+        return ACL_SPARSE_STATUS_INVALID_VALUE;
+    }
+    if (rows != nullptr) {
+        *rows = dnMatDescr->rows;
+    }
+    if (cols != nullptr) {
+        *cols = dnMatDescr->cols;
+    }
+    if (ld != nullptr) {
+        *ld = dnMatDescr->ld;
+    }
+    if (values != nullptr) {
+        *values = dnMatDescr->values;
+    }
+    if (valueType != nullptr) {
+        *valueType = dnMatDescr->valueType;
+    }
+    if (order != nullptr) {
+        *order = dnMatDescr->order;
+    }
+    return ACL_SPARSE_STATUS_SUCCESS;
+}
+
+aclsparseStatus_t aclsparseDnMatGetValues(aclsparseDnMatDescr_t dnMatDescr, void **values)
+{
+    if (dnMatDescr == nullptr) {
+        return ACL_SPARSE_STATUS_INVALID_VALUE;
+    }
+    if (values != nullptr) {
+        *values = dnMatDescr->values;
+    }
+    return ACL_SPARSE_STATUS_SUCCESS;
+}
+
+aclsparseStatus_t aclsparseConstDnMatGetValues(aclsparseConstDnMatDescr_t dnMatDescr,
+                                               const void **values)
+{
+    if (dnMatDescr == nullptr) {
+        return ACL_SPARSE_STATUS_INVALID_VALUE;
+    }
+    if (values != nullptr) {
+        *values = dnMatDescr->values;
+    }
+    return ACL_SPARSE_STATUS_SUCCESS;
+}
+
+aclsparseStatus_t aclsparseDnMatSetValues(aclsparseDnMatDescr_t dnMatDescr, void *values)
+{
+    if (dnMatDescr == nullptr) {
+        return ACL_SPARSE_STATUS_INVALID_VALUE;
+    }
+    dnMatDescr->values = values;
+    return ACL_SPARSE_STATUS_SUCCESS;
+}
+
 aclsparseStatus_t aclsparseCreateConstDnMat(aclsparseConstDnMatDescr_t *dnMatDescr,
     int64_t rows, int64_t cols, int64_t ld, const void *values,
     aclDataType valueType, aclsparseOrder_t order)
 {
     if (dnMatDescr == nullptr) {
-        return ACL_SPARSE_STATUS_HANDLE_IS_NULLPTR;
+        return ACL_SPARSE_STATUS_INVALID_VALUE;
     }
     aclsparseDnMatDescr_t tmp = nullptr;
     aclsparseStatus_t st = aclsparseCreateDnMat(&tmp, rows, cols, ld,
