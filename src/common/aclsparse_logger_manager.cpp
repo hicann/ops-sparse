@@ -16,6 +16,13 @@
 #include "aclsparse_logger_manager.h"
 #include "dlog_pub.h"
 
+// OP_MODULE_ID is defined by CANN HAL (common_pkg.h), but that header is not
+// in the standard op_common include path. Define a local fallback so that
+// dlog_setlevel() compiles without the HAL dependency.
+#ifndef OP_MODULE_ID
+#define OP_MODULE_ID 63
+#endif
+
 namespace AclSparse {
 
 aclsparseStatus_t aclsparseLoggerSetLevel(aclsparseLogLevel_t logLevel)

@@ -557,6 +557,106 @@ aclsparseStatus_t aclsparseSnnz(
     int *nnzPerRowColumn,
     int *nnzTotalDevHostPtr);
 
+// ============================================================================
+// Legacy API: aclsparseScsrgeam2 — C = alpha * A + beta * B  (CSR, FP32)
+// ============================================================================
+
+/**
+ * @brief Query workspace size for aclsparseScsrgeam2.
+ *
+ * @param handle               IN, HOST, aclsparse handle.
+ * @param m                    IN, HOST, number of rows of A, B, C.
+ * @param n                    IN, HOST, number of columns of A, B, C.
+ * @param alpha                IN, HOST/DEVICE, pointer to scalar alpha.
+ * @param descrA               IN, HOST, matrix A descriptor.
+ * @param nnzA                 IN, HOST, number of nonzeros in A.
+ * @param csrSortedValA        IN, DEVICE, A nonzero values (length nnzA).
+ * @param csrSortedRowPtrA     IN, DEVICE, A row pointers (length m+1).
+ * @param csrSortedColIndA     IN, DEVICE, A column indices (length nnzA).
+ * @param beta                 IN, HOST/DEVICE, pointer to scalar beta.
+ * @param descrB               IN, HOST, matrix B descriptor.
+ * @param nnzB                 IN, HOST, number of nonzeros in B.
+ * @param csrSortedValB        IN, DEVICE, B nonzero values (length nnzB).
+ * @param csrSortedRowPtrB     IN, DEVICE, B row pointers (length m+1).
+ * @param csrSortedColIndB     IN, DEVICE, B column indices (length nnzB).
+ * @param descrC               IN, HOST, matrix C descriptor.
+ * @param csrSortedValC        IN, DEVICE, C nonzero values (may be NULL).
+ * @param csrSortedRowPtrC     IN, DEVICE, C row pointers (may be NULL).
+ * @param csrSortedColIndC     IN, DEVICE, C column indices (may be NULL).
+ * @param pBufferSizeInBytes   OUT, HOST, workspace size in bytes.
+ * @return aclsparseStatus_t
+ */
+aclsparseStatus_t aclsparseScsrgeam2_bufferSizeExt(
+    aclsparseHandle_t handle, int m, int n, const float *alpha, const aclsparseMatDescr_t descrA, int nnzA,
+    const float *csrSortedValA, const int *csrSortedRowPtrA, const int *csrSortedColIndA, const float *beta,
+    const aclsparseMatDescr_t descrB, int nnzB, const float *csrSortedValB, const int *csrSortedRowPtrB,
+    const int *csrSortedColIndB, const aclsparseMatDescr_t descrC, const float *csrSortedValC,
+    const int *csrSortedRowPtrC, const int *csrSortedColIndC, size_t *pBufferSizeInBytes);
+
+/**
+ * @brief Compute the structure of C (rowPtrC and nnzC).
+ *
+ * Kernel 1: count the number of nonzeros per row in the union A ∪ B,
+ * then Kernel 3: perform an exclusive prefix sum on the device side.
+ *
+ * @param handle                IN, HOST, aclsparse handle.
+ * @param m                     IN, HOST, number of rows.
+ * @param n                     IN, HOST, number of columns.
+ * @param descrA                IN, HOST, matrix A descriptor.
+ * @param nnzA                  IN, HOST, number of nonzeros in A.
+ * @param csrSortedRowPtrA      IN, DEVICE, A row pointers (length m+1).
+ * @param csrSortedColIndA      IN, DEVICE, A column indices (length nnzA).
+ * @param descrB                IN, HOST, matrix B descriptor.
+ * @param nnzB                  IN, HOST, number of nonzeros in B.
+ * @param csrSortedRowPtrB      IN, DEVICE, B row pointers (length m+1).
+ * @param csrSortedColIndB      IN, DEVICE, B column indices (length nnzB).
+ * @param descrC                IN, HOST, matrix C descriptor.
+ * @param csrSortedRowPtrC      OUT, DEVICE, C row pointers (length m+1).
+ * @param nnzTotalDevHostPtr    OUT, DEVICE/HOST, total nonzero count of C.
+ * @param workspace             IN, DEVICE, workspace (>= (m+1) * sizeof(int)).
+ * @return aclsparseStatus_t
+ */
+aclsparseStatus_t aclsparseXcsrgeam2Nnz(
+    aclsparseHandle_t handle, int m, int n, const aclsparseMatDescr_t descrA, int nnzA, const int *csrSortedRowPtrA,
+    const int *csrSortedColIndA, const aclsparseMatDescr_t descrB, int nnzB, const int *csrSortedRowPtrB,
+    const int *csrSortedColIndB, const aclsparseMatDescr_t descrC, int *csrSortedRowPtrC, int *nnzTotalDevHostPtr,
+    void *workspace);
+
+/**
+ * @brief Compute column indices and values of C: C = alpha * A + beta * B.
+ *
+ * Kernel 2: for each row, perform an ordered merge of column indices from
+ * A and B, writing the resulting column indices and values to C.
+ *
+ * @param handle               IN, HOST, aclsparse handle.
+ * @param m                    IN, HOST, number of rows.
+ * @param n                    IN, HOST, number of columns.
+ * @param alpha                IN, HOST/DEVICE, pointer to scalar alpha.
+ * @param descrA               IN, HOST, matrix A descriptor.
+ * @param nnzA                 IN, HOST, number of nonzeros in A.
+ * @param csrSortedValA        IN, DEVICE, A nonzero values (length nnzA).
+ * @param csrSortedRowPtrA     IN, DEVICE, A row pointers (length m+1).
+ * @param csrSortedColIndA     IN, DEVICE, A column indices (length nnzA).
+ * @param beta                 IN, HOST/DEVICE, pointer to scalar beta.
+ * @param descrB               IN, HOST, matrix B descriptor.
+ * @param nnzB                 IN, HOST, number of nonzeros in B.
+ * @param csrSortedValB        IN, DEVICE, B nonzero values (length nnzB).
+ * @param csrSortedRowPtrB     IN, DEVICE, B row pointers (length m+1).
+ * @param csrSortedColIndB     IN, DEVICE, B column indices (length nnzB).
+ * @param descrC               IN, HOST, matrix C descriptor.
+ * @param csrSortedValC        OUT, DEVICE, C nonzero values (length nnzC).
+ * @param csrSortedRowPtrC     IN, DEVICE, C row pointers (length m+1).
+ * @param csrSortedColIndC     OUT, DEVICE, C column indices (length nnzC).
+ * @param pBuffer              IN, DEVICE, workspace (from bufferSizeExt).
+ * @return aclsparseStatus_t
+ */
+aclsparseStatus_t aclsparseScsrgeam2(
+    aclsparseHandle_t handle, int m, int n, const float *alpha, const aclsparseMatDescr_t descrA, int nnzA,
+    const float *csrSortedValA, const int *csrSortedRowPtrA, const int *csrSortedColIndA, const float *beta,
+    const aclsparseMatDescr_t descrB, int nnzB, const float *csrSortedValB, const int *csrSortedRowPtrB,
+    const int *csrSortedColIndB, const aclsparseMatDescr_t descrC, float *csrSortedValC,
+    int *csrSortedRowPtrC, int *csrSortedColIndC, void *pBuffer);
+
 #ifdef __cplusplus
 }
 #endif

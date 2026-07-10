@@ -12,12 +12,13 @@
 # Directory layout follows ops-blas convention: test/{op_family}/{precision_variant}/archXX/
 set(_op_name nnz)
 set(_variant snnz)
-set(_target ${_variant}_test)
+set(_src_name ${_variant}_test)  # source files are snnz_*
+set(_target ${_op_name}_test)    # binary name aligns with --ops=nnz
 set(_test_src "")
 set(_src_arch "")
 
 foreach(arch_dir ${SOC_ARCH_DIRS})
-    set(_candidate "${CMAKE_CURRENT_SOURCE_DIR}/${_variant}/${arch_dir}/${_target}.cpp")
+    set(_candidate "${CMAKE_CURRENT_SOURCE_DIR}/${_variant}/${arch_dir}/${_src_name}.cpp")
     if(EXISTS ${_candidate})
         set(_test_src ${_candidate})
         set(_src_arch ${arch_dir})
