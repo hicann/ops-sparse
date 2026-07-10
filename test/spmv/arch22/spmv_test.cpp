@@ -19,6 +19,7 @@
 #include <cmath>
 #include <string>
 #include <memory>
+#include <type_traits>
 #include <arm_fp16.h>
 #include "acl/acl.h"
 #include "cann_ops_sparse.h"

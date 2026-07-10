@@ -41,6 +41,7 @@ function(ops_sparse_add_test operator link_lib)
     endif()
 
     add_executable(${target} ${_test_src})
+    target_compile_features(${target} PRIVATE cxx_std_17)
 
     target_include_directories(${target} PRIVATE
         ${CMAKE_SOURCE_DIR}/include
