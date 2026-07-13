@@ -31,15 +31,18 @@ struct aclsparseContext;
 struct aclsparseSpMatDescr;
 struct aclsparseDnVecDescr;
 struct aclsparseDnMatDescr;
+struct aclsparseSpVecDescr;
 
 typedef struct aclsparseContext* aclsparseHandle_t;
 typedef struct aclsparseSpMatDescr* aclsparseSpMatDescr_t;
 typedef struct aclsparseDnVecDescr* aclsparseDnVecDescr_t;
 typedef struct aclsparseDnMatDescr* aclsparseDnMatDescr_t;
+typedef struct aclsparseSpVecDescr* aclsparseSpVecDescr_t;
 
 typedef struct aclsparseSpMatDescr const* aclsparseConstSpMatDescr_t;
 typedef struct aclsparseDnVecDescr const* aclsparseConstDnVecDescr_t;
 typedef struct aclsparseDnMatDescr const* aclsparseConstDnMatDescr_t;
+typedef struct aclsparseSpVecDescr const* aclsparseConstSpVecDescr_t;
 
 // Dense matrix data layout (used by B / C of SpMM).
 typedef enum aclsparseOrder_t {
@@ -220,6 +223,38 @@ aclsparseStatus_t aclsparseCreateConstDnVec(aclsparseConstDnVecDescr_t *dnVecDes
  */
 aclsparseStatus_t aclsparseDestroyDnVec(aclsparseConstDnVecDescr_t dnVecDescr);
 
+// ============================================================================
+// Sparse Vector APIs
+// ============================================================================
+
+aclsparseStatus_t aclsparseCreateSpVec(aclsparseSpVecDescr_t *spVecDescr, int64_t size,
+    int64_t nnz, void *indices, void *values, aclsparseIndexType_t idxType,
+    aclsparseIndexBase_t idxBase, aclDataType valueType);
+
+aclsparseStatus_t aclsparseCreateConstSpVec(aclsparseConstSpVecDescr_t *spVecDescr, int64_t size,
+    int64_t nnz, const void *indices, const void *values, aclsparseIndexType_t idxType,
+    aclsparseIndexBase_t idxBase, aclDataType valueType);
+
+aclsparseStatus_t aclsparseDestroySpVec(aclsparseConstSpVecDescr_t spVecDescr);
+
+aclsparseStatus_t aclsparseSpVecGet(aclsparseSpVecDescr_t spVecDescr, int64_t *size,
+    int64_t *nnz, void **indices, void **values, aclsparseIndexType_t *idxType,
+    aclsparseIndexBase_t *idxBase, aclDataType *valueType);
+
+aclsparseStatus_t aclsparseConstSpVecGet(aclsparseConstSpVecDescr_t spVecDescr, int64_t *size,
+    int64_t *nnz, const void **indices, const void **values, aclsparseIndexType_t *idxType,
+    aclsparseIndexBase_t *idxBase, aclDataType *valueType);
+
+aclsparseStatus_t aclsparseSpVecGetIndexBase(aclsparseConstSpVecDescr_t spVecDescr,
+    aclsparseIndexBase_t *idxBase);
+
+aclsparseStatus_t aclsparseSpVecGetValues(aclsparseSpVecDescr_t spVecDescr, void **values);
+
+aclsparseStatus_t aclsparseConstSpVecGetValues(aclsparseConstSpVecDescr_t spVecDescr,
+    const void **values);
+
+aclsparseStatus_t aclsparseSpVecSetValues(aclsparseSpVecDescr_t spVecDescr, void *values);
+
 /**
  * @brief 获取稠密向量描述符的全部字段。
  *
@@ -335,6 +370,23 @@ aclsparseStatus_t aclsparseCreateConstCsc(aclsparseConstSpMatDescr_t *spMatDescr
  * @return aclsparseStatus_t 返回执行状态，若成功返回ACL_SPARSE_STATUS_SUCCESS。
  */
 aclsparseStatus_t aclsparseDestroySpMat(aclsparseConstSpMatDescr_t spMatDescr);
+
+// ============================================================================
+// Sparse Matrix Accessor APIs
+// ============================================================================
+
+aclsparseStatus_t aclsparseSpMatGetFormat(aclsparseConstSpMatDescr_t spMatDescr,
+    aclsparseFormat_t *format);
+
+aclsparseStatus_t aclsparseSpMatGetValues(aclsparseSpMatDescr_t spMatDescr, void **values);
+
+aclsparseStatus_t aclsparseConstSpMatGetValues(aclsparseConstSpMatDescr_t spMatDescr,
+    const void **values);
+
+aclsparseStatus_t aclsparseSpMatSetValues(aclsparseSpMatDescr_t spMatDescr, void *values);
+
+aclsparseStatus_t aclsparseSpMatGetSize(aclsparseConstSpMatDescr_t spMatDescr,
+    int64_t *rows, int64_t *cols, int64_t *nnz);
 
 /**
  * @brief 获取稀疏矩阵向量乘法（SpMV）所需的缓冲区大小

@@ -66,6 +66,17 @@ struct aclsparseDnVecDescr {
     aclDataType valueType{};
 };
 
+// 稀疏向量描述符内部结构。
+struct aclsparseSpVecDescr {
+    uint64_t size = 0;
+    uint64_t nnz = 0;
+    void *indices = nullptr;
+    void *values = nullptr;
+    aclsparseIndexType_t idxType{};
+    aclsparseIndexBase_t idxBase{};
+    aclDataType valueType{};
+};
+
 // 稠密矩阵描述符内部结构（SpMM 的 B / C）。
 struct aclsparseDnMatDescr {
     int64_t rows = 0;

@@ -23,9 +23,19 @@
 | [aclsparseDnVecGet](#aclsparsednvecget) | 获取稠密向量描述符的全部字段 |
 | [aclsparseDnVecGetValues](#aclsparsednvecgetvalues) | 获取稠密向量描述符的 values 指针 |
 | [aclsparseDnVecSetValues](#aclsparsednvecsetvalues) | 设置稠密向量描述符的 values 指针 |
+| [aclsparseCreateSpVec](#aclsparsecreatespvec) | 创建稀疏向量 |
+| [aclsparseDestroySpVec](#aclsparsedestroyspvec) | 销毁稀疏向量描述符 |
+| [aclsparseSpVecGet](#aclsparsespvecget) | 获取稀疏向量描述符的全部字段 |
+| [aclsparseSpVecGetIndexBase](#aclsparsespvecgetindexbase) | 获取稀疏向量的索引基值 |
+| [aclsparseSpVecGetValues](#aclsparsespvecgetvalues) | 获取稀疏向量描述符的 values 指针 |
+| [aclsparseSpVecSetValues](#aclsparsespvecsetvalues) | 设置稀疏向量描述符的 values 指针 |
 | [aclsparseCreateCsr](#aclsparsecreatecsr) | 创建CSR格式稀疏矩阵 |
 | [aclsparseCreateCsc](#aclsparsecreatecsc) | 创建CSC格式稀疏矩阵（**暂未支持**） |
 | [aclsparseDestroySpMat](#aclsparsedestroyspmat) | 销毁稀疏矩阵对象 |
+| [aclsparseSpMatGetFormat](#aclsparsespmatgetformat) | 获取稀疏矩阵的存储格式 |
+| [aclsparseSpMatGetValues](#aclsparsespmatgetvalues) | 获取稀疏矩阵描述符的 values 指针 |
+| [aclsparseSpMatSetValues](#aclsparsespmatsetvalues) | 设置稀疏矩阵描述符的 values 指针 |
+| [aclsparseSpMatGetSize](#aclsparsespmatgetsize) | 获取稀疏矩阵的行数、列数和非零元素个数 |
 | [aclsparseSpMVGetBufferSize](#aclsparsespmvgetbuffersize) | 获取SpMV缓冲区大小（**暂未支持**） |
 | [aclsparseSpMVPreprocess](#aclsparsespmvpreprocess) | SpMV预处理（**暂未支持**） |
 | [aclsparseSpMV](#aclsparsespmv) | 稀疏矩阵向量乘法 |
@@ -258,6 +268,183 @@ aclsparseStatus_t aclsparseDnVecSetValues(
 
 ---
 
+### aclsparseCreateSpVec
+
+```c
+aclsparseStatus_t aclsparseCreateSpVec(
+    aclsparseSpVecDescr_t *spVecDescr,
+    int64_t size,
+    int64_t nnz,
+    void *indices,
+    void *values,
+    aclsparseIndexType_t idxType,
+    aclsparseIndexBase_t idxBase,
+    aclDataType valueType
+);
+```
+
+**功能**：创建一个稀疏向量描述符。
+
+**参数说明**：
+
+- `spVecDescr`（IN/OUT）：HOST，稀疏向量描述符。
+- `size`（IN）：HOST，稀疏向量的大小（元素总数）。
+- `nnz`（IN）：HOST，稀疏向量的非零元素个数。
+- `indices`（IN）：DEVICE，索引数组，长度为 `nnz`。
+- `values`（IN）：DEVICE，值数组，长度为 `nnz`。
+- `idxType`（IN）：HOST，`indices` 的数据类型。
+- `idxBase`（IN）：HOST，`indices` 的索引基值。
+- `valueType`（IN）：HOST，`values` 的数据类型。
+
+**返回值**：
+
+- `ACL_SPARSE_STATUS_SUCCESS`：成功
+- `ACL_SPARSE_STATUS_INVALID_VALUE`：`spVecDescr` 为空指针，或 `size < 0`，或 `nnz < 0`，或 `nnz > size`
+- `ACL_SPARSE_STATUS_ALLOC_FAILED`：内存分配失败
+
+---
+
+### aclsparseDestroySpVec
+
+```c
+aclsparseStatus_t aclsparseDestroySpVec(aclsparseConstSpVecDescr_t spVecDescr);
+```
+
+**功能**：销毁稀疏向量描述符。接受 const 描述符，非 const 描述符同样支持。
+
+**参数说明**：
+
+- `spVecDescr`（IN）：HOST，要销毁的稀疏向量描述符。
+
+**返回值**：
+
+- `ACL_SPARSE_STATUS_SUCCESS`：成功
+
+---
+
+### aclsparseSpVecGet
+
+```c
+aclsparseStatus_t aclsparseSpVecGet(
+    aclsparseSpVecDescr_t spVecDescr,
+    int64_t *size,
+    int64_t *nnz,
+    void **indices,
+    void **values,
+    aclsparseIndexType_t *idxType,
+    aclsparseIndexBase_t *idxBase,
+    aclDataType *valueType
+);
+```
+
+**功能**：获取稀疏向量描述符的全部字段。输出参数允许为 `nullptr`，此时仅返回请求的字段。
+
+**参数说明**：
+
+- `spVecDescr`（IN）：HOST，稀疏向量描述符。
+- `size`（OUT）：HOST，稀疏向量的大小。
+- `nnz`（OUT）：HOST，非零元素个数。
+- `indices`（OUT）：DEVICE，索引数组指针。
+- `values`（OUT）：DEVICE，值数组指针。
+- `idxType`（OUT）：HOST，索引数据类型。
+- `idxBase`（OUT）：HOST，索引基值。
+- `valueType`（OUT）：HOST，值数据类型。
+
+**返回值**：
+
+- `ACL_SPARSE_STATUS_SUCCESS`：成功
+- `ACL_SPARSE_STATUS_INVALID_VALUE`：`spVecDescr` 为空指针
+
+---
+
+### aclsparseSpVecGetIndexBase
+
+```c
+aclsparseStatus_t aclsparseSpVecGetIndexBase(
+    aclsparseConstSpVecDescr_t spVecDescr,
+    aclsparseIndexBase_t *idxBase
+);
+```
+
+**功能**：获取稀疏向量描述符的索引基值。接受 const 描述符，非 const 描述符同样支持。
+
+**参数说明**：
+
+- `spVecDescr`（IN）：HOST，稀疏向量描述符。
+- `idxBase`（OUT）：HOST，索引基值。
+
+**返回值**：
+
+- `ACL_SPARSE_STATUS_SUCCESS`：成功
+- `ACL_SPARSE_STATUS_INVALID_VALUE`：`spVecDescr` 为空指针
+
+---
+
+### aclsparseSpVecGetValues
+
+```c
+aclsparseStatus_t aclsparseSpVecGetValues(
+    aclsparseSpVecDescr_t spVecDescr,
+    void **values
+);
+```
+
+**功能**：获取稀疏向量描述符的 values 指针。
+
+**参数说明**：
+
+- `spVecDescr`（IN）：HOST，稀疏向量描述符。
+- `values`（OUT）：DEVICE，值数组指针，长度为 `nnz`。
+
+**返回值**：
+
+- `ACL_SPARSE_STATUS_SUCCESS`：成功
+- `ACL_SPARSE_STATUS_INVALID_VALUE`：`spVecDescr` 为空指针
+
+---
+
+### aclsparseSpVecSetValues
+
+```c
+aclsparseStatus_t aclsparseSpVecSetValues(
+    aclsparseSpVecDescr_t spVecDescr,
+    void *values
+);
+```
+
+**功能**：设置稀疏向量描述符的 values 指针。
+
+**参数说明**：
+
+- `spVecDescr`（IN）：HOST，稀疏向量描述符。
+- `values`（IN）：DEVICE，值数组指针，长度为 `nnz`。
+
+**返回值**：
+
+- `ACL_SPARSE_STATUS_SUCCESS`：成功
+- `ACL_SPARSE_STATUS_INVALID_VALUE`：`spVecDescr` 为空指针
+
+---
+
+### 只读(const)稀疏向量描述符构造接口
+
+只读(const)构造接口：数据指针为 `const`，构造出的描述符是 `const` 变体，只能传给接收 `const` 形参的接口。销毁接口（`aclsparseDestroySpVec`）统一接收 `const` 变体，因此 const 与非 const 描述符都可销毁。
+
+```c
+aclsparseStatus_t aclsparseCreateConstSpVec(aclsparseConstSpVecDescr_t *spVecDescr, int64_t size,
+    int64_t nnz, const void *indices, const void *values, aclsparseIndexType_t idxType,
+    aclsparseIndexBase_t idxBase, aclDataType valueType);
+
+aclsparseStatus_t aclsparseConstSpVecGet(aclsparseConstSpVecDescr_t spVecDescr, int64_t *size,
+    int64_t *nnz, const void **indices, const void **values, aclsparseIndexType_t *idxType,
+    aclsparseIndexBase_t *idxBase, aclDataType *valueType);
+
+aclsparseStatus_t aclsparseConstSpVecGetValues(aclsparseConstSpVecDescr_t spVecDescr,
+    const void **values);
+```
+
+---
+
 ### aclsparseCreateCsr
 
 ```c
@@ -363,9 +550,105 @@ aclsparseStatus_t aclsparseDestroySpMat(aclsparseConstSpMatDescr_t spMatDescr);
 
 ---
 
+### aclsparseSpMatGetFormat
+
+```c
+aclsparseStatus_t aclsparseSpMatGetFormat(
+    aclsparseConstSpMatDescr_t spMatDescr,
+    aclsparseFormat_t *format
+);
+```
+
+**功能**：获取稀疏矩阵描述符的存储格式。接受 const 描述符，非 const 描述符同样支持。
+
+**参数说明**：
+
+- `spMatDescr`（IN）：HOST，稀疏矩阵描述符。
+- `format`（OUT）：HOST，存储格式。
+
+**返回值**：
+
+- `ACL_SPARSE_STATUS_SUCCESS`：成功
+- `ACL_SPARSE_STATUS_INVALID_VALUE`：`spMatDescr` 为空指针
+
+---
+
+### aclsparseSpMatGetValues
+
+```c
+aclsparseStatus_t aclsparseSpMatGetValues(
+    aclsparseSpMatDescr_t spMatDescr,
+    void **values
+);
+```
+
+**功能**：获取稀疏矩阵描述符的 values 指针。
+
+**参数说明**：
+
+- `spMatDescr`（IN）：HOST，稀疏矩阵描述符。
+- `values`（OUT）：DEVICE，值数组指针，长度为 `nnz`。
+
+**返回值**：
+
+- `ACL_SPARSE_STATUS_SUCCESS`：成功
+- `ACL_SPARSE_STATUS_INVALID_VALUE`：`spMatDescr` 为空指针
+
+---
+
+### aclsparseSpMatSetValues
+
+```c
+aclsparseStatus_t aclsparseSpMatSetValues(
+    aclsparseSpMatDescr_t spMatDescr,
+    void *values
+);
+```
+
+**功能**：设置稀疏矩阵描述符的 values 指针。
+
+**参数说明**：
+
+- `spMatDescr`（IN）：HOST，稀疏矩阵描述符。
+- `values`（IN）：DEVICE，值数组指针，长度为 `nnz`。
+
+**返回值**：
+
+- `ACL_SPARSE_STATUS_SUCCESS`：成功
+- `ACL_SPARSE_STATUS_INVALID_VALUE`：`spMatDescr` 为空指针
+
+---
+
+### aclsparseSpMatGetSize
+
+```c
+aclsparseStatus_t aclsparseSpMatGetSize(
+    aclsparseConstSpMatDescr_t spMatDescr,
+    int64_t *rows,
+    int64_t *cols,
+    int64_t *nnz
+);
+```
+
+**功能**：获取稀疏矩阵的行数、列数和非零元素个数。接受 const 描述符，非 const 描述符同样支持。输出参数允许为 `nullptr`，此时仅返回请求的字段。
+
+**参数说明**：
+
+- `spMatDescr`（IN）：HOST，稀疏矩阵描述符。
+- `rows`（OUT）：HOST，稀疏矩阵的行数。
+- `cols`（OUT）：HOST，稀疏矩阵的列数。
+- `nnz`（OUT）：HOST，稀疏矩阵的非零元素个数。
+
+**返回值**：
+
+- `ACL_SPARSE_STATUS_SUCCESS`：成功
+- `ACL_SPARSE_STATUS_INVALID_VALUE`：`spMatDescr` 为空指针
+
+---
+
 ### 只读(const)描述符构造接口
 
-只读(const)构造接口：数据指针为 `const`，构造出的描述符是 `const` 变体，只能传给接收 `const` 形参的接口（如 SpMV/SpMM 的输入 `mat`/`matA`/`x`/`matB`）。销毁接口（`aclsparseDestroyDnVec` / `aclsparseDestroySpMat` / `aclsparseDestroyDnMat`）统一接收 `const` 变体，因此 const 与非 const 描述符都可销毁。`aclsparseCreateConstCsc` 当前版本暂未支持，调用返回 `ACL_SPARSE_STATUS_NOT_SUPPORTED`。
+只读(const)构造接口：数据指针为 `const`，构造出的描述符是 `const` 变体，只能传给接收 `const` 形参的接口（如 SpMV/SpMM 的输入 `mat`/`matA`/`x`/`matB`）。销毁接口（`aclsparseDestroyDnVec` / `aclsparseDestroySpMat` / `aclsparseDestroyDnMat` / `aclsparseDestroySpVec`）统一接收 `const` 变体，因此 const 与非 const 描述符都可销毁。`aclsparseCreateConstCsc` 当前版本暂未支持，调用返回 `ACL_SPARSE_STATUS_NOT_SUPPORTED`。
 
 ```c
 aclsparseStatus_t aclsparseCreateConstDnVec(aclsparseConstDnVecDescr_t *dnVecDescr, int64_t size,
@@ -382,6 +665,9 @@ aclsparseStatus_t aclsparseCreateConstCsc(aclsparseConstSpMatDescr_t *spMatDescr
 aclsparseStatus_t aclsparseCreateConstDnMat(aclsparseConstDnMatDescr_t *dnMatDescr,
     int64_t rows, int64_t cols, int64_t ld, const void *values,
     aclDataType valueType, aclsparseOrder_t order);
+
+aclsparseStatus_t aclsparseConstSpMatGetValues(aclsparseConstSpMatDescr_t spMatDescr,
+    const void **values);
 ```
 
 > **支持状态**：`aclsparseCreateConstCsc` 暂未支持。调用返回 `ACL_SPARSE_STATUS_NOT_SUPPORTED`。
