@@ -18,7 +18,8 @@
 #include "acl/acl.h"
 #include "spmm.h"
 #include "spmm_csr_mat.h"
-#include "cann_ops_sparse_common.h"
+#include "cann_ops_sparse.h"
+#include "aclsparse_host_utils.h"
 
 namespace {
 

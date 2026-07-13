@@ -23,6 +23,7 @@
 
 #include "log/log.h"
 #include "tiling/platform/platform_ascendc.h"
+#include "cann_ops_sparse.h"
 
 #ifndef CHECK_RET
 #define CHECK_RET(cond, return_expr) \
@@ -30,6 +31,17 @@
         if (!(cond)) {               \
             return_expr;             \
         }                            \
+    } while (0)
+#endif
+
+#ifndef CHECK_ACL
+#define CHECK_ACL(x)                                                                        \
+    do {                                                                                    \
+        aclError __ret = x;                                                                 \
+        if (__ret != ACL_ERROR_NONE) {                                                      \
+            OP_LOGE("aclsparse", "aclError: %d at %s:%d", __ret, __FILE__, __LINE__);       \
+            return ACL_SPARSE_STATUS_INTERNAL_ERROR;                                         \
+        }                                                                                   \
     } while (0)
 #endif
 

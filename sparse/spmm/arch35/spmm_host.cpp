@@ -17,7 +17,7 @@
 #include <mutex>
 
 #include "cann_ops_sparse.h"
-#include "cann_ops_sparse_common.h"
+#include "aclsparse_host_utils.h"
 #include "aclsparse_descr_internal.h"
 #include "spmm.h"
 #include "spmm_csr_mat.h"

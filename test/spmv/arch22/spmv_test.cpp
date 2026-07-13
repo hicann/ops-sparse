@@ -23,7 +23,6 @@
 #include <arm_fp16.h>
 #include "acl/acl.h"
 #include "cann_ops_sparse.h"
-#include "cann_ops_sparse_common.h"
 
 // host 侧 half/bf16 别名：kernel 侧为 AscendC::half / AscendC::bfloat16_t
 using half = __fp16;

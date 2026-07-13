@@ -83,11 +83,47 @@ option(ENABLE_PACKAGE "Enable build package" OFF)
 # ========= 构建动态库 =========
 find_package(ASC REQUIRED)
 
+# sparseLt library (built first, like blasLt in ops-blas)
+set(ALL_SPARSELT_SRC_FILES "")
+set(OPS_SPARSELT ops_sparseLt)
+
+add_subdirectory(sparseLt)
+
+if(ALL_SPARSELT_SRC_FILES)
+    project(${OPS_SPARSELT} LANGUAGES ASC CXX)
+    add_library(${OPS_SPARSELT} SHARED ${ALL_SPARSELT_SRC_FILES})
+    set_source_files_properties(
+        ${ALL_SPARSELT_KERNEL_SRC_FILES}
+        PROPERTIES LANGUAGE ASC
+    )
+    set_source_files_properties(
+        ${ALL_SPARSELT_HOST_SRC_FILES}
+        PROPERTIES LANGUAGE CXX
+    )
+    target_include_directories(${OPS_SPARSELT} PRIVATE
+        ${ASCEND_CANN_PACKAGE_PATH}/pkg_inc/op_common/
+        ${ASCEND_CANN_PACKAGE_PATH}/pkg_inc/base/
+        ${ASCEND_CANN_PACKAGE_PATH}/pkg_inc/
+        ${ASCEND_CANN_PACKAGE_PATH}/include/op_common
+        ${ASCEND_CANN_PACKAGE_PATH}/aarch64-linux/asc/include/utils
+        ${ASCEND_CANN_PACKAGE_PATH}/aarch64-linux/asc/include
+        ./include
+        ./sparseLt
+    )
+    target_compile_options(${OPS_SPARSELT} PRIVATE
+        $<$<COMPILE_LANGUAGE:ASC>:--npu-arch=${NPU_ARCH}>
+    )
+    target_link_libraries(${OPS_SPARSELT} PRIVATE
+        tiling_api
+        platform
+    )
+endif()
+
 # sparse operators
 set(ALL_SPARSE_SRC_FILES "")
 set(OPS_SPARSE ops_sparse)
 
-add_subdirectory(src)
+add_subdirectory(sparse)
 
 project(${OPS_SPARSE} LANGUAGES ASC CXX)
 
@@ -112,7 +148,7 @@ target_include_directories(${OPS_SPARSE} PRIVATE
     ${ASCEND_CANN_PACKAGE_PATH}/aarch64-linux/asc/include/utils
     ${ASCEND_CANN_PACKAGE_PATH}/aarch64-linux/asc/include
     ./include
-    ./src/common
+    ./sparse/common
 )
 
 target_compile_options(${OPS_SPARSE} PRIVATE
@@ -130,7 +166,7 @@ install(TARGETS ${OPS_SPARSE}
 )
 install(FILES
     include/cann_ops_sparse.h
-    include/cann_ops_sparse_common.h
+    include/cann_ops_sparseLt.h
     DESTINATION include
 )
 

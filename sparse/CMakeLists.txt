@@ -25,7 +25,7 @@ cmake_minimum_required(VERSION 3.16)
 
 # 收集基础源文件（所有 .cpp 文件）
 file(GLOB_RECURSE BASE_SRC_FILES ${CMAKE_CURRENT_SOURCE_DIR}/*.cpp)
-message(STATUS "[src] Total source files before filtering: ${BASE_SRC_FILES}")
+message(STATUS "[sparse] Total source files before filtering: ${BASE_SRC_FILES}")
 
 # -------------------------------------------------------------------------------------------------
 # 步骤1：过滤掉所有架构特定目录中的文件
@@ -42,7 +42,7 @@ foreach(arch_dir ${ARCH_SPECIFIC_DIRS})
   endforeach()
   
   if(arch_dir_srcs)
-    message(STATUS "[src] Filtering out ${arch_dir} sources: ${arch_dir_srcs}")
+    message(STATUS "[sparse] Filtering out ${arch_dir} sources: ${arch_dir_srcs}")
     foreach(arch_src ${arch_dir_srcs})
       list(REMOVE_ITEM BASE_SRC_FILES ${arch_src})
     endforeach()
@@ -56,7 +56,7 @@ endforeach()
 # -------------------------------------------------------------------------------------------------
 set(ARCH_SRC_FILES "")
 if(SOC_ARCH_DIRS)
-  message(STATUS "[src] SOC_ARCH_DIRS specified, collecting arch-specific sources: ${SOC_ARCH_DIRS}")
+  message(STATUS "[sparse] SOC_ARCH_DIRS specified, collecting arch-specific sources: ${SOC_ARCH_DIRS}")
   foreach(arch_dir ${SOC_ARCH_DIRS})
     # 收集所有源文件，然后筛选出匹配当前架构目录的文件
     file(GLOB_RECURSE all_srcs ${CMAKE_CURRENT_SOURCE_DIR}/*.cpp)
@@ -68,14 +68,14 @@ if(SOC_ARCH_DIRS)
     endforeach()
     
     if(arch_dir_srcs)
-      message(STATUS "[src] Adding ${arch_dir} sources: ${arch_dir_srcs}")
+      message(STATUS "[sparse] Adding ${arch_dir} sources: ${arch_dir_srcs}")
       list(APPEND ARCH_SRC_FILES ${arch_dir_srcs})
     else()
-      message(WARNING "[src] Arch directory '${arch_dir}' specified but no source files found")
+      message(WARNING "[sparse] Arch directory '${arch_dir}' specified but no source files found")
     endif()
   endforeach()
 else()
-  message(STATUS "[src] No SOC_ARCH_DIRS specified, using generic implementation only")
+  message(STATUS "[sparse] No SOC_ARCH_DIRS specified, using generic implementation only")
 endif()
 
 # -------------------------------------------------------------------------------------------------
@@ -93,7 +93,7 @@ endif()
 list(LENGTH BASE_SRC_FILES base_count)
 list(LENGTH ARCH_SRC_FILES arch_count)
 list(LENGTH ALL_SPARSE_SRC_FILES total_count)
-message(STATUS "[src] Source file summary: ${base_count} generic + ${arch_count} arch-specific = ${total_count} total")
+message(STATUS "[sparse] Source file summary: ${base_count} generic + ${arch_count} arch-specific = ${total_count} total")
 
 # 设置父作用域变量
 set(ALL_SPARSE_SRC_FILES ${ALL_SPARSE_SRC_FILES} PARENT_SCOPE)

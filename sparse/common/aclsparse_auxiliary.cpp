@@ -16,7 +16,7 @@
  */
 
 #include "cann_ops_sparse.h"
-#include "cann_ops_sparse_common.h"
+#include "aclsparse_host_utils.h"
 #include "aclsparse_handle_internal.h"
 
 #include <new>

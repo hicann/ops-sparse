@@ -36,8 +36,8 @@ function(ops_sparse_add_test operator link_lib)
         return()
     endif()
 
-    if(NOT IS_DIRECTORY "${CMAKE_SOURCE_DIR}/src/${operator}/${_src_arch}")
-        message(FATAL_ERROR "[test/${operator}] test arch '${_src_arch}' has no matching src at src/${operator}/${_src_arch}")
+    if(NOT IS_DIRECTORY "${CMAKE_SOURCE_DIR}/sparse/${operator}/${_src_arch}")
+        message(FATAL_ERROR "[test/${operator}] test arch '${_src_arch}' has no matching src at sparse/${operator}/${_src_arch}")
     endif()
 
     add_executable(${target} ${_test_src})
@@ -45,8 +45,8 @@ function(ops_sparse_add_test operator link_lib)
 
     target_include_directories(${target} PRIVATE
         ${CMAKE_SOURCE_DIR}/include
-        ${CMAKE_SOURCE_DIR}/src/${operator}/${_src_arch}
-        ${CMAKE_SOURCE_DIR}/src/common
+        ${CMAKE_SOURCE_DIR}/sparse/${operator}/${_src_arch}
+        ${CMAKE_SOURCE_DIR}/sparse/common
         ${CMAKE_SOURCE_DIR}/test/frame
         $ENV{LINUX_INCLUDE_PATH}
     )
@@ -73,7 +73,7 @@ endfunction()
 #                                          # - source searched at test/<op>/<variant>/<arch>/<variant>_test.cpp
 #                                          # - binary target stays <operator>_test
 #                                          # - CSV copied as <variant>_test.csv
-#       [WARN_ON_MISSING_SRC]              # emit warning instead of FATAL_ERROR when src/<op>/<arch>/ is missing
+#       [WARN_ON_MISSING_SRC]              # emit warning instead of FATAL_ERROR when sparse/<op>/<arch>/ is missing
 #       [EIGEN]                            # link Eigen3 (unconditionally, regardless of TEST_USE_EIGEN cache var)
 #       [EXTRA_INCLUDES <dir1> <dir2> ...] # additional include directories
 #   )
@@ -115,12 +115,12 @@ function(ops_sparse_add_gtest_tests operator link_lib)
         return()
     endif()
 
-    if(NOT IS_DIRECTORY "${CMAKE_SOURCE_DIR}/src/${operator}/${_src_arch}")
+    if(NOT IS_DIRECTORY "${CMAKE_SOURCE_DIR}/sparse/${operator}/${_src_arch}")
         if(ARG_WARN_ON_MISSING_SRC)
-            message(WARNING "[test/${operator}] src/${operator}/${_src_arch} not found, skipping ${target}")
+            message(WARNING "[test/${operator}] sparse/${operator}/${_src_arch} not found, skipping ${target}")
             return()
         else()
-            message(FATAL_ERROR "[test/${operator}] test arch '${_src_arch}' has no matching src at src/${operator}/${_src_arch}")
+            message(FATAL_ERROR "[test/${operator}] test arch '${_src_arch}' has no matching src at sparse/${operator}/${_src_arch}")
         endif()
     endif()
 
@@ -146,8 +146,8 @@ function(ops_sparse_add_gtest_tests operator link_lib)
 
     target_include_directories(${target} PRIVATE
         ${CMAKE_SOURCE_DIR}/include
-        ${CMAKE_SOURCE_DIR}/src/${operator}/${_src_arch}
-        ${CMAKE_SOURCE_DIR}/src/common
+        ${CMAKE_SOURCE_DIR}/sparse/${operator}/${_src_arch}
+        ${CMAKE_SOURCE_DIR}/sparse/common
         ${CMAKE_SOURCE_DIR}/test/frame
         ${CMAKE_CURRENT_SOURCE_DIR}
         ${CMAKE_CURRENT_SOURCE_DIR}/${_subdir}
