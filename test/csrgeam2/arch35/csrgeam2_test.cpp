@@ -19,30 +19,14 @@
  *   - TEST_P (CsrGeam2Test)   : parameterized success-path tests from CSV
  *   - TEST_F (CsrGeam2ExceptionTest) : null-pointer / invalid-param error tests
  *
- * NOTE: main() is defined in this file because test/frame/test_main.cpp
- *       does not yet exist. Once the shared main is created, main() should
- *       be removed from this file to comply with the "禁止定义 main 函数"
- *       rule for new-operator tests.
+ * Test parameters are loaded from csrgeam2_test.csv (copied to build dir by
+ * CMake). Entry point is shared via test/frame/test_main.cpp.
  */
 
-#include "sparse_test.h"
-#include "fill.h"
-#include "verify.h"
-#include "descriptor_manager.h"
-#include "csrgeam2_param.h"
+#include "test_common.h"
 #include "csrgeam2_golden.h"
 #include "csrgeam2_npu_wrapper.h"
-
-#include "acl/acl.h"
-#include "cann_ops_sparse.h"
-
-#include <gtest/gtest.h>
-
-#include <cstdint>
-#include <iostream>
-#include <stdexcept>
-#include <string>
-#include <vector>
+#include "csrgeam2_param.h"
 
 using namespace sparse_test;
 
@@ -60,35 +44,30 @@ static CsrMatrix PrepareCsr(const CsrMatrix &csr0, int indexBase) {
     return csr;
 }
 
-// Global ACL environment (uses framework's AclEnvScope)
-class AclTestEnvironment : public testing::Environment {
-public:
-    void SetUp() override {
-        env_ = std::make_unique<AclEnvScope>();
-    }
-
-    void TearDown() override {
-        env_.reset();
-    }
-
-    aclrtStream stream() const { return env_->stream(); }
-
-private:
-    std::unique_ptr<AclEnvScope> env_;
-};
-
-static AclTestEnvironment *g_acl_env = nullptr;
+// Shared ACL environment (one instance per test-suite, owned by the parameterized fixture).
+// Non-parameterized exception tests use SetUpTestSuite too (via shared env_).
+using SharedAclEnvScope = AclEnvScope;
 
 // GTest parameterized fixture: CsrGeam2Test
 class CsrGeam2Test : public testing::TestWithParam<CsrGeam2TestParam> {
-protected:
-    void SetUp() override {
-        param_ = GetParam();
-        stream_ = g_acl_env->stream();
+public:
+    static void SetUpTestSuite() {
+        env_ = std::make_unique<AclEnvScope>();
     }
 
+    static void TearDownTestSuite() {
+        env_.reset();
+    }
+
+protected:
+    inline static std::unique_ptr<AclEnvScope> env_;
     CsrGeam2TestParam param_;
     aclrtStream stream_ = nullptr;
+
+    void SetUp() override {
+        param_ = GetParam();
+        stream_ = env_->stream();
+    }
 };
 
 // Helper: Prepare input CSR matrices A and B for a parameterized test case.
@@ -199,13 +178,11 @@ TEST_P(CsrGeam2Test, CsrGeam2Success) {
     std::cout << "[" << p.case_name << "] PASSED (nnzC=" << golden.nnzC << ")\n";
 }
 
-// Parameterized test instantiation from CSV
-static std::vector<CsrGeam2TestParam> g_csrgeam2_cases = LoadCsrGeam2CasesFromCsv();
-
+// Parameterized test instantiation from CSV (loaded via public csv_loader.h)
 INSTANTIATE_TEST_SUITE_P(
     CsrGeam2Cases,
     CsrGeam2Test,
-    testing::ValuesIn(g_csrgeam2_cases),
+    testing::ValuesIn(GetCasesFromCsv<CsrGeam2TestParam>("csrgeam2_test.csv")),
     [](const testing::TestParamInfo<CsrGeam2TestParam> &info) {
         return info.param.case_name;
     }
@@ -213,9 +190,20 @@ INSTANTIATE_TEST_SUITE_P(
 
 // Exception test fixture: CsrGeam2ExceptionTest
 class CsrGeam2ExceptionTest : public testing::Test {
+public:
+    static void SetUpTestSuite() {
+        env_ = std::make_unique<AclEnvScope>();
+    }
+
+    static void TearDownTestSuite() {
+        env_.reset();
+    }
+
 protected:
+    inline static std::unique_ptr<AclEnvScope> env_;
+
     void SetUp() override {
-        stream_ = g_acl_env->stream();
+        stream_ = env_->stream();
         handle_ = std::make_unique<HandleManager>();
         handle_->setStream(stream_);
 
@@ -492,11 +480,3 @@ TEST_F(CsrGeam2ExceptionTest, NullBeta) {
               ACL_SPARSE_STATUS_INVALID_VALUE);
 }
 
-// main() - shared entry point
-// NOTE: This main() should be removed when test/frame/test_main.cpp is created.
-int main(int argc, char **argv) {
-    testing::InitGoogleTest(&argc, argv);
-    g_acl_env = new AclTestEnvironment();
-    testing::AddGlobalTestEnvironment(g_acl_env);
-    return RUN_ALL_TESTS();
-}

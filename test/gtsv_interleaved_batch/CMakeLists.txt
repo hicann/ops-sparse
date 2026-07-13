@@ -8,5 +8,5 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # ----------------------------------------------------------------------------------------------------------
 
-# aclsparseSnnz GTest tests
-ops_sparse_add_gtest_tests(nnz ${OPS_SPARSE} VARIANT snnz)
+# aclsparseSgtsvInterleavedBatch GTest tests
+ops_sparse_add_gtest_tests(gtsv_interleaved_batch ${OPS_SPARSE})

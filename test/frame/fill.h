@@ -338,6 +338,126 @@ inline std::vector<float> makeExtremelySparseColMajor(int m, int n, int lda,
     return A;
 }
 
+// ============================================================================
+// Tridiagonal matrix data generators (row-major interleaved layout)
+// Layout: data[row * batchCount + batch]
+// ============================================================================
+
+struct TridiagMatrix {
+    std::vector<float> dl;       // [m * batchCount] sub-diagonal (dl[0][*]=0)
+    std::vector<float> d;        // [m * batchCount] main diagonal
+    std::vector<float> du;       // [m * batchCount] super-diagonal (du[m-1][*]=0)
+    int m = 0;
+    int batchCount = 0;
+};
+
+inline TridiagMatrix makeDiagDominantTridiag(int m, int batchCount, uint32_t seed) {
+    TridiagMatrix out;
+    out.m = m;
+    out.batchCount = batchCount;
+    int total = m * batchCount;
+    out.dl.resize(total, 0.0f);
+    out.d.resize(total, 0.0f);
+    out.du.resize(total, 0.0f);
+    if (m <= 0 || batchCount <= 0) return out;
+
+    std::mt19937 rng(seed);
+    std::uniform_real_distribution<float> offDist(-2.0f, 2.0f);
+    std::uniform_real_distribution<float> diagDist(8.0f, 12.0f);
+
+    for (int j = 0; j < batchCount; j++) {
+        for (int i = 0; i < m; i++) {
+            int idx = i * batchCount + j;
+            out.d[idx] = diagDist(rng);
+            if (i > 0)     out.dl[idx] = offDist(rng);         // dl[0][*]=0
+            if (i < m - 1) out.du[idx] = offDist(rng);         // du[m-1][*]=0
+        }
+    }
+    return out;
+}
+
+inline TridiagMatrix makeRandomTridiag(int m, int batchCount, double lo, double hi, uint32_t seed) {
+    TridiagMatrix out;
+    out.m = m;
+    out.batchCount = batchCount;
+    int total = m * batchCount;
+    out.dl.resize(total, 0.0f);
+    out.d.resize(total, 0.0f);
+    out.du.resize(total, 0.0f);
+    if (m <= 0 || batchCount <= 0) return out;
+
+    std::mt19937 rng(seed);
+    std::uniform_real_distribution<float> dist(static_cast<float>(lo), static_cast<float>(hi));
+
+    for (int j = 0; j < batchCount; j++) {
+        for (int i = 0; i < m; i++) {
+            int idx = i * batchCount + j;
+            out.d[idx] = dist(rng);
+            if (i > 0)     out.dl[idx] = dist(rng);            // dl[0][*]=0
+            if (i < m - 1) out.du[idx] = dist(rng);            // du[m-1][*]=0
+        }
+    }
+    return out;
+}
+
+inline TridiagMatrix makeIdentityTridiag(int m, int batchCount) {
+    TridiagMatrix out;
+    out.m = m;
+    out.batchCount = batchCount;
+    int total = m * batchCount;
+    out.dl.resize(total, 0.0f);
+    out.d.resize(total, 1.0f);
+    out.du.resize(total, 0.0f);
+    // dl, du are already zero (boundary conditions satisfied)
+    return out;
+}
+
+inline TridiagMatrix makeConstantDiagTridiag(int m, int batchCount, float diagVal) {
+    TridiagMatrix out;
+    out.m = m;
+    out.batchCount = batchCount;
+    int total = m * batchCount;
+    out.dl.resize(total, 0.0f);
+    out.d.resize(total, diagVal);
+    out.du.resize(total, 0.0f);
+    return out;
+}
+
+inline std::vector<float> makeTridiagRHS(int m, int batchCount, double lo, double hi, uint32_t seed) {
+    std::vector<float> b(m * batchCount, 0.0f);
+    if (m <= 0 || batchCount <= 0) return b;
+
+    std::mt19937 rng(seed);
+    std::uniform_real_distribution<float> dist(static_cast<float>(lo), static_cast<float>(hi));
+
+    for (int j = 0; j < batchCount; j++) {
+        for (int i = 0; i < m; i++) {
+            b[i * batchCount + j] = dist(rng);
+        }
+    }
+    return b;
+}
+
+inline std::vector<float> makeKnownSolutionTridiag(
+    const TridiagMatrix& tri,
+    const std::vector<float>& xTrue)
+{
+    // b = A * xTrue  (tridiagonal multiply)
+    int m = tri.m;
+    int batchCount = tri.batchCount;
+    std::vector<float> b(m * batchCount, 0.0f);
+    for (int j = 0; j < batchCount; j++) {
+        for (int i = 0; i < m; i++) {
+            int idx = i * batchCount + j;
+            float val = tri.d[idx] * xTrue[idx];
+            if (i > 0)     val += tri.dl[idx] * xTrue[(i - 1) * batchCount + j];
+            if (i < m - 1) val += tri.du[idx] * xTrue[(i + 1) * batchCount + j];
+            b[idx] = val;
+        }
+    }
+    return b;
+}
+
 }
 
 #endif

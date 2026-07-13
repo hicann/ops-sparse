@@ -201,7 +201,8 @@ if [ "${RUN_TEST}" == "ON" ]; then
 
         # 临时禁用 errexit 以捕获测试退出码
         set +e
-        LD_LIBRARY_PATH="${BUILD_OUT_PATH}/lib64:${LD_LIBRARY_PATH}" "${TEST_BIN}"
+        TEST_DIR="$(dirname "${TEST_BIN}")"
+        (cd "${TEST_DIR}" && LD_LIBRARY_PATH="${BUILD_OUT_PATH}/lib64:${LD_LIBRARY_PATH}" "./$(basename "${TEST_BIN}")")
         exit_code=$?
         set -e
         if [ $exit_code -eq 0 ]; then

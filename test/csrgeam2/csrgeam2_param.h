@@ -11,150 +11,73 @@
 #ifndef TEST_CSRGEAM2_CSRGEAM2_PARAM_H_
 #define TEST_CSRGEAM2_CSRGEAM2_PARAM_H_
 
-#include <cstdint>
-#include <exception>
-#include <fstream>
-#include <iostream>
-#include <sstream>
+#include "csv_loader.h"
 #include <string>
-#include <vector>
 
-// ============================================================================
-// Test parameter structure for aclsparseScsrgeam2
-// C = alpha * A + beta * B  (CSR format, FP32)
-// ============================================================================
+namespace sparse_test {
 
-struct CsrGeam2TestParam {
-    // Case identification
+struct CsrGeam2TestParam : public SparseTestParamBase {
     std::string case_name;
 
-    // Matrix dimensions
-    int m;
-    int n;
+    int m = 0;
+    int n = 0;
 
-    // Sparsity (0.0 = dense, 1.0 = empty/nnz=0)
-    double sparsity_a;
-    double sparsity_b;
+    double sparsity_a = 0.0;
+    double sparsity_b = 0.0;
 
-    // Random seeds for reproducible data generation
-    uint32_t seed_a;
-    uint32_t seed_b;
+    uint32_t seed_a = 0;
+    uint32_t seed_b = 0;
 
-    // Empty row probability for sparse pattern generation
-    double empty_row_prob_a;
-    double empty_row_prob_b;
+    double empty_row_prob_a = 0.0;
+    double empty_row_prob_b = 0.0;
 
-    // Scalar coefficients: C = alpha * A + beta * B
-    float alpha;
-    float beta;
+    float alpha = 0.0f;
+    float beta = 0.0f;
 
-    // Pointer mode: "HOST" or "DEVICE"
-    std::string pointer_mode;
+    std::string pointer_mode;  // "HOST" or "DEVICE"
 
-    // Index base per matrix (0 or 1)
-    int index_base_a;
-    int index_base_b;
-    int index_base_c;
+    int index_base_a = 0;
+    int index_base_b = 0;
+    int index_base_c = 0;
 
-    // Pattern: "random" (default) or "diag" (diagonal matrix via makeDiagCsr)
-    std::string pattern;
+    std::string pattern;       // "random" or "diag"
 
-    // Precision verification thresholds
-    double mere_threshold;    // MERE threshold (FP32 default: 2^-13 ~ 0.000122)
-    double mare_multiplier;  // MARE outlier limit = multiplier * MERE
-    double abs_threshold;    // Absolute error tolerance for boundary cases
+    double mere_threshold = 0.0;
+    double mare_multiplier = 0.0;
+    double abs_threshold = 0.0;
 
-    // Expected result: "SUCCESS" or an error status string
     std::string expect_result;
+
+    void fillCustom(const csv_map& row) override {
+        case_name          = parseString(row, "case_name");
+        m                  = parseInt(row, "m");
+        n                  = parseInt(row, "n");
+        sparsity_a         = parseDouble(row, "sparsity_a");
+        sparsity_b         = parseDouble(row, "sparsity_b");
+        seed_a             = static_cast<uint32_t>(parseInt(row, "seed_a"));
+        seed_b             = static_cast<uint32_t>(parseInt(row, "seed_b"));
+        empty_row_prob_a   = parseDouble(row, "empty_row_prob_a");
+        empty_row_prob_b   = parseDouble(row, "empty_row_prob_b");
+        alpha              = parseFloat(row, "alpha");
+        beta               = parseFloat(row, "beta");
+        pointer_mode       = parseString(row, "pointer_mode");
+        index_base_a       = parseInt(row, "index_base_a");
+        index_base_b       = parseInt(row, "index_base_b");
+        index_base_c       = parseInt(row, "index_base_c");
+        pattern            = parseString(row, "pattern");
+        mere_threshold     = parseDouble(row, "mere_threshold");
+        mare_multiplier    = parseDouble(row, "mare_multiplier");
+        abs_threshold      = parseDouble(row, "abs_threshold");
+        expect_result      = parseString(row, "expect_result");
+    }
+
+    std::string caseId() const override { return case_name; }
 };
 
-// ============================================================================
-// CSV path configuration
-// ============================================================================
+inline void PrintTo(const CsrGeam2TestParam& p, std::ostream* os) {
+    *os << p.case_name;
+}
 
-static std::string GetCsrGeam2CsvPath() {
-#ifdef CSRGEAM2_TEST_CSV_PATH
-    return CSRGEAM2_TEST_CSV_PATH;
-#else
-    return "csrgeam2_test.csv";
+}  // namespace sparse_test
+
 #endif
-}
-
-// ============================================================================
-// CSV parsing utilities
-// ============================================================================
-
-static std::string TrimStr(const std::string &s) {
-    size_t start = s.find_first_not_of(" \t\r\n");
-    if (start == std::string::npos) return "";
-    size_t end = s.find_last_not_of(" \t\r\n");
-    return s.substr(start, end - start + 1);
-}
-
-static std::vector<std::string> SplitCsvFields(const std::string &line) {
-    std::vector<std::string> fields;
-    std::stringstream ss(line);
-    std::string field;
-    while (std::getline(ss, field, ',')) {
-        fields.push_back(field);
-    }
-    return fields;
-}
-
-// ============================================================================
-// CSV Loader
-// Columns (in order):
-//   case_name, m, n, sparsity_a, sparsity_b, seed_a, seed_b,
-//   empty_row_prob_a, empty_row_prob_b, alpha, beta, pointer_mode,
-//   index_base_a, index_base_b, index_base_c, pattern,
-//   mere_threshold, mare_multiplier, abs_threshold, expect_result
-// ============================================================================
-
-static std::vector<CsrGeam2TestParam> LoadCsrGeam2CasesFromCsv() {
-    std::vector<CsrGeam2TestParam> cases;
-    std::string csvPath = GetCsrGeam2CsvPath();
-    std::ifstream ifs(csvPath);
-    if (!ifs.is_open()) {
-        std::cerr << "[CSV] Failed to open: " << csvPath << std::endl;
-        return cases;
-    }
-    std::string line;
-    bool isHeader = true;
-    while (std::getline(ifs, line)) {
-        line = TrimStr(line);
-        if (line.empty() || line[0] == '#') continue;
-        if (isHeader) { isHeader = false; continue; }
-        auto fields = SplitCsvFields(line);
-        if (fields.size() < 20) {
-            std::cerr << "[CSV] Skipping malformed line (" << fields.size()
-                      << " fields, expected 20): " << line << std::endl;
-            continue;
-        }
-        CsrGeam2TestParam p;
-        p.case_name = TrimStr(fields[0]);
-        try {
-            p.m = std::stoi(TrimStr(fields[1])); p.n = std::stoi(TrimStr(fields[2]));
-            p.sparsity_a = std::stod(TrimStr(fields[3])); p.sparsity_b = std::stod(TrimStr(fields[4]));
-            p.seed_a = static_cast<uint32_t>(std::stoul(TrimStr(fields[5])));
-            p.seed_b = static_cast<uint32_t>(std::stoul(TrimStr(fields[6])));
-            p.empty_row_prob_a = std::stod(TrimStr(fields[7])); p.empty_row_prob_b = std::stod(TrimStr(fields[8]));
-            p.alpha = std::stof(TrimStr(fields[9])); p.beta = std::stof(TrimStr(fields[10]));
-            p.pointer_mode     = TrimStr(fields[11]);
-            p.index_base_a = std::stoi(TrimStr(fields[12])); p.index_base_b = std::stoi(TrimStr(fields[13]));
-            p.index_base_c     = std::stoi(TrimStr(fields[14]));
-            p.pattern          = TrimStr(fields[15]);
-            p.mere_threshold = std::stod(TrimStr(fields[16])); p.mare_multiplier = std::stod(TrimStr(fields[17]));
-            p.abs_threshold    = std::stod(TrimStr(fields[18]));
-            p.expect_result    = TrimStr(fields[19]);
-        } catch (const std::exception &e) {
-            std::cerr << "[CSV] Skipping case '" << p.case_name
-                      << "': parse error: " << e.what() << std::endl;
-            continue;
-        }
-        cases.push_back(p);
-    }
-    std::cout << "[CSV] Loaded " << cases.size() << " test cases from " << csvPath << std::endl;
-    return cases;
-}
-
-#endif  // TEST_CSRGEAM2_CSRGEAM2_PARAM_H_

@@ -11,94 +11,39 @@
 #ifndef TEST_NNZ_SNNZ_SNNZ_PARAM_H_
 #define TEST_NNZ_SNNZ_SNNZ_PARAM_H_
 
-#include <cstdint>
-#include <fstream>
-#include <iostream>
-#include <sstream>
+#include "csv_loader.h"
 #include <string>
-#include <vector>
 
-// ============================================================================
-// Test parameter structure
-// ============================================================================
+namespace sparse_test {
 
-struct NnzTestParam {
+struct NnzTestParam : public SparseTestParamBase {
     std::string case_name;
-    int m;
-    int n;
+    int m = 0;
+    int n = 0;
     std::string dir;          // "ROW" or "COLUMN"
-    double density;
+    double density = 0.0;
     std::string distribution; // "mixed", "allzero", "allnonzero", "diag", "extreme"
-    uint32_t seed;
+    uint32_t seed = 0;
     std::string pointer_mode; // "DEVICE" or "HOST"
+
+    void fillCustom(const csv_map& row) override {
+        case_name    = parseString(row, "case_name");
+        m            = parseInt(row, "m");
+        n            = parseInt(row, "n");
+        dir          = parseString(row, "dir");
+        density      = parseDouble(row, "density");
+        distribution = parseString(row, "distribution");
+        seed         = static_cast<uint32_t>(parseInt(row, "seed"));
+        pointer_mode = parseString(row, "pointer_mode");
+    }
+
+    std::string caseId() const override { return case_name; }
 };
 
-// ============================================================================
-// CSV parsing utilities
-// ============================================================================
+inline void PrintTo(const NnzTestParam& p, std::ostream* os) {
+    *os << p.case_name;
+}
 
-static std::string GetCsvPath() {
-#ifdef SNNZ_TEST_CSV_PATH
-    return SNNZ_TEST_CSV_PATH;
-#else
-    return "snnz_test.csv";
+}  // namespace sparse_test
+
 #endif
-}
-
-static std::vector<std::string> SplitCsvLine(const std::string &line) {
-    std::vector<std::string> fields;
-    std::stringstream ss(line);
-    std::string field;
-    while (std::getline(ss, field, ',')) {
-        fields.push_back(field);
-    }
-    return fields;
-}
-
-static std::string TrimWhitespace(const std::string &s) {
-    size_t start = s.find_first_not_of(" \t\r\n");
-    if (start == std::string::npos) return "";
-    size_t end = s.find_last_not_of(" \t\r\n");
-    return s.substr(start, end - start + 1);
-}
-
-static std::vector<NnzTestParam> LoadTestCasesFromCsv() {
-    std::vector<NnzTestParam> cases;
-    std::string csvPath = GetCsvPath();
-    std::ifstream ifs(csvPath);
-    if (!ifs.is_open()) {
-        std::cerr << "[CSV] Failed to open: " << csvPath << std::endl;
-        return cases;
-    }
-
-    std::string line;
-    bool isHeader = true;
-    while (std::getline(ifs, line)) {
-        line = TrimWhitespace(line);
-        if (line.empty() || line[0] == '#') continue;
-        if (isHeader) {
-            isHeader = false;
-            continue;
-        }
-        auto fields = SplitCsvLine(line);
-        if (fields.size() < 7) {
-            std::cerr << "[CSV] Skipping malformed line: " << line << std::endl;
-            continue;
-        }
-        NnzTestParam p;
-        p.case_name = TrimWhitespace(fields[0]);
-        p.m = std::stoi(TrimWhitespace(fields[1]));
-        p.n = std::stoi(TrimWhitespace(fields[2]));
-        p.dir = TrimWhitespace(fields[3]);
-        p.density = std::stod(TrimWhitespace(fields[4]));
-        p.distribution = TrimWhitespace(fields[5]);
-        p.seed = static_cast<uint32_t>(std::stoul(TrimWhitespace(fields[6])));
-        p.pointer_mode = (fields.size() > 7) ? TrimWhitespace(fields[7]) : "DEVICE";
-        cases.push_back(p);
-    }
-
-    std::cout << "[CSV] Loaded " << cases.size() << " test cases from " << csvPath << std::endl;
-    return cases;
-}
-
-#endif  // TEST_NNZ_SNNZ_SNNZ_PARAM_H_

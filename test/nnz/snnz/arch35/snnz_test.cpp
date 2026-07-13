@@ -17,28 +17,16 @@
  * aclsparseSnnz counts non-zero elements per row or per column in a dense
  * column-major float matrix, plus the total non-zero count.
  *
- * Test parameters are loaded from snnz_test.csv at static initialization time.
+ * Test parameters are loaded from snnz_test.csv (copied to build dir by CMake).
  * Verification uses the test framework's Verifier with INTEGER precision mode.
+ *
+ * Entry point is shared via test/frame/test_main.cpp.
  */
 
-#include "sparse_test.h"
-#include "fill.h"
-#include "verify.h"
-#include "descriptor_manager.h"
+#include "test_common.h"
 #include "snnz_golden.h"
-#include "snnz_param.h"
 #include "snnz_npu_wrapper.h"
-
-#include "acl/acl.h"
-#include "cann_ops_sparse.h"
-
-#include <gtest/gtest.h>
-
-#include <cstdint>
-#include <iostream>
-#include <stdexcept>
-#include <string>
-#include <vector>
+#include "snnz_param.h"
 
 using namespace sparse_test;
 
@@ -64,40 +52,28 @@ static std::vector<float> GenerateMatrix(const NnzTestParam &p) {
 }
 
 // ============================================================================
-// Global ACL environment (uses framework's AclEnvScope)
-// ============================================================================
-
-class AclTestEnvironment : public testing::Environment {
-public:
-    void SetUp() override {
-        env_ = std::make_unique<AclEnvScope>();
-    }
-
-    void TearDown() override {
-        env_.reset();
-    }
-
-    aclrtStream stream() const { return env_->stream(); }
-
-private:
-    std::unique_ptr<AclEnvScope> env_;
-};
-
-static AclTestEnvironment *g_acl_env = nullptr;
-
-// ============================================================================
-// GTest parameterized fixture
+// GTest parameterized fixture (uses shared test_main.cpp entry point)
 // ============================================================================
 
 class NnzTest : public testing::TestWithParam<NnzTestParam> {
-protected:
-    void SetUp() override {
-        param_ = GetParam();
-        stream_ = g_acl_env->stream();
+public:
+    static void SetUpTestSuite() {
+        env_ = std::make_unique<AclEnvScope>();
     }
 
+    static void TearDownTestSuite() {
+        env_.reset();
+    }
+
+protected:
+    inline static std::unique_ptr<AclEnvScope> env_;
     NnzTestParam param_;
     aclrtStream stream_ = nullptr;
+
+    void SetUp() override {
+        param_ = GetParam();
+        stream_ = env_->stream();
+    }
 };
 
 // ============================================================================
@@ -169,27 +145,15 @@ TEST_P(NnzTest, BitExact) {
 }
 
 // ============================================================================
-// Instantiate test suite from CSV
+// Instantiate test suite from CSV (loaded via public csv_loader.h)
 // ============================================================================
-
-static std::vector<NnzTestParam> g_test_cases = LoadTestCasesFromCsv();
 
 INSTANTIATE_TEST_SUITE_P(
     NnzCases,
     NnzTest,
-    testing::ValuesIn(g_test_cases),
+    testing::ValuesIn(GetCasesFromCsv<NnzTestParam>("snnz_test.csv")),
     [](const testing::TestParamInfo<NnzTestParam> &info) {
         return info.param.case_name;
     }
 );
 
-// ============================================================================
-// main
-// ============================================================================
-
-int main(int argc, char **argv) {
-    testing::InitGoogleTest(&argc, argv);
-    g_acl_env = new AclTestEnvironment();
-    testing::AddGlobalTestEnvironment(g_acl_env);
-    return RUN_ALL_TESTS();
-}

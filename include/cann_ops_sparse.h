@@ -798,6 +798,62 @@ aclsparseStatus_t aclsparseScsrgeam2(
     const int *csrSortedColIndB, const aclsparseMatDescr_t descrC, float *csrSortedValC,
     int *csrSortedRowPtrC, int *csrSortedColIndC, void *pBuffer);
 
+// ============================================================================
+// Legacy API: aclsparseSgtsvInterleavedBatch
+// ============================================================================
+
+/**
+ * @brief Solve a batch of tridiagonal linear systems with interleaved data layout.
+ *
+ * Solves A^(k) * x^(k) = b^(k) for k = 0, ..., batchCount-1 using the Thomas
+ * algorithm (algo=0). Each A^(k) is an m x m tridiagonal matrix defined by
+ * lower diagonal dl, main diagonal d, and upper diagonal du.
+ * Data layout: row-major interleaved, array[row * batchCount + batch].
+ * dl[0][*] must be 0, du[m-1][*] must be 0 (user responsibility).
+ *
+ * The Thomas algorithm is a simplified LU decomposition without pivoting and
+ * is numerically stable only for diagonally-dominant or well-conditioned
+ * tridiagonal systems. If any diagonal element becomes zero (or near-zero)
+ * during the forward sweep, the algorithm cannot produce a valid solution
+ * and each affected batch will be written with its input b left unchanged
+ * (no NaN/Inf propagation, but the output is undefined for that batch).
+ * Users MUST ensure the input tridiagonal matrices are well-conditioned.
+ *
+ * @param handle        IN, HOST, aclsparse handle.
+ * @param algo          IN, HOST, algorithm selector (0 = Thomas).
+ * @param m             IN, HOST, system size (rows = cols).
+ * @param dl            IN/OUT, DEVICE, sub-diagonal [m * batchCount].
+ * @param d             IN/OUT, DEVICE, main diagonal [m * batchCount].
+ * @param du            IN/OUT, DEVICE, super-diagonal [m * batchCount].
+ * @param x             IN/OUT, DEVICE, right-hand side b on input, solution x on output [m * batchCount].
+ * @param batchCount    IN, HOST, number of systems.
+ * @param pBuffer       IN, DEVICE, workspace buffer (128-byte aligned).
+ * @return aclsparseStatus_t
+ */
+aclsparseStatus_t aclsparseSgtsvInterleavedBatch(
+    aclsparseHandle_t handle, int algo, int m,
+    float *dl, float *d, float *du, float *x,
+    int batchCount, void *pBuffer);
+
+/**
+ * @brief Query workspace buffer size for aclsparseSgtsvInterleavedBatch.
+ *
+ * @param handle              IN, HOST, aclsparse handle.
+ * @param algo                IN, HOST, algorithm selector (0 = Thomas).
+ * @param m                   IN, HOST, system size (m >= 1).
+ * @param dl                  IN, DEVICE, sub-diagonal (query ignores pointer; may be NULL).
+ * @param d                   IN, DEVICE, main diagonal (query ignores pointer; may be NULL).
+ * @param du                  IN, DEVICE, super-diagonal (query ignores pointer; may be NULL).
+ * @param x                   IN, DEVICE, right-hand side (query ignores pointer; may be NULL).
+ * @param batchCount          IN, HOST, number of systems (>= 1).
+ * @param pBufferSizeInBytes  OUT, HOST, required workspace size in bytes.
+ * @return aclsparseStatus_t
+ */
+aclsparseStatus_t aclsparseSgtsvInterleavedBatch_bufferSizeExt(
+    aclsparseHandle_t handle, int algo, int m,
+    const float *dl, const float *d, const float *du, const float *x,
+    int batchCount, size_t *pBufferSizeInBytes);
+
 #ifdef __cplusplus
 }
 #endif
