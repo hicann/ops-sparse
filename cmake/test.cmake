@@ -33,6 +33,8 @@ function(ops_sparse_add_test operator link_lib)
 
     if(NOT _test_src)
         message(STATUS "[test/${operator}] no test sources for SOC=${SOC_VERSION} (SOC_ARCH_DIRS=${SOC_ARCH_DIRS}), skipping ${target}")
+        file(APPEND ${CMAKE_BINARY_DIR}/test/skipped_tests.list
+            "${operator}|no test sources for SOC=${SOC_VERSION} (arch=${SOC_ARCH_DIRS})\n")
         return()
     endif()
 
@@ -112,12 +114,16 @@ function(ops_sparse_add_gtest_tests operator link_lib)
 
     if(NOT _test_src)
         message(STATUS "[test/${operator}] no test sources for SOC=${SOC_VERSION} (SOC_ARCH_DIRS=${SOC_ARCH_DIRS}), skipping ${target}")
+        file(APPEND ${CMAKE_BINARY_DIR}/test/skipped_tests.list
+            "${operator}|no test sources for SOC=${SOC_VERSION} (arch=${SOC_ARCH_DIRS})\n")
         return()
     endif()
 
     if(NOT IS_DIRECTORY "${CMAKE_SOURCE_DIR}/sparse/${operator}/${_src_arch}")
         if(ARG_WARN_ON_MISSING_SRC)
             message(WARNING "[test/${operator}] sparse/${operator}/${_src_arch} not found, skipping ${target}")
+            file(APPEND ${CMAKE_BINARY_DIR}/test/skipped_tests.list
+                "${operator}|sparse/${operator}/${_src_arch} not found for SOC=${SOC_VERSION}\n")
             return()
         else()
             message(FATAL_ERROR "[test/${operator}] test arch '${_src_arch}' has no matching src at sparse/${operator}/${_src_arch}")
