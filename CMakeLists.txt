@@ -101,21 +101,27 @@ if(ALL_SPARSELT_SRC_FILES)
         PROPERTIES LANGUAGE CXX
     )
     target_include_directories(${OPS_SPARSELT} PRIVATE
+        ./include
+        ./sparseLt
+        ./sparseLt/common
         ${ASCEND_CANN_PACKAGE_PATH}/pkg_inc/op_common/
         ${ASCEND_CANN_PACKAGE_PATH}/pkg_inc/base/
         ${ASCEND_CANN_PACKAGE_PATH}/pkg_inc/
         ${ASCEND_CANN_PACKAGE_PATH}/include/op_common
-        ${ASCEND_CANN_PACKAGE_PATH}/aarch64-linux/asc/include/utils
-        ${ASCEND_CANN_PACKAGE_PATH}/aarch64-linux/asc/include
-        ./include
-        ./sparseLt
+        ${ASCEND_CANN_PACKAGE_PATH}/${CMAKE_SYSTEM_PROCESSOR}-linux/include
+        ${ASCEND_CANN_PACKAGE_PATH}/${CMAKE_SYSTEM_PROCESSOR}-linux/asc/include/utils
+        ${ASCEND_CANN_PACKAGE_PATH}/${CMAKE_SYSTEM_PROCESSOR}-linux/asc/include
     )
     target_compile_options(${OPS_SPARSELT} PRIVATE
         $<$<COMPILE_LANGUAGE:ASC>:--npu-arch=${NPU_ARCH}>
     )
+    target_link_directories(${OPS_SPARSELT} PRIVATE
+        ${ASCEND_CANN_PACKAGE_PATH}/${CMAKE_SYSTEM_PROCESSOR}-linux/lib64
+    )
     target_link_libraries(${OPS_SPARSELT} PRIVATE
         tiling_api
         platform
+        ascendcl
     )
 endif()
 
@@ -164,6 +170,11 @@ target_link_libraries(${OPS_SPARSE} PRIVATE
 install(TARGETS ${OPS_SPARSE}
     LIBRARY DESTINATION lib64
 )
+if(TARGET ${OPS_SPARSELT})
+    install(TARGETS ${OPS_SPARSELT}
+        LIBRARY DESTINATION lib64
+    )
+endif()
 install(FILES
     include/cann_ops_sparse.h
     include/cann_ops_sparseLt.h
