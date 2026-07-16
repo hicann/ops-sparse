@@ -57,9 +57,9 @@ aclsparseStatus_t aclsparseSgtsvInterleavedBatch(
 | handle | 输入 | aclsparseHandle_t | ops-sparse 库上下文句柄，携带 stream | Host 内存 |
 | algo | 输入 | int | 算法选择：0 = Thomas 算法（当前仅支持此选项） | Host 内存 |
 | m | 输入 | int | 线性系统大小（行数 = 列数），需 ≥ 1 | Host 内存 |
-| dl | 输入/输出 | float* | 下对角线数组，大小为 m × batchCount（row-major interleaved）。`dl[0][k]`（即 `dl[k]`，k = 0..batchCount-1）为越界元素，调用前必须置 0 | Device 内存 |
-| d | 输入/输出 | float* | 主对角线数组，大小为 m × batchCount（row-major interleaved），不可为 nullptr | Device 内存 |
-| du | 输入/输出 | float* | 上对角线数组，大小为 m × batchCount（row-major interleaved）。`du[m-1][k]`（即 `du[(m-1)*batchCount + k]`）为越界元素，调用前必须置 0 | Device 内存 |
+| dl | 输入 | float* | 下对角线数组，大小为 m × batchCount（row-major interleaved）。`dl[0][k]`（即 `dl[k]`，k = 0..batchCount-1）为越界元素，调用前必须置 0 | Device 内存 |
+| d | 输入 | float* | 主对角线数组，大小为 m × batchCount（row-major interleaved），不可为 nullptr | Device 内存 |
+| du | 输入 | float* | 上对角线数组，大小为 m × batchCount（row-major interleaved）。`du[m-1][k]`（即 `du[(m-1)*batchCount + k]`）为越界元素，调用前必须置 0 | Device 内存 |
 | x | 输入/输出 | float* | 右端项 b（输入）/ 解 x（输出），大小为 m × batchCount（row-major interleaved）。输入时为右端向量 b，计算完成后原地覆盖为解向量 x | Device 内存 |
 | batchCount | 输入 | int | 批次数（独立方程组个数），需 ≥ 1 | Host 内存 |
 | pBuffer | 输入 | void* | 工作区 buffer，地址必须 128 字节对齐。当 m = 1 时可为 nullptr；当 m > 1 时必须为有效指针，大小不少于 bufferSizeExt 返回的字节数 | Device 内存 |
@@ -74,7 +74,7 @@ aclsparseStatus_t aclsparseSgtsvInterleavedBatch(
 - pBuffer 大小必须 ≥ `aclsparseSgtsvInterleavedBatch_bufferSizeExt` 返回值
 - `dl[0][k]`（k = 0..batchCount-1）必须在调用前置 0
 - `du[m-1][k]`（k = 0..batchCount-1）必须在调用前置 0
-- Thomas 算法（algo=0）为**无 pivoting 的消元法**，仅对**对角占优**或**良态（well-conditioned）**的三对角矩阵数值稳定。若前向消元过程中任一行的 d'[i] 的绝对值接近 0（即矩阵非良态或奇异），算子会提前停止该 batch 的后续计算以避免 NaN/Inf 传播——该 batch 的最终 x 为未定义输出（保持 b 或前向部分状态）。**调用方必须保证输入的三对角矩阵良态，否则该 batch 的精度不可预期**。
+- Thomas 算法（algo=0）为**无 pivoting 的消元法**，仅对**对角占优**或**良态（well-conditioned）**的三对角矩阵数值稳定。算子不对奇异矩阵做任何保护：若前向消元或后向回代过程中任一主元 d'[i] 为零或接近零，IEEE-754 除零将在输出中产生 Inf/NaN。**调用方必须保证输入的三对角矩阵良态，否则该 batch 的精度不可预期**。
 
 ### aclsparseSgtsvInterleavedBatch_bufferSizeExt
 

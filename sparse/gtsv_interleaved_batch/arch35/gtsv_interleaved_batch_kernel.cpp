@@ -34,19 +34,15 @@
 #include "simt_api/asc_simt.h"
 #include "gtsv_interleaved_batch_kernel.h"
 
-namespace {
-// 奇异矩阵保护阈值：若 Thomas 算法前向/后向消元过程中 d' 的绝对值小
-// 于此阈值，则 early-return，保留 x 为当前（可能是部分）状态，避免
-// 0/0 除法引发 NaN/Inf 在后续行中累积传播。此值远小于 FP32 最小正
-// 规数 (≈ 1.2e-38) 的平方根，不会截断任何正常矩阵。
-constexpr float kSingularEps = 1e-20f;
-} // namespace
-
 // ---------------------------------------------------------------------------
 // Backward substitution helper. Called from GtsvProcessOneBatch after the
 // forward sweep has completed d'[1..m-1] / b'[1..m-1] write-back.
-// |d_prev| >= kSingularEps for m >= 2 is guaranteed by forward (which bails
-// out early otherwise).
+//
+// NOTE: no singularity guards on d' values. This matches cuSPARSE behavior:
+//   - For well-conditioned inputs, d' stays well away from 0.
+//   - For singular inputs, IEEE-754 division yields Inf/NaN, which is the
+//     correct "this matrix is singular" signal (cuSPARSE documents that the
+//     user must ensure input is well-conditioned).
 //
 // State on entry:
 //   d_prev = d'[m-1]  (computed in forward loop; still in register)
@@ -79,27 +75,20 @@ GtsvBackwardSub(
     // 每次迭代只需一次 64-bit 整数减法。
     int64_t idx = static_cast<int64_t>(m - 2) * bc + myBatch;
     for (int32_t i = m - 2; i >= 1; i--) {
-        // x[idx] 当前持有 b'[i] (forward 写入)
-        // ws[idx] 当前持有 d'[i] (forward 写入)
         const float b_prime_i = xGm[idx];
         const float d_prime_i = wsGm[idx];
         const float du_i      = duGm[idx];
-        // 奇异保护：若 d_prime_i 过小，保留已写回的 x[i+1..m-1]，early return
-        if (d_prime_i > -kSingularEps && d_prime_i < kSingularEps) return;
         const float x_i = (b_prime_i - du_i * x_next) / d_prime_i;
         x_next = x_i;
-        xGm[idx] = x_i;  // 最终 x[i] 覆写 b'[i]
+        xGm[idx] = x_i;
         idx -= bc;
     }
 
     // row 0: x[0] = (b'[0] - du[0] * x[1]) / d'[0]
-    //   d'[0] = d[0] (forward 不修改 d[0]，直接读)
-    //   b'[0] = 原 b[0] = x[0] (forward 不覆写 x[0]，因为 row 0 的 b'[0] 就等于 b[0])
     {
         const float b_prime_0 = xGm[myBatch];
         const float du_0      = duGm[myBatch];
         const float d_prime_0 = dGm[myBatch];
-        if (d_prime_0 > -kSingularEps && d_prime_0 < kSingularEps) return;
         const float x_0 = (b_prime_0 - du_0 * x_next) / d_prime_0;
         xGm[myBatch] = x_0;
     }
@@ -110,11 +99,9 @@ GtsvBackwardSub(
 // identified by myBatch in interleaved layout). Called from the grid-stride
 // entry below after thread-to-batch mapping.
 //
-// Early-returns (with this batch marked undefined by contract) when the
-// diagonal element |d[0]| or any forward-sweep |d'[i]| falls below
-// kSingularEps. In that case the x output for this batch stays at whatever
-// partial state the forward sweep produced — input b if forward never
-// wrote anything, otherwise the last successfully-written row preserved.
+// NOTE: no singularity guards. For singular/near-singular inputs, IEEE-754
+// division by zero produces Inf/NaN that propagates through the output.
+// The caller must ensure input matrices are well-conditioned.
 //
 // State at GtsvBackwardSub call time:
 //   d_prev = d'[m-1]  (computed in forward loop; still in register)
@@ -133,22 +120,16 @@ GtsvProcessOneBatch(
     __gm__ float *wsGm,
     int32_t m, int32_t bc, uint32_t myBatch)
 {
-    // m=1 边界：直接 x[0] = b[0] / d[0]
+    // m=1 boundary: x[0] = b[0] / d[0]
     if (m == 1) {
         const float d0 = dGm[myBatch];
-        // 奇异保护：若 |d0| 过小则不除，保留 x[0] 为原 b[0]（避免 NaN）
-        if (d0 > -kSingularEps && d0 < kSingularEps) return;
         xGm[myBatch] = xGm[myBatch] / d0;
         return;
     }
 
     // Forward sweep (row 0..m-1)
-    // 线程局部寄存器保存 d'[i-1] 和 b'[i-1]，无需 GM 跨行传递。
     float d_prev = dGm[myBatch];              // d'[0] = d[0]
-    float b_prev = xGm[myBatch];              // b'[0] = b[0] (原 x 持有 b)
-    // x[0] 不变：x[0] 持有 b[0]，forward 后持有 b'[0]（值相同）
-    // 奇异保护：若 |d_prev| 过小，前向消元无法继续，保留 x 在初始 b 状态
-    if (d_prev > -kSingularEps && d_prev < kSingularEps) return;
+    float b_prev = xGm[myBatch];              // b'[0] = b[0]
 
     // 性能优化：用递增 idx 取代循环内 (int64_t)i * bc，
     // 每次迭代只需一次 64-bit 整数加法（而非乘 + 加）。
@@ -164,17 +145,14 @@ GtsvProcessOneBatch(
         d_prev = d_i - w * du_p;
         b_prev = b_i - w * b_prev;
 
-        // 奇异保护：d_prev 过小则后续消元失败；保留 x[1..i-1] 已写的前向状态，early return
-        if (d_prev > -kSingularEps && d_prev < kSingularEps) return;
-
-        wsGm[idx] = d_prev;  // 持久化 d'[i] 到 workspace，供 backward 读取
-        xGm[idx]  = b_prev;  // in-place: b'[i] 写入 x[i]，覆盖原 b[i]
+        wsGm[idx] = d_prev;
+        xGm[idx]  = b_prev;
 
         idxPrev = idx;
         idx += bc;
     }
 
-    // Backward substitution (row m-1..0) — 拆分到 helper 以控制 NBNC
+    // Backward substitution (row m-1..0)
     GtsvBackwardSub(dGm, duGm, xGm, wsGm, m, bc, myBatch, d_prev, b_prev);
 }
 
@@ -243,7 +221,7 @@ private:
 };
 
 // ---------------------------------------------------------------------------
-// __global__ 入口：由 kernel_do 通过 <<<numBlocks, 0, stream>>> 启动。
+// __global__ 入口：由 kernel_do 通过 <<<numBlocks, nullptr, stream>>> 启动。
 // ---------------------------------------------------------------------------
 extern "C" __global__ __aicore__ void gtsv_interleaved_batch_kernel(
     GM_ADDR dl, GM_ADDR d, GM_ADDR du, GM_ADDR x, GM_ADDR workspace,
@@ -265,6 +243,6 @@ void gtsv_interleaved_batch_kernel_do(
     uint32_t numBlocks,
     void *stream)
 {
-    gtsv_interleaved_batch_kernel<<<numBlocks, 0, stream>>>(
+    gtsv_interleaved_batch_kernel<<<numBlocks, nullptr, stream>>>(
         dl, d, du, x, workspace, tiling, static_cast<int32_t>(numBlocks));
 }

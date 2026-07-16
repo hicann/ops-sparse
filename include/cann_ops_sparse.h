@@ -813,11 +813,11 @@ aclsparseStatus_t aclsparseScsrgeam2(
  *
  * The Thomas algorithm is a simplified LU decomposition without pivoting and
  * is numerically stable only for diagonally-dominant or well-conditioned
- * tridiagonal systems. If any diagonal element becomes zero (or near-zero)
- * during the forward sweep, the algorithm cannot produce a valid solution
- * and each affected batch will be written with its input b left unchanged
- * (no NaN/Inf propagation, but the output is undefined for that batch).
- * Users MUST ensure the input tridiagonal matrices are well-conditioned.
+ * tridiagonal systems. No singularity guards are applied: if any diagonal
+ * element becomes zero during forward sweep or backward substitution,
+ * IEEE-754 division by zero produces Inf/NaN in the output. The caller
+ * must ensure input matrices are well-conditioned; otherwise the solution
+ * for that batch is undefined.
  *
  * @param handle        IN, HOST, aclsparse handle.
  * @param algo          IN, HOST, algorithm selector (0 = Thomas).
@@ -852,6 +852,72 @@ aclsparseStatus_t aclsparseSgtsvInterleavedBatch(
 aclsparseStatus_t aclsparseSgtsvInterleavedBatch_bufferSizeExt(
     aclsparseHandle_t handle, int algo, int m,
     const float *dl, const float *d, const float *du, const float *x,
+    int batchCount, size_t *pBufferSizeInBytes);
+
+// ============================================================================
+// Legacy API: aclsparseSgpsvInterleavedBatch
+// ============================================================================
+
+/**
+ * @brief Solve a batch of pentadiagonal linear systems with interleaved data layout.
+ *
+ * Solves A^(k) * x^(k) = b^(k) for k = 0, ..., batchCount-1 using QR
+ * factorization with Givens rotations (algo=0). Each A^(k) is an m x m
+ * pentadiagonal matrix defined by five diagonals: ds (distance-2 sub),
+ * dl (sub), d (main), du (super), dw (distance-2 super).
+ * Data layout: row-major interleaved, array[row * batchCount + batch].
+ * Boundary conditions (user responsibility):
+ *   ds[0][*] = ds[1][*] = 0, dl[0][*] = 0,
+ *   du[m-1][*] = 0, dw[m-2][*] = dw[m-1][*] = 0.
+ *
+ * The QR algorithm applies a sequence of Givens rotations to eliminate the
+ * two sub-diagonals (ds and dl), yielding an upper triangular band matrix R
+ * with fill-in creating 4th and 5th upper diagonals (d4' = R[i,i+3] and
+ * d5' = R[i,i+4]). The system is then solved by back-substitution. The algorithm is numerically stable for
+ * general pentadiagonal systems, including non-diagonally-dominant matrices.
+ *
+ * Singular/near-singular input: no singularity guards are applied. If the
+ * matrix is singular or near-singular, IEEE-754 division by zero produces
+ * Inf/NaN in the output. The caller must ensure input matrices are
+ * well-conditioned; otherwise the solution for that batch is undefined.
+ *
+ * @param handle        IN, HOST, aclsparse handle.
+ * @param algo          IN, HOST, algorithm selector (0 = QR/Givens rotation).
+ * @param m             IN, HOST, system size (rows = cols), m >= 1.
+ * @param ds            IN, DEVICE, distance-2 sub-diagonal [m * batchCount].
+ * @param dl            IN, DEVICE, sub-diagonal [m * batchCount].
+ * @param d             IN, DEVICE, main diagonal [m * batchCount].
+ * @param du            IN, DEVICE, super-diagonal [m * batchCount].
+ * @param dw            IN, DEVICE, distance-2 super-diagonal [m * batchCount].
+ * @param x             IN/OUT, DEVICE, right-hand side b on input, solution x on output [m * batchCount].
+ * @param batchCount    IN, HOST, number of systems, batchCount >= 1.
+ * @param pBuffer       IN, DEVICE, workspace buffer (128-byte aligned), size from bufferSizeExt.
+ * @return aclsparseStatus_t
+ */
+aclsparseStatus_t aclsparseSgpsvInterleavedBatch(
+    aclsparseHandle_t handle, int algo, int m,
+    float *ds, float *dl, float *d, float *du, float *dw, float *x,
+    int batchCount, void *pBuffer);
+
+/**
+ * @brief Query workspace buffer size for aclsparseSgpsvInterleavedBatch.
+ *
+ * @param handle              IN, HOST, aclsparse handle.
+ * @param algo                IN, HOST, algorithm selector (0 = QR/Givens rotation).
+ * @param m                   IN, HOST, system size (m >= 1).
+ * @param ds                  IN, DEVICE, distance-2 sub-diagonal (query ignores pointer; may be NULL).
+ * @param dl                  IN, DEVICE, sub-diagonal (query ignores pointer; may be NULL).
+ * @param d                   IN, DEVICE, main diagonal (query ignores pointer; may be NULL).
+ * @param du                  IN, DEVICE, super-diagonal (query ignores pointer; may be NULL).
+ * @param dw                  IN, DEVICE, distance-2 super-diagonal (query ignores pointer; may be NULL).
+ * @param x                   IN, DEVICE, right-hand side (query ignores pointer; may be NULL).
+ * @param batchCount          IN, HOST, number of systems (>= 1).
+ * @param pBufferSizeInBytes  OUT, HOST, required workspace size in bytes.
+ * @return aclsparseStatus_t
+ */
+aclsparseStatus_t aclsparseSgpsvInterleavedBatch_bufferSizeExt(
+    aclsparseHandle_t handle, int algo, int m,
+    const float *ds, const float *dl, const float *d, const float *du, const float *dw, const float *x,
     int batchCount, size_t *pBufferSizeInBytes);
 
 #ifdef __cplusplus

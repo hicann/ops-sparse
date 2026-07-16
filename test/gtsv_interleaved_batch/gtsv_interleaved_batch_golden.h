@@ -49,9 +49,11 @@ inline std::vector<float> ThomasSolveGolden(
     std::vector<float> x(total, 0.0f);
     if (m <= 0 || batchCount <= 0) return x;
 
-    // Each batch is solved independently in FP64
+    // Each batch is solved independently in FP64.
+    // No singularity guards: matches kernel and cuSPARSE behavior.
+    // For singular inputs, IEEE-754 division by zero produces Inf/NaN,
+    // which propagates through the output naturally.
     for (int j = 0; j < batchCount; j++) {
-        // Allocate work arrays for this batch (FP64)
         std::vector<double> c_prime(m, 0.0);
         std::vector<double> b_prime(m, 0.0);
         std::vector<double> x_batch(m, 0.0);
@@ -61,17 +63,11 @@ inline std::vector<float> ThomasSolveGolden(
             double d0  = static_cast<double>(d[0 * batchCount + j]);
             double du0 = static_cast<double>(du[0 * batchCount + j]);
             double b0  = static_cast<double>(b[0 * batchCount + j]);
-            if (std::abs(d0) < 1e-300) {
-                // Diagonal zero -> singular, return NaN marker
-                for (int i = 0; i < m; i++) x[i * batchCount + j] = 0.0f;
-                continue;
-            }
             c_prime[0] = du0 / d0;
             b_prime[0] = b0 / d0;
         }
 
         // Forward elimination: rows 1..m-1
-        bool singular = false;
         for (int i = 1; i < m; i++) {
             double dl_i = static_cast<double>(dl[i * batchCount + j]);
             double d_i  = static_cast<double>(d[i * batchCount + j]);
@@ -79,20 +75,10 @@ inline std::vector<float> ThomasSolveGolden(
             double b_i  = static_cast<double>(b[i * batchCount + j]);
 
             double denom = d_i - dl_i * c_prime[i - 1];
-            if (std::abs(denom) < 1e-300) {
-                singular = true;
-                break;
-            }
             if (i < m - 1) {
                 c_prime[i] = du_i / denom;
             }
             b_prime[i] = (b_i - dl_i * b_prime[i - 1]) / denom;
-        }
-
-        if (singular) {
-            std::cerr << "[Golden] WARN: singular matrix at batch=" << j << std::endl;
-            for (int i = 0; i < m; i++) x[i * batchCount + j] = 0.0f;
-            continue;
         }
 
         // Back substitution

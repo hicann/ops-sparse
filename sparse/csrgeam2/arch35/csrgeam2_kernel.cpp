@@ -105,9 +105,6 @@ struct Csrgeam2DispatcherBase {
 //   rowStart, rowEnd: 本 core 负责的行范围（由 dispatcher 根据 GetBlockIdx() 计算）
 //   threadsPerCore:   本 core 的 SIMT 线程数（用于 grid-stride 步长）
 //
-// 注意：dav-3510 上 __simt_vf__ 内的 blockDim.x 返回外层 grid 的 blockDim
-// （即 numBlocks），而非 asc_vf_call 的 dim3 参数。因此禁止使用
-// blockDim.x / blockIdx.x，改用显式传入的 threadsPerCore 和 threadIdx.x。
 __simt_vf__ __aicore__ __launch_bounds__(kCsrgeam2MaxThreadsPerBlock) inline void
 Csrgeam2NnzSimtCompute(
     __gm__ const int32_t *rowPtrA,
