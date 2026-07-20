@@ -1,0 +1,24 @@
+# TEMPLATE: CSV 用例表模板
+# 列名 = API 参数名 + 框架公共列，顺序与接口声明一致
+# 枚举值写 ACL_SPARSE_ 完整前缀
+# 数组列的值为 fill.h 中的生成函数描述（如 RANDOM_NORM_1E6）
+
+# 框架公共列（必填 case_name，其余可选）：
+#   case_name      — 用例名（GTest 显示名）
+#   description    — 语义描述（可选）
+#   expect_result  — 期望返回码（默认 ACL_SPARSE_STATUS_SUCCESS）
+#   random_seed    — 随机种子（默认 0，用于 RNG 可复现性）
+
+# TEMPLATE: 按算子 API 参数调整列名和用例
+# 示例（以 SpMV 为例）：
+case_name,description,m,n,sparsity,alpha,beta,transpose,compute_type,mere_threshold,mare_multiplier,expect_result,random_seed
+TC_L0_01,handle_null,4,4,0.5,1.0,0.0,false,ACL_FLOAT,1e-5,10,ACL_SPARSE_STATUS_HANDLE_IS_NULLPTR,0
+TC_L0_02,basic_4x4,4,4,0.5,1.0,0.0,false,ACL_FLOAT,1e-5,10,ACL_SPARSE_STATUS_SUCCESS,42
+TC_L0_03,wide_8x16,8,16,0.3,1.0,0.0,false,ACL_FLOAT,1e-5,10,ACL_SPARSE_STATUS_SUCCESS,42
+TC_L0_04,tall_16x8,16,8,0.3,1.0,0.0,false,ACL_FLOAT,1e-5,10,ACL_SPARSE_STATUS_SUCCESS,42
+TC_L1_01,large_2048,2048,2048,0.1,1.0,0.0,false,ACL_FLOAT,1e-5,10,ACL_SPARSE_STATUS_SUCCESS,100
+TC_L1_02,single_row,1,100,0.1,1.0,0.0,false,ACL_FLOAT,1e-5,10,ACL_SPARSE_STATUS_SUCCESS,100
+TC_L1_03,single_col,100,1,0.1,1.0,0.0,false,ACL_FLOAT,1e-5,10,ACL_SPARSE_STATUS_SUCCESS,100
+TC_L1_04,empty_matrix,10,10,0.0,1.0,0.0,false,ACL_FLOAT,1e-5,10,ACL_SPARSE_STATUS_SUCCESS,42
+TC_L1_05,transpose,64,64,0.2,1.0,0.0,true,ACL_FLOAT,1e-5,10,ACL_SPARSE_STATUS_SUCCESS,200
+TC_L1_06,alpha_beta,64,64,0.2,2.5,1.5,false,ACL_FLOAT,1e-5,10,ACL_SPARSE_STATUS_SUCCESS,200
