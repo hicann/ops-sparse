@@ -1,0 +1,40 @@
+case_name,m,n,ldb,is_diag_dominant,value_lo,value_hi,seed,expect_result,mere_threshold,mare_multiplier
+# L0: Basic functionality (m <= 32)
+L0_4x1_diagdom,4,1,4,1,0,0,100,SUCCESS,1e-5,10.0
+L0_8x3_diagdom,8,3,8,1,0,0,101,SUCCESS,1e-5,10.0
+L0_5x1_diagdom,5,1,5,1,0,0,102,SUCCESS,1e-5,10.0
+L0_16x1_diagdom,16,1,16,1,0,0,103,SUCCESS,1e-5,10.0
+L0_3x1_diagdom,3,1,3,1,0,0,104,SUCCESS,1e-5,10.0
+L0_4x1_identity,4,1,4,0,1,1,105,SUCCESS,1e-5,10.0
+L0_7x7_random,7,7,7,0,-3,3,106,SUCCESS,1e-5,10.0
+L0_32x2_diagdom,32,2,32,1,0,0,107,SUCCESS,1e-5,10.0
+# L1: Full coverage + boundary + large shape
+# Boundary: min m + multi-RHS, ldb > m, special diagonal types
+L1_3x10_diagdom,3,10,3,1,0,0,200,SUCCESS,1e-5,10.0
+L1_4x1_ldb8_diagdom,4,1,8,1,0,0,201,SUCCESS,1e-5,10.0
+L1_64x1_const,64,1,64,0,4,4,202,SUCCESS,1e-5,10.0
+L1_100x1_diagdom,100,1,100,1,0,0,203,SUCCESS,1e-5,10.0
+L1_128x16_diagdom,128,16,128,1,0,0,204,SUCCESS,1e-5,10.0
+L1_256x1_random,256,1,256,0,-3,3,205,SUCCESS,1e-4,10.0
+L1_512x32_diagdom,512,32,512,1,0,0,206,SUCCESS,1e-5,10.0
+# Non-power-of-2 near large boundaries
+L1_1000x1_diagdom,1000,1,1000,1,0,0,207,SUCCESS,1e-5,10.0
+L1_2000x1_diagdom,2000,1,2000,1,0,0,208,SUCCESS,1e-5,30.0
+# Large shape: m >= 1024 (including 2048, 4096)
+L1_1024x1_diagdom,1024,1,1024,1,0,0,209,SUCCESS,1e-5,10.0
+L1_2048x1_diagdom,2048,1,2048,1,0,0,210,SUCCESS,1e-5,10.0
+L1_4096x1_diagdom,4096,1,4096,1,0,0,211,SUCCESS,1e-5,30.0
+# Large shape + multi-RHS
+L1_1024x64_diagdom,1024,64,1024,1,0,0,212,SUCCESS,1e-5,30.0
+# Large RHS: n >= 10000 (vector class, including 100000)
+L1_1024x10000_diagdom,1024,10000,1024,1,0,0,213,SUCCESS,1e-5,50.0
+L1_1024x100000_diagdom,1024,100000,1024,1,0,0,214,SUCCESS,1e-5,50.0
+# Reproducibility: IDENTITY with new seed
+L1_4x1_identity_r2,4,1,4,0,1,1,215,SUCCESS,1e-5,10.0
+# LARGE_M: m >= 8192 (SIMT Thomas, direct GM access, no UB limit)
+L1_8192x1_diagdom,8192,1,8192,1,0,0,216,SUCCESS,5e-4,10.0
+L1_8192x4_diagdom,8192,4,8192,1,0,0,217,SUCCESS,5e-4,10.0
+L1_16384x1_diagdom,16384,1,16384,1,0,0,218,SUCCESS,1e-3,10.0
+L1_16384x2_diagdom,16384,2,16384,1,0,0,219,SUCCESS,1e-3,10.0
+# LARGE_M with ldb > m (verify workspace stride independence from ldb)
+L1_8192x1_ldblarge,8192,1,16384,1,0,0,220,SUCCESS,5e-4,10.0
