@@ -73,9 +73,11 @@ scripts/ci/tmp/
 pr_filelist.txt
 
 # agent
+AGENTS.md
 .claude
 .opencode
 .agent
+.cannbot
 opencode.json
 
 # Local model config (generated from template)
