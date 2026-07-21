@@ -979,6 +979,56 @@ aclsparseStatus_t aclsparseSgpsvInterleavedBatch_bufferSizeExt(
     const float *ds, const float *dl, const float *d, const float *du, const float *dw, const float *x,
     int batchCount, size_t *pBufferSizeInBytes);
 
+// ============================================================================
+// Legacy API: aclsparseXcoosort — COO format in-place stable sort (dual-key)
+// ============================================================================
+
+/**
+ * @brief Query workspace size for aclsparseXcoosortByRow / ByColumn.
+ *
+ * @param handle               IN,  HOST,  aclsparse handle.
+ * @param m                    IN,  HOST,  number of rows (not used by sort, must be positive).
+ * @param n                    IN,  HOST,  number of columns (not used by sort, must be positive).
+ * @param nnz                  IN,  HOST,  number of nonzero elements.
+ * @param cooRowsA             IN,  DEVICE, COO row indices (length nnz); may be NULL when nnz==0.
+ * @param cooColsA             IN,  DEVICE, COO column indices (length nnz); may be NULL when nnz==0.
+ * @param pBufferSizeInBytes   OUT, HOST,  required workspace size in bytes.
+ * @return aclsparseStatus_t
+ */
+aclsparseStatus_t aclsparseXcoosort_bufferSizeExt(
+    aclsparseHandle_t handle, int m, int n, int nnz,
+    const int *cooRowsA, const int *cooColsA,
+    size_t *pBufferSizeInBytes);
+
+/**
+ * @brief Stable-sort COO arrays by row (dual-key: row ascending, then col ascending).
+ *
+ * In-place sort. P is both input (caller presets 0:1:(nnz-1)) and output (sort
+ * permutation). pBuffer has no alignment requirement (ascend950). m/n are not
+ * used by the sort (only validated positive).
+ *
+ * @param handle    IN,  HOST,    aclsparse handle.
+ * @param m         IN,  HOST,    number of rows (must be positive).
+ * @param n         IN,  HOST,    number of columns (must be positive).
+ * @param nnz       IN,  HOST,    number of nonzero elements.
+ * @param cooRowsA  IN/OUT, DEVICE, row indices (sorted ascending on output).
+ * @param cooColsA  IN/OUT, DEVICE, column indices (reordered to follow cooRowsA).
+ * @param P         IN/OUT, DEVICE, permutation (length nnz); sortedVal[i] = origVal(P[i]).
+ * @param pBuffer   IN,  DEVICE,  workspace (from bufferSizeExt), no alignment required.
+ * @return aclsparseStatus_t
+ */
+aclsparseStatus_t aclsparseXcoosortByRow(
+    aclsparseHandle_t handle, int m, int n, int nnz,
+    int *cooRowsA, int *cooColsA, int *P, void *pBuffer);
+
+/**
+ * @brief Stable-sort COO arrays by column (dual-key: col ascending, then row ascending).
+ *        Same semantics as aclsparseXcoosortByRow but primary key is the column index.
+ */
+aclsparseStatus_t aclsparseXcoosortByColumn(
+    aclsparseHandle_t handle, int m, int n, int nnz,
+    int *cooRowsA, int *cooColsA, int *P, void *pBuffer);
+
 #ifdef __cplusplus
 }
 #endif

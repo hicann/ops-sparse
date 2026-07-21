@@ -83,3 +83,18 @@ static inline uint32_t GetAicCoreCount()
     }
     return platform->GetCoreNumAic();
 }
+
+static inline uint64_t GetUbSize()
+{
+    auto *platform = platform_ascendc::PlatformAscendCManager::GetInstance();
+    if (platform == nullptr) {
+        OP_LOGE("aclsparse", "PlatformAscendCManager is null, return 0");
+        return 0;
+    }
+    uint64_t ubSize = 0;
+    platform->GetCoreMemSize(platform_ascendc::CoreMemType::UB, ubSize);
+    if (ubSize == 0) {
+        OP_LOGE("aclsparse", "GetCoreMemSize(UB) returned 0");
+    }
+    return ubSize;
+}
