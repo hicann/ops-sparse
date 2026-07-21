@@ -853,6 +853,69 @@ aclsparseStatus_t aclsparseSgtsvInterleavedBatch_bufferSizeExt(
     aclsparseHandle_t handle, int algo, int m,
     const float *dl, const float *d, const float *du, const float *x,
     int batchCount, size_t *pBufferSizeInBytes);
+// Legacy API: aclsparseSgtsv2StridedBatch — Tridiagonal system solve (FP32)
+// ============================================================================
+
+/**
+ * @brief Query workspace size for aclsparseSgtsv2StridedBatch.
+ *
+ * Supports two paths:
+ *   - m <= 2048 (pure UB path): returns 0 (pBuffer is a contract placeholder).
+ *   - 2048 < m <= 2^30 (outer GM-tiled CR path): returns non-zero workspace size,
+ *     used to stage outer-level coefficients and saved intermediate rows in GM.
+ *   - m > 2^30: returns ACL_SPARSE_STATUS_NOT_SUPPORTED, bufferSize=0.
+ *
+ * @param handle          IN, HOST, aclsparse handle.
+ * @param m               IN, HOST, dimension of each tridiagonal system (>= 3).
+ * @param dl              IN, DEVICE, lower diagonal (length batchCount * batchStride).
+ * @param d               IN, DEVICE, main diagonal.
+ * @param du              IN, DEVICE, upper diagonal.
+ * @param x               IN, DEVICE, right-hand side / solution.
+ * @param batchCount      IN, HOST, number of batched systems.
+ * @param batchStride     IN, HOST, element stride between batches (>= ceil(m_pad/8)*8, batchStride % 8 == 0).
+ * @param bufferSizeInBytes OUT, HOST, workspace size in bytes.
+ * @return aclsparseStatus_t
+ */
+aclsparseStatus_t aclsparseSgtsv2StridedBatch_bufferSizeExt(
+    aclsparseHandle_t handle, int m,
+    const float *dl, const float *d, const float *du,
+    const float *x, int batchCount, int batchStride,
+    size_t *bufferSizeInBytes);
+
+/**
+ * @brief Solve batched tridiagonal systems T_i * x_i = b_i using CR algorithm.
+ *
+ * Each system is defined by lower diagonal dl, main diagonal d, upper diagonal du,
+ * and right-hand side x (which is overwritten with the solution). All arrays are
+ * strided by batchStride elements between consecutive batches.
+ *
+ * Constraints:
+ *   - 3 <= m <= 2^30 (m <= 2048 pure UB path, 2048 < m <= 2^30 outer GM-tiled CR path;
+ *     m > 2^30 returns ACL_SPARSE_STATUS_NOT_SUPPORTED)
+ *   - batchStride >= ceil(m_pad/8)*8 and batchStride % 8 == 0 (DataCopy 32B alignment)
+ *   - dl[0] = 0 and du[m-1] = 0 (user-guaranteed boundary conditions)
+ *   - singular systems (zero pivot during reduction) yield Inf/NaN in x
+ *     (no-pivoting algorithm, no error is reported)
+ *   - m <= 2048: pBuffer may be NULL (pure UB path)
+ *   - 2048 < m <= 2^30: pBuffer must be non-NULL, 128B-aligned, size >= bufferSizeExt
+ *     (query the required size via aclsparseSgtsv2StridedBatch_bufferSizeExt)
+ *
+ * @param handle          IN, HOST, aclsparse handle.
+ * @param m               IN, HOST, dimension of each tridiagonal system (3 <= m <= 2^30).
+ * @param dl              IN, DEVICE, lower diagonal.
+ * @param d               IN, DEVICE, main diagonal.
+ * @param du              IN, DEVICE, upper diagonal.
+ * @param x               IN/OUT, DEVICE, right-hand side on input, solution on output.
+ * @param batchCount      IN, HOST, number of batched systems (>= 0).
+ * @param batchStride     IN, HOST, element stride between batches (batchStride % 8 == 0, >= ceil(m_pad/8)*8).
+ * @param pBuffer         IN, DEVICE, workspace (may be NULL when bufferSizeExt returns 0).
+ * @return aclsparseStatus_t
+ */
+aclsparseStatus_t aclsparseSgtsv2StridedBatch(
+    aclsparseHandle_t handle, int m,
+    const float *dl, const float *d, const float *du,
+    float *x, int batchCount, int batchStride,
+    void *pBuffer);
 
 // ============================================================================
 // Legacy API: aclsparseSgtsv2Nopivot
