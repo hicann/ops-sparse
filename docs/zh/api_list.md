@@ -47,6 +47,8 @@
 | [aclsparseSpMMGetBufferSize](#aclsparsespmmgetbuffersize) | 获取SpMM缓冲区大小 |
 | [aclsparseSpMMPreprocess](#aclsparsespmmpreprocess) | SpMM预处理 |
 | [aclsparseSpMM](#aclsparsespmm) | 稀疏矩阵-稠密矩阵乘法 |
+| [aclsparseSgtsv2](#aclsparsesgtsv2) | 三对角线性方程组带选主元求解（FP32，Multiple RHS） |
+| [aclsparseSgtsv2_bufferSizeExt](#aclsparsesgtsv2_buffersizeext) | 查询 aclsparseSgtsv2 所需工作区大小 |
 
 ## 接口详情
 
@@ -1045,6 +1047,108 @@ aclsparseStatus_t aclsparseSpMM(
 **返回值**：
 
 - `ACL_SPARSE_STATUS_SUCCESS`：成功
+- 其他值：失败
+
+---
+
+### aclsparseSgtsv2
+
+```cpp
+aclsparseStatus_t aclsparseSgtsv2(
+    aclsparseHandle_t handle,
+    int m, int n,
+    const float *dl, const float *d, const float *du,
+    float *B, int ldb, void *pBuffer);
+```
+
+**功能**：求解三对角线性方程组 **A · X = B**（FP32，支持多个右端项 Multiple RHS），其中 **A** 为 m × m 三对角矩阵，由下对角线 `dl`、主对角线 `d`、上对角线 `du` 表示；**B** 为 m × n 的稠密右端矩阵（column-major），解 **X** 原地覆盖 **B**。
+
+采用**带部分选主元（partial pivoting）的 Thomas 算法**。前向消元逐行比较 `|d'[i-1]|` 与 `|dl[i]|` 选主元，必要时交换行并产生 du'/du2' 两类 fill-in；后向回代使用含 fill-in 的修改后系数求解。相比无主元版本（aclsparseSgtsv2Nopivot）数值更稳定、精度更高，代价是额外的比较与交换开销及 3× workspace。
+
+**产品支持情况**：
+
+- Ascend 950PR / Ascend 950DT：支持
+- Atlas A3 训练系列产品 / Atlas A3 推理系列产品：不支持
+- Atlas A2 训练系列产品 / Atlas A2 推理系列产品：不支持
+
+**参数说明**：
+
+- `handle`（IN）：HOST，ops-sparse 库上下文句柄，携带 stream。
+- `m`（IN）：HOST，线性系统大小（行数 = 列数），需 ≥ 3（n > 0 时校验；n=0 时跳过校验）。
+- `n`（IN）：HOST，右端项列数，需 ≥ 0；n=0 时提前返回 SUCCESS 不计算。
+- `dl`（IN）：DEVICE，下对角线数组 [m]，`dl[0]` 必须在调用前置 0。
+- `d`（IN）：DEVICE，主对角线数组 [m]。
+- `du`（IN）：DEVICE，上对角线数组 [m]，`du[m-1]` 必须在调用前置 0。
+- `B`（IN/OUT）：DEVICE，右端项 b（输入）/ 解 X（输出），大小为 ldb × n（column-major）。计算完成后原地覆盖为解矩阵 X。
+- `ldb`（IN）：HOST，B 的 leading dimension，需 ≥ max(1, m)。
+- `pBuffer`（IN）：DEVICE，工作区 buffer，地址必须 128 字节对齐。当 n > 0 时必须为有效指针，大小不少于 `aclsparseSgtsv2_bufferSizeExt` 返回的字节数。
+
+**约束说明**：
+
+- m ≥ 3（n > 0 时校验；n=0 时跳过校验）
+- n ≥ 0（n = 0 时提前返回 SUCCESS 不计算）
+- ldb ≥ max(1, m)
+- 当 n > 0 时，dl、d、du、B 均不可为 nullptr
+- 当 n > 0 时，pBuffer 不可为 nullptr，且地址必须是 128 字节的整数倍
+- pBuffer 大小必须 ≥ `aclsparseSgtsv2_bufferSizeExt` 返回值
+- `dl[0]` 必须在调用前置 0
+- `du[m-1]` 必须在调用前置 0
+- 带部分选主元的 Thomas 算法对一般非奇异地对角系统数值稳定。算子不对奇异矩阵做任何保护：若前向消元或后向回代过程中任一主元为零或接近零，IEEE-754 除零将在输出中产生 Inf/NaN。**调用方必须保证输入的三对角矩阵良态，否则该 RHS 列的精度不可预期**
+
+**返回值**：
+
+- `ACL_SPARSE_STATUS_SUCCESS`：成功
+- `ACL_SPARSE_STATUS_HANDLE_IS_NULLPTR`：handle 为空
+- `ACL_SPARSE_STATUS_INVALID_VALUE`：参数非法（m/n/ldb 越界、空指针、pBuffer 未对齐等）
+- 其他值：失败
+
+---
+
+### aclsparseSgtsv2_bufferSizeExt
+
+```cpp
+aclsparseStatus_t aclsparseSgtsv2_bufferSizeExt(
+    aclsparseHandle_t handle,
+    int m, int n,
+    const float *dl, const float *d, const float *du,
+    const float *B, int ldb,
+    size_t *pBufferSizeInBytes);
+```
+
+**功能**：查询 `aclsparseSgtsv2` 所需工作区大小（字节）。返回值已包含 128 字节对齐。
+
+**产品支持情况**：
+
+- Ascend 950PR / Ascend 950DT：支持
+- Atlas A3 训练系列产品 / Atlas A3 推理系列产品：不支持
+- Atlas A2 训练系列产品 / Atlas A2 推理系列产品：不支持
+
+**参数说明**：
+
+- `handle`（IN）：HOST，ops-sparse 库上下文句柄。
+- `m`（IN）：HOST，线性系统大小（行数 = 列数），需 ≥ 3（n > 0 时校验；n=0 时跳过校验）。
+- `n`（IN）：HOST，右端项列数，需 ≥ 0；n=0 时返回 0。
+- `dl`（IN）：DEVICE，下对角线数组 [m]，`dl[0]` 必须为 0。
+- `d`（IN）：DEVICE，主对角线数组 [m]。
+- `du`（IN）：DEVICE，上对角线数组 [m]，`du[m-1]` 必须为 0。
+- `B`（IN）：DEVICE，右端项矩阵 [ldb × n]（column-major）；查询接口不使用其值，可为 nullptr。
+- `ldb`（IN）：HOST，B 的 leading dimension，需 ≥ max(1, m)。
+- `pBufferSizeInBytes`（OUT）：HOST，输出 `aclsparseSgtsv2` 所需工作区大小（字节），不可为 nullptr。
+
+**约束说明**：
+
+- m ≥ 3（n > 0 时校验；n=0 时跳过校验）
+- n ≥ 0（n = 0 时返回 0，无需工作区）
+- ldb ≥ max(1, m)
+- dl、d、du、pBufferSizeInBytes 均不可为 nullptr
+- B 可为 nullptr（查询接口不使用 B 的值）
+- 返回的工作区大小已包含 128 字节对齐
+
+**返回值**：
+
+- `ACL_SPARSE_STATUS_SUCCESS`：成功
+- `ACL_SPARSE_STATUS_HANDLE_IS_NULLPTR`：handle 为空
+- `ACL_SPARSE_STATUS_INVALID_VALUE`：参数非法（m/n/ldb 越界、空指针等）
 - 其他值：失败
 
 ---

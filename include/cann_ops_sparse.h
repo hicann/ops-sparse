@@ -977,6 +977,62 @@ aclsparseStatus_t aclsparseSgtsv2Nopivot_bufferSizeExt(
     const float *B, int ldb, size_t *pBufferSizeInBytes);
 
 // ============================================================================
+// Legacy API: aclsparseSgtsv2
+// ============================================================================
+
+/**
+ * @brief Solve a tridiagonal linear system with partial pivoting (Thomas + pivoting).
+ *
+ * Solves A * X = B where A is an m x m tridiagonal matrix defined by
+ * sub-diagonal dl, main diagonal d, and super-diagonal du.
+ * B is an m x n right-hand side matrix (column-major, leading dimension ldb).
+ * X is the solution, stored in B on output (in-place).
+ *
+ * Uses the Thomas algorithm with partial pivoting.
+ * Partial pivoting compares |d[i-1]| vs |dl[i]|
+ * at each forward elimination step, swapping rows when |dl[i]| > |d[i-1]|
+ * for numerical stability.
+ *
+ * Constraints (user responsibility, NOT checked at runtime):
+ *   - dl[0] == 0, du[m-1] == 0
+ *   - Matrix must be non-singular (zero pivot → Inf/NaN propagation, no error)
+ *
+ * @param handle        IN, HOST, aclsparse handle.
+ * @param m             IN, HOST, system size (m >= 3 when n > 0; n=0 skips m validation).
+ * @param n             IN, HOST, number of right-hand sides (n >= 0; n=0 early return).
+ * @param dl            IN, DEVICE, sub-diagonal [m], dl[0] must be 0.
+ * @param d             IN, DEVICE, main diagonal [m].
+ * @param du            IN, DEVICE, super-diagonal [m], du[m-1] must be 0.
+ * @param B             IN/OUT, DEVICE, RHS → solution [ldb * n] (column-major).
+ * @param ldb           IN, HOST, leading dimension of B (ldb >= m).
+ * @param pBuffer       IN, DEVICE, workspace (128-byte aligned), size from bufferSizeExt.
+ * @return aclsparseStatus_t
+ */
+aclsparseStatus_t aclsparseSgtsv2(
+    aclsparseHandle_t handle, int m, int n,
+    const float *dl, const float *d, const float *du,
+    float *B, int ldb, void *pBuffer);
+
+/**
+ * @brief Query workspace buffer size for aclsparseSgtsv2.
+ *
+ * @param handle              IN, HOST, aclsparse handle.
+ * @param m                   IN, HOST, system size (m >= 3 when n > 0; n=0 skips m validation).
+ * @param n                   IN, HOST, number of right-hand sides (n >= 0; n=0 returns 0).
+ * @param dl                  IN, DEVICE, sub-diagonal [m], dl[0] must be 0.
+ * @param d                   IN, DEVICE, main diagonal [m].
+ * @param du                  IN, DEVICE, super-diagonal [m], du[m-1] must be 0.
+ * @param B                   IN, DEVICE, right-hand side [ldb * n] (may be NULL for query).
+ * @param ldb                 IN, HOST, leading dimension of B (>= max(1, m)).
+ * @param pBufferSizeInBytes  OUT, HOST, required workspace size in bytes.
+ * @return aclsparseStatus_t
+ */
+aclsparseStatus_t aclsparseSgtsv2_bufferSizeExt(
+    aclsparseHandle_t handle, int m, int n,
+    const float *dl, const float *d, const float *du,
+    const float *B, int ldb, size_t *pBufferSizeInBytes);
+
+// ============================================================================
 // Legacy API: aclsparseSgpsvInterleavedBatch
 // ============================================================================
 

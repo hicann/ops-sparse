@@ -1,0 +1,63 @@
+case_name,level,m,n,ldb,matrixType,value_lo,value_hi,seed,rtol,atol,mareMultiplier,description,expect_result
+# L0: Basic functionality (m <= 32) — smoke tests
+L0_3x1_diagdom,L0,3,1,3,diag_dominant,-3.0,3.0,8525,1.22e-4,1.22e-4,10,最小规模对角占优,success
+L0_4x1_diagdom,L0,4,1,4,diag_dominant,-3.0,3.0,24462,1.22e-4,1.22e-4,10,小规模对角占优,success
+L0_8x3_diagdom,L0,8,3,8,diag_dominant,-3.0,3.0,44692,1.22e-4,1.22e-4,10,小规模多RHS对角占优,success
+L0_7x7_random,L0,7,7,7,random,-3.0,3.0,18155,1.22e-4,1.22e-4,10,小规模随机触发主元,success
+L0_4x1_identity,L0,4,1,4,identity,-3.0,3.0,60559,1.22e-4,1.22e-4,10,单位矩阵退化,success
+L0_16x1_diagdom,L0,16,1,16,diag_dominant,-3.0,3.0,71925,1.22e-4,1.22e-4,10,中小规模单RHS,success
+L0_32x2_random,L0,32,2,32,random,-3.0,3.0,70034,1.22e-4,1.22e-4,10,中小规模随机多RHS,success
+# L1: Full coverage + boundary + large shape
+# Boundary: min m + multi-RHS + ldb>m + n=0 early return
+L1_3x10_diagdom,L1,3,10,3,diag_dominant,-3.0,3.0,17466,1.22e-4,1.22e-4,10,m边界+多RHS,success
+L1_3x1_random,L1,3,1,3,random,-3.0,3.0,94772,1.22e-4,1.22e-4,10,m边界+主元交换,success
+L1_5x1_diagdom,L1,5,1,5,diag_dominant,-3.0,3.0,70096,1.22e-4,1.22e-4,10,非对齐小m,success
+L1_7x1_random,L1,7,1,7,random,-3.0,3.0,40752,1.22e-4,1.22e-4,10,非对齐+主元,success
+L1_8x0_diagdom,L1,8,0,8,diag_dominant,-3.0,3.0,37778,1.22e-4,1.22e-4,10,n=0早返回SUCCESS,success
+L1_32x2_ldb33,L1,32,2,33,random,-3.0,3.0,80930,1.22e-4,1.22e-4,10,ldb=m+1,success
+L1_64x1_const,L1,64,1,64,constant,4.0,4.0,24697,1.22e-4,1.22e-4,10,常值对角,success
+L1_64x4_random,L1,64,4,64,random,-3.0,3.0,73906,1.22e-4,1.22e-4,10,中规模随机多RHS,success
+L1_100x1_diagdom,L1,100,1,100,diag_dominant,-3.0,3.0,62636,1.22e-4,1.22e-4,10,非2幂中规模,success
+L1_128x16_random,L1,128,16,128,random,-3.0,3.0,59174,1.22e-4,1.22e-4,10,中规模多RHS主元,success
+L1_256x1_random,L1,256,1,256,random,-3.0,3.0,44532,1.22e-4,1.22e-4,10,主元+中规模,success
+L1_512x32_diagdom,L1,512,32,512,diag_dominant,-3.0,3.0,99607,1.22e-4,1.22e-4,10,中规模大RHS,success
+# Non-power-of-2 large m
+L1_1000x1_diagdom,L1,1000,1,1000,diag_dominant,-3.0,3.0,7854,1.22e-4,1.22e-4,10,非2幂大规模,success
+# Large shape: m >= 1024 (rtol=5e-4, mareMultiplier=20)
+L1_1024x1_diagdom,L1,1024,1,1024,diag_dominant,-3.0,3.0,2448,5e-4,5e-4,20,2幂大规模单RHS,success
+L1_1024x64_random,L1,1024,64,1024,random,-3.0,3.0,84139,5e-4,5e-4,20,大规模多RHS主元,success
+L1_2048x1_diagdom,L1,2048,1,2048,diag_dominant,-3.0,3.0,71121,5e-4,5e-4,20,2幂大规模,success
+L1_4096x1_diagdom,L1,4096,1,4096,diag_dominant,-3.0,3.0,2888,5e-4,5e-4,20,2幂大规模,success
+# Extreme large shape: m >= 8192 (rtol=1e-3, mareMultiplier=30)
+L1_8192x1_diagdom,L1,8192,1,8192,diag_dominant,-3.0,3.0,3521,1e-3,1e-3,30,极大规模单RHS,success
+L1_8192x4_diagdom,L1,8192,4,8192,diag_dominant,-3.0,3.0,74724,1e-3,1e-3,30,极大规模多RHS,success
+L1_16384x1_diagdom,L1,16384,1,16384,diag_dominant,-3.0,3.0,10821,1e-3,1e-3,30,最大规模单RHS,success
+L1_16384x2_diagdom,L1,16384,2,16384,diag_dominant,-3.0,3.0,56358,1e-3,1e-3,30,最大规模多RHS,success
+L1_8192x1_ldblarge,L1,8192,1,16384,diag_dominant,-3.0,3.0,26831,1e-3,1e-3,30,大m+ldb>m,success
+# Large RHS: n >= 10000 (mareMultiplier=50)
+L1_1024x10000_diagdom,L1,1024,10000,1024,diag_dominant,-3.0,3.0,82896,5e-4,5e-4,50,向量类大n,success
+L1_1024x100000_diagdom,L1,1024,100000,1024,diag_dominant,-3.0,3.0,66488,5e-4,5e-4,50,最大向量类n,success
+# Extreme value ranges + pivot trigger
+L1_64x4_random_bigval,L1,64,4,64,random,10000.0,1000000.0,3670,1.22e-4,1.22e-4,10,极大值域+主元,success
+L1_64x4_random_smallval,L1,64,4,64,random,0.000001,0.0001,35087,1.22e-4,1.22e-4,10,极小值域+主元,success
+L1_32x4_random_pivot,L1,32,4,32,random,10.0,20.0,22548,1.22e-4,1.22e-4,10,主元强触发,success
+L1_4x1_identity_r2,L1,4,1,4,identity,-3.0,3.0,61881,1.22e-4,1.22e-4,10,单位矩阵可复现,success
+# L2: Singular matrix — Inf/NaN propagation (mareMultiplier=0, verified via !isfinite)
+L2_S1_Singular_3x1,L2,3,1,3,singular,-3.0,3.0,34352,0,0,0,奇异矩阵Inf/NaN传播,singular
+L2_S2_Singular_4x3,L2,4,3,4,singular,-3.0,3.0,76690,0,0,0,奇异矩阵+多RHS,singular
+L2_S3_ZeroMatrix_4x1,L2,4,1,4,singular,0.0,0.0,33633,0,0,0,零矩阵奇异Inf/NaN,singular
+# WB: White-box — deterministic pivot-path coverage (crafted matrices)
+# Covers kernel swap/noSwap branches deterministically (vs random probabilistic)
+WB_m3_allswap_n4,WB,3,4,3,pivot_all_swap,-3.0,3.0,10001,1.22e-4,1.22e-4,10,m=3全主元交换路径,success
+WB_m3_swap_first_n4,WB,3,4,3,pivot_first_only,-3.0,3.0,10002,1.22e-4,1.22e-4,10,m=3首步交换后续不交换,success
+WB_m3_swap_last_n4,WB,3,4,3,pivot_last_only,-3.0,3.0,10003,1.22e-4,1.22e-4,10,m=3首步不交换末步交换,success
+WB_m8_allswap_n4,WB,8,4,8,pivot_all_swap,-3.0,3.0,10004,1.22e-4,1.22e-4,10,m=8连续主元交换+fill-in链,success
+WB_m8_swap_first_n4,WB,8,4,8,pivot_first_only,-3.0,3.0,10005,1.22e-4,1.22e-4,10,m=8单次交换后长不交换链,success
+WB_m8_swap_last_n4,WB,8,4,8,pivot_last_only,-3.0,3.0,10006,1.22e-4,1.22e-4,10,m=8长不交换后末步交换,success
+WB_m16_allswap_n2,WB,16,2,16,pivot_all_swap,-3.0,3.0,10007,1e-3,1e-3,30,m=16长fill-in累积链,success
+WB_extreme_dl_m8_n4,WB,8,4,8,pivot_extreme_dl,-3.0,3.0,10008,5e-4,5e-4,20,极端主元比|dl|>>|d|交换,success
+WB_extreme_d_m8_n4,WB,8,4,8,pivot_extreme_d,-3.0,3.0,10009,5e-4,5e-4,20,极端主元比|d|>>|dl|不交换,success
+# WB: White-box — grid-stride tail block coverage (n not multiple of 32)
+WB_n31_single_block_m8,WB,8,31,8,random,-3.0,3.0,10010,1.22e-4,1.22e-4,10,单block尾1空闲线程,success
+WB_n33_tail_m8,WB,8,33,8,random,-3.0,3.0,10011,1.22e-4,1.22e-4,10,双block尾1活跃线程,success
+WB_n65_tail_m8,WB,8,65,8,random,-3.0,3.0,10012,1.22e-4,1.22e-4,10,三block尾1活跃线程,success
