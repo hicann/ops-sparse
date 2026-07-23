@@ -303,7 +303,7 @@ aclsparseStatus_t aclsparseCreateCsr(aclsparseSpMatDescr_t *spMatDescr, int64_t 
         return ACL_SPARSE_STATUS_INVALID_VALUE;
     }
     aclsparseStatus_t idxSt =
-        AclsparseValidateSupportedCsrIndexTypes(csrRowOffsetsType, csrColIndType);
+        AclsparseValidateSupportedCsrIndexTypesExtended(csrRowOffsetsType, csrColIndType);
     if (idxSt != ACL_SPARSE_STATUS_SUCCESS) {
         return idxSt;
     }

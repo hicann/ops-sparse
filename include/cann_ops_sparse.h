@@ -50,6 +50,31 @@ typedef enum aclsparseOrder_t {
     ACL_SPARSE_ORDER_COL = 1,   // Column-major.
 } aclsparseOrder_t;
 
+// SpMVOp 算法枚举（对标 Generic API 中 SpMVOp 的算法选项）
+typedef enum aclsparseSpMVOpAlg_t {
+    // Default algorithm; routes to ALG1. No workspace required.
+    // Supports updating matA's values without rebuilding descr/plan.
+    ACL_SPARSE_SPMVOP_ALG_DEFAULT = 0,
+    // Deterministic algorithm; static row-level slicing, lightweight createDescr.
+    // No workspace required. Supports updating matA's values (csrValues)
+    // without rebuilding descr/plan.
+    ACL_SPARSE_SPMVOP_ALG1,
+    // Deterministic algorithm; nnz-balanced load distribution via device-side
+    // reorder in createDescr. Requires workspace (see bufferSize).
+    // WARNING: in-place value updates (modifying csrValues after createDescr)
+    // invalidate the reorder/bin_edge tables; use ALG1 if in-place updates needed.
+    // NOTE: ALG2 不提供运行时检测，用户需自行保证不在 ALG2 descr 上修改 csrValues。
+    ACL_SPARSE_SPMVOP_ALG2
+} aclsparseSpMVOpAlg_t;
+
+// SpMVOp opaque types
+struct aclsparseSpMVOpDescr;
+struct aclsparseSpMVOpPlan;
+
+typedef struct aclsparseSpMVOpDescr* aclsparseSpMVOpDescr_t;
+typedef struct aclsparseSpMVOpDescr const* aclsparseConstSpMVOpDescr_t;
+typedef struct aclsparseSpMVOpPlan* aclsparseSpMVOpPlan_t;
+
 // Algorithm enum for SpMM.
 typedef enum aclsparseSpMMAlg_t {
     ACL_SPARSE_SPMM_ALG_DEFAULT = 0,
@@ -1147,6 +1172,80 @@ aclsparseStatus_t aclsparseXcoosortByRow(
 aclsparseStatus_t aclsparseXcoosortByColumn(
     aclsparseHandle_t handle, int m, int n, int nnz,
     int *cooRowsA, int *cooColsA, int *P, void *pBuffer);
+// Generic API: aclsparseSpMVOp — 7 函数
+// ============================================================================
+
+/**
+ * @brief 获取 SpMVOp 所需 workspace 大小（字节数）。
+ *        ALG1: 返回 0；ALG2: 返回 reorder 表 + bin_edge 表 + 对齐开销。
+ */
+aclsparseStatus_t aclsparseSpMVOp_bufferSize(
+    aclsparseHandle_t handle,
+    aclsparseOperation_t opA,
+    aclsparseConstSpMatDescr_t matA,
+    aclsparseConstDnVecDescr_t vecX,
+    aclsparseConstDnVecDescr_t vecY,
+    aclsparseDnVecDescr_t vecZ,
+    aclDataType computeType,
+    aclsparseSpMVOpAlg_t alg,
+    size_t *bufferSize);
+
+/**
+ * @brief 创建 SpMVOp 内部描述符并执行预处理。
+ *        ALG2: 在 device 上通过 kernel 异步完成排序和 bin_edge 负载均衡切分。
+ *        buffer 由调用者在 bufferSize 后分配，保持有效直到 descr 销毁。
+ */
+aclsparseStatus_t aclsparseSpMVOp_createDescr(
+    aclsparseHandle_t handle, aclsparseSpMVOpDescr_t *descr, aclsparseOperation_t opA, aclsparseConstSpMatDescr_t matA,
+    aclsparseConstDnVecDescr_t vecX, aclsparseConstDnVecDescr_t vecY, aclsparseDnVecDescr_t vecZ,
+    aclDataType computeType, aclsparseSpMVOpAlg_t alg, void *buffer);
+
+/**
+ * @brief 销毁 SpMVOp 描述符并释放其管理的 host 资源。
+ *        descr 为 nullptr 时直接返回 SUCCESS（幂等语义）。
+ */
+aclsparseStatus_t aclsparseSpMVOp_destroyDescr(aclsparseSpMVOpDescr_t descr);
+
+/**
+ * @brief 基于 descr 创建执行计划。
+ *        NPU 侧 identity epilogue: epilogueLTOBuffer 必须为 NULL，否则返回 NOT_SUPPORTED。
+ */
+aclsparseStatus_t aclsparseSpMVOp_createPlan(
+    aclsparseHandle_t handle,
+    aclsparseSpMVOpDescr_t descr,        // 非 const：对标 cuSPARSE，createPlan 可修改 descr
+    aclsparseSpMVOpPlan_t *plan,
+    const void *epilogueLTOBuffer,
+    size_t epilogueLTOBufferSize);
+
+/**
+ * @brief 销毁 SpMVOp 执行计划。
+ *        plan 为 nullptr 时直接返回 SUCCESS（幂等语义）。
+ */
+aclsparseStatus_t aclsparseSpMVOp_destroyPlan(aclsparseSpMVOpPlan_t plan);
+
+/**
+ * @brief 将 epilogue 模块中 __constant__ 变量设置为指定数据。
+ *        NPU 侧 identity epilogue 不使用此接口，直接返回 SUCCESS。
+ */
+aclsparseStatus_t aclsparseSpMVOp_setGlobalUserData(
+    aclsparseHandle_t handle,
+    aclsparseSpMVOpPlan_t plan,
+    const char *epilogueDataName,
+    void *epilogueData,
+    size_t epilogueDataSize);
+
+/**
+ * @brief 执行稀疏矩阵向量乘法：Z = alpha * A * X + beta * Y
+ *        使用确定性累加（Priest 双重补偿求和）保证 bit-wise 可重复。
+ */
+aclsparseStatus_t aclsparseSpMVOp(
+    aclsparseHandle_t handle,
+    aclsparseSpMVOpPlan_t plan,
+    const void *alpha,
+    const void *beta,
+    aclsparseConstDnVecDescr_t vecX,
+    aclsparseConstDnVecDescr_t vecY,
+    aclsparseDnVecDescr_t vecZ);
 
 #ifdef __cplusplus
 }
