@@ -1247,6 +1247,56 @@ aclsparseStatus_t aclsparseSpMVOp(
     aclsparseConstDnVecDescr_t vecY,
     aclsparseDnVecDescr_t vecZ);
 
+// ============================================================================
+// Legacy API: aclsparseXcsrsort
+// ============================================================================
+
+/**
+ * @brief 查询 aclsparseXcsrsort 所需的 Device workspace 大小。
+ *
+ * @param handle             IN, HOST, aclsparse handle。
+ * @param m                  IN, HOST, 矩阵行数。
+ * @param n                  IN, HOST, 矩阵列数。
+ * @param nnz                IN, HOST, 非零元素数量。
+ * @param csrRowPtr          IN, DEVICE, CSR 行指针，长度 m+1。
+ * @param csrColInd          IN, DEVICE, CSR 列索引，长度 nnz。
+ * @param pBufferSizeInBytes OUT, HOST, workspace 大小（字节）。
+ * @return aclsparseStatus_t
+ */
+aclsparseStatus_t aclsparseXcsrsort_bufferSizeExt(
+    aclsparseHandle_t handle,
+    int m,
+    int n,
+    int nnz,
+    const int *csrRowPtr,
+    const int *csrColInd,
+    size_t *pBufferSizeInBytes);
+
+/**
+ * @brief 对 CSR 每行的列索引执行原地稳定排序，并输出排列 P。
+ *
+ * @param handle     IN, HOST, aclsparse handle，提供执行 stream。
+ * @param m          IN, HOST, 矩阵行数。
+ * @param n          IN, HOST, 矩阵列数。
+ * @param nnz        IN, HOST, 非零元素数量。
+ * @param descrA     IN, HOST, Legacy MatDescr；使用 indexBase，其他属性忽略。
+ * @param csrRowPtr  IN, DEVICE, CSR 行指针，长度 m+1，排序期间不变。
+ * @param csrColInd  IN/OUT, DEVICE, 长度 nnz；输出时每行内部升序。
+ * @param P          IN/OUT, DEVICE, 长度 nnz；与 csrColInd 使用相同的稳定排列。
+ * @param pBuffer    IN, DEVICE, 由 bufferSizeExt 查询并由调用方分配的 workspace。
+ * @return aclsparseStatus_t
+ */
+aclsparseStatus_t aclsparseXcsrsort(
+    aclsparseHandle_t handle,
+    int m,
+    int n,
+    int nnz,
+    const aclsparseMatDescr_t descrA,
+    const int *csrRowPtr,
+    int *csrColInd,
+    int *P,
+    void *pBuffer);
+
 #ifdef __cplusplus
 }
 #endif
