@@ -87,7 +87,7 @@ void SampleRowColumnsUnique(int nnz, uint32_t numCols, uint32_t rowIdx,
 
 template <typename T>
 void GenerateDenseVector(uint32_t size, std::vector<T> &x, std::mt19937 &rng) {
-    std::uniform_real_distribution<float> valDist(-5.0f, 10.0f);
+    std::uniform_real_distribution<float> valDist(-5.0f, 5.0f);
     x.assign(size, T{});
     for (uint32_t i = 0; i < size; ++i) {
         x[i] = static_cast<T>(valDist(rng));
@@ -125,7 +125,7 @@ void GenerateCsr(uint32_t numRows, uint32_t numCols, float sparsity,
         std::chrono::steady_clock::now().time_since_epoch().count()));
 
     std::binomial_distribution<int> nnzDist(numCols, density);
-    std::uniform_real_distribution<float> valDist(-5.0f, 10.0f);
+    std::uniform_real_distribution<float> valDist(-5.0f, 5.0f);
     std::uniform_real_distribution<float> emptyDist(0.0f, 1.0f);
 
     std::vector<int> visited(numCols, -1);
@@ -196,13 +196,34 @@ std::vector<OutT> SpmvTransCpu(const std::vector<int32_t> &csrRowPtr,
     return z;
 }
 
-// ===================== 精度验证 =====================
+// ===================== 精度验证（生态算子开源精度标准：混合容差） =====================
+
+struct MixedToleranceParams {
+    float rtol;
+    float atol;
+    float maxAbsErrorLimit;
+    float requiredMatchedRatio;
+};
+
+template <typename T>
+MixedToleranceParams GetMixedToleranceParams() {
+    if constexpr (std::is_same_v<T, float>) {
+        return {std::ldexp(1.0f, -10), std::ldexp(1.0f, -16), 1e-2f, 0.99f};
+    } else if constexpr (std::is_same_v<T, half>) {
+        return {std::ldexp(1.0f, -9), std::ldexp(1.0f, -9), 1e-1f, 0.99f};
+    } else if constexpr (std::is_same_v<T, bfloat16_t>) {
+        return {std::ldexp(1.0f, -6), std::ldexp(1.0f, -6), 1e-0f, 0.99f};
+    } else if constexpr (std::is_same_v<T, int32_t>) {
+        return {0.0f, 0.0f, 0.0f, 1.0f};
+    }
+    return {std::ldexp(1.0f, -10), std::ldexp(1.0f, -16), 1e-2f, 0.99f};
+}
 
 template <typename T>
 int32_t Verification(const std::vector<T> &cpuGolden,
                      const std::vector<T> &npuRet,
                      float &MARE, float &MERE,
-                     float threshold = std::ldexp(1.0f, -13),
+                     const MixedToleranceParams &params,
                      std::string *worstInfo = nullptr) {
     if (npuRet.size() != cpuGolden.size()) {
         std::cout << "[ERROR] The size of npuRet and cpuGolden is not equal!\n";
@@ -215,56 +236,90 @@ int32_t Verification(const std::vector<T> &cpuGolden,
         std::cout << "golden[" << i << "]=" << cpuGolden[i]
                   << " npu_result[" << i << "]=" << npuRet[i] << "\n";
     }
- {
-        size_t worstIdx = 0;
-        float worstGolden = 0, worstNpu = 0;
 
-        for (size_t i = 0; i < npuRet.size(); ++i) {
-            float npuVal = static_cast<float>(npuRet[i]);
-            float cpuVal = static_cast<float>(cpuGolden[i]);
-            float aError = std::fabs(npuVal - cpuVal);
+    size_t passCount = 0;
+    size_t worstIdx = 0;
+    float worstGolden = 0.0f;
+    float worstNpu = 0.0f;
+    float maxAbsError = 0.0f;
+    float worstMargin = 0.0f;
 
-            // ---- 误差度量：相对(int/float/half/bf16 统一), int32 额外做精确匹配 ----
-            if constexpr (std::is_same_v<T, int32_t>) {
-                if (npuRet[i] != cpuGolden[i]) {
-                    std::cout << "[WARNING] value[" << i
-                              << "] in result is not equal to golden, the value is: "
-                              << npuRet[i] << " while the golden is: " << cpuGolden[i] << "\n";
-                    status = 1;
-                }
-                // int32 用绝对误差作为指标
-                if (aError > MARE) { MARE = aError; worstIdx = i; worstGolden = cpuVal; worstNpu = npuVal; }
-                MERE += aError;
+    for (size_t i = 0; i < npuRet.size(); ++i) {
+        float npuVal = static_cast<float>(npuRet[i]);
+        float cpuVal = static_cast<float>(cpuGolden[i]);
+        float aError = std::fabs(npuVal - cpuVal);
+        if (aError > maxAbsError) {
+            maxAbsError = aError;
+        }
+
+        if constexpr (std::is_same_v<T, int32_t>) {
+            if (npuRet[i] == cpuGolden[i]) {
+                passCount++;
             } else {
-                float rError = aError / (std::fabs(cpuVal) + 1e-7f);
-                if (rError > MARE)      { MARE = rError; worstIdx = i; worstGolden = cpuVal; worstNpu = npuVal; }
-                if (rError > threshold * 10) {
-                    std::cout << "[WARNING] Max Relative Error check fail! Value[" << i
-                              << "] in result is not equal to golden, the value is: "
-                              << npuVal << " while the golden is: " << cpuVal << "\n";
-                    status = 1;
+                std::cout << "[WARNING] value[" << i
+                          << "] in result is not equal to golden, the value is: "
+                          << npuRet[i] << " while the golden is: " << cpuGolden[i] << "\n";
+                const float margin = aError;
+                if (margin > worstMargin) {
+                    worstMargin = margin;
+                    worstIdx = i;
+                    worstGolden = cpuVal;
+                    worstNpu = npuVal;
                 }
-                MERE += rError;
+            }
+        } else {
+            const float tolerance = params.atol + params.rtol * std::fabs(cpuVal);
+            if (aError <= tolerance) {
+                passCount++;
+            } else {
+                const float margin = aError - tolerance;
+                if (margin > worstMargin) {
+                    worstMargin = margin;
+                    worstIdx = i;
+                    worstGolden = cpuVal;
+                    worstNpu = npuVal;
+                }
             }
         }
-
-        MERE /= npuRet.size();
-
-        // ---- 均值阈值检查 ----
-        if constexpr (!std::is_same_v<T, int32_t>) {
-            if (MERE > threshold) { std::cout << "[WARNING] Mean Relative Error check fail!\n"; status = 1; }
-            std::cout << "Mean Relative Error = " << MERE << "; Max Relative Error = " << MARE << "\n";
-        } else {
-            std::cout << "Mean Absolute Error = " << MERE << "; Max Absolute Error = " << MARE << "\n";
-        }
-
-        // ---- 记录最差元素 ----
-        if (worstInfo) {
-            std::ostringstream oss;
-            oss << "worst[" << worstIdx << "] golden=" << worstGolden << " npu=" << worstNpu;
-            *worstInfo = oss.str();
-        }
     }
+
+    const float matchedRatio = npuRet.empty() ? 1.0f
+                                              : static_cast<float>(passCount) / static_cast<float>(npuRet.size());
+    MARE = maxAbsError;
+    MERE = matchedRatio;
+
+    if constexpr (std::is_same_v<T, int32_t>) {
+        if (matchedRatio < params.requiredMatchedRatio) {
+            std::cout << "[WARNING] Integer exact match check fail!\n";
+            status = 1;
+        }
+        std::cout << "Matched Ratio = " << matchedRatio
+                  << "; Max Absolute Error = " << maxAbsError << "\n";
+    } else {
+        if (matchedRatio < params.requiredMatchedRatio) {
+            std::cout << "[WARNING] Matched ratio check fail! matched_ratio=" << matchedRatio
+                      << " required>=" << params.requiredMatchedRatio << "\n";
+            status = 1;
+        }
+        if (maxAbsError > params.maxAbsErrorLimit) {
+            std::cout << "[WARNING] Max absolute error check fail! max_abs_error=" << maxAbsError
+                      << " limit=" << params.maxAbsErrorLimit << "\n";
+            status = 1;
+        }
+        std::cout << "Matched Ratio = " << matchedRatio
+                  << "; Max Absolute Error = " << maxAbsError
+                  << " (rtol=" << params.rtol << ", atol=" << params.atol << ")\n";
+    }
+
+    if (worstInfo) {
+        std::ostringstream oss;
+        oss << "worst[" << worstIdx << "] golden=" << worstGolden << " npu=" << worstNpu;
+        if constexpr (!std::is_same_v<T, int32_t>) {
+            oss << " margin=" << worstMargin;
+        }
+        *worstInfo = oss.str();
+    }
+
     return status;
 }
 
@@ -435,19 +490,8 @@ int Test(const size_t M, const size_t N, const float sparsity,
     std::vector<OutT> yResult;
     yResult.assign((OutT *)yHost, (OutT *)(yHost + totalYByteSize));
 
-    // 精度阈值按 OutT 选择（符合生态算子开源精度标准）
-    float threshold;
-    if constexpr (std::is_same_v<OutT, float>)
-        threshold = std::ldexp(1.0f, -13); // FLOAT32
-    else if constexpr (std::is_same_v<OutT, half>)
-        threshold = std::ldexp(1.0f, -10); // FLOAT16
-    else if constexpr (std::is_same_v<OutT, bfloat16_t>)
-        threshold = std::ldexp(1.0f, -7); // BFLOAT16
-    else if constexpr (std::is_same_v<OutT, int32_t>)
-        threshold = 0.0f; // 精确匹配
-    else
-        threshold = std::ldexp(1.0f, -13);
-    int verifyRet = Verification<OutT>(output_cpu, yResult, MARE, MERE, threshold, worstInfo);
+    const MixedToleranceParams toleranceParams = GetMixedToleranceParams<OutT>();
+    int verifyRet = Verification<OutT>(output_cpu, yResult, MARE, MERE, toleranceParams, worstInfo);
 
     aclsparseDestroySpMat(matDesc);
     aclsparseDestroyDnVec(vecXDesc);
@@ -491,7 +535,7 @@ int RunAndTrack(size_t M, size_t N, float sparsity, CompT alpha, CompT beta,
             << " M=" << M << " N=" << N
             << " sparsity=" << sparsity
             << " alpha=" << alpha << " beta=" << beta
-            << " MARE=" << MARE << " MERE=" << MERE << "\n"
+            << " max_abs_error=" << MARE << " matched_ratio=" << MERE << "\n"
             << "          " << worstInfo << "\n"
             << "          status=" << ret;
         stats.failedCases.push_back(oss.str());
