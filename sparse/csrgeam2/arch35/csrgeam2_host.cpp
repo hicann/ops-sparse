@@ -26,6 +26,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <vector>
 
 #include "acl/acl.h"
 #include "cann_ops_sparse.h"
@@ -58,18 +59,27 @@ static aclsparseStatus_t FillEmptyCRowPtrC(
     // Callers guarantee m >= 0 (ValidateCommonCsrgeam2Args rejects m < 0)
     size_t sizeBytes = (static_cast<size_t>(m) + 1) * sizeof(int32_t);
     size_t countElems = static_cast<size_t>(m) + 1;
-    aclError aclRet = aclrtMemsetD32Async(
-        csrSortedRowPtrC, sizeBytes,
-        static_cast<uint32_t>(baseC), countElems, stream);
-    CHECK_RET(aclRet == ACL_ERROR_NONE,
-              OP_LOGE("aclsparseXcsrgeam2Nnz", "memset empty csrRowPtrC failed, ret=%d", aclRet);
-              return ACL_SPARSE_STATUS_EXECUTION_FAILED);
+    // aclrtMemsetD32Async not available in CANN 9.0.0-beta.2; use memset for
+    // baseC==0 (byte-level zero fill is equivalent) or H2D copy for baseC!=0.
+    if (baseC == 0) {
+        aclError aclRet = aclrtMemsetAsync(csrSortedRowPtrC, sizeBytes, 0, countElems * sizeof(int32_t), stream);
+        CHECK_RET(aclRet == ACL_ERROR_NONE,
+                  OP_LOGE("aclsparseXcsrgeam2Nnz", "memset empty csrRowPtrC failed, ret=%d", aclRet);
+                  return ACL_SPARSE_STATUS_EXECUTION_FAILED);
+    } else {
+        std::vector<int32_t> hostRowPtr(countElems, baseC);
+        aclError aclRet = aclrtMemcpy(csrSortedRowPtrC, sizeBytes, hostRowPtr.data(),
+                                      sizeBytes, ACL_MEMCPY_HOST_TO_DEVICE);
+        CHECK_RET(aclRet == ACL_ERROR_NONE,
+                  OP_LOGE("aclsparseXcsrgeam2Nnz", "memcpy empty csrRowPtrC failed, ret=%d", aclRet);
+                  return ACL_SPARSE_STATUS_EXECUTION_FAILED);
+    }
 
     if (h->pointerMode == ACL_SPARSE_POINTER_MODE_HOST) {
         // Synchronous: matches cuSPARSE semantic (this API blocks until result is ready)
         *nnzTotalDevHostPtr = 0;
     } else {
-        aclError aclRetNnz = aclrtMemsetD32Async(nnzTotalDevHostPtr, sizeof(int32_t), 0u, 1u, stream);
+        aclError aclRetNnz = aclrtMemsetAsync(nnzTotalDevHostPtr, sizeof(int32_t), 0, sizeof(int32_t), stream);
         CHECK_RET(aclRetNnz == ACL_ERROR_NONE,
                   OP_LOGE("aclsparseXcsrgeam2Nnz", "memset nnzTotal failed, ret=%d", aclRetNnz);
                   return ACL_SPARSE_STATUS_EXECUTION_FAILED);

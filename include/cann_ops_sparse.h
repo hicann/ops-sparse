@@ -1124,6 +1124,83 @@ aclsparseStatus_t aclsparseSgpsvInterleavedBatch_bufferSizeExt(
     int batchCount, size_t *pBufferSizeInBytes);
 
 // ============================================================================
+// Legacy API: aclsparseCsr2cscEx2 — CSR to CSC format conversion
+// ============================================================================
+
+// Action type for format conversion: whether to copy values or only structure.
+typedef enum aclsparseAction_t {
+    ACL_SPARSE_ACTION_SYMBOLIC = 0,  // Only compute output structure (colPtr, rowInd).
+    ACL_SPARSE_ACTION_NUMERIC        // Compute structure and copy values.
+} aclsparseAction_t;
+
+// Algorithm selector for CSR to CSC conversion.
+typedef enum aclsparseCsr2CscAlg_t {
+    ACL_SPARSE_CSR2CSC_ALG_DEFAULT = 0,
+    ACL_SPARSE_CSR2CSC_ALG1
+} aclsparseCsr2CscAlg_t;
+
+/**
+ * @brief Query workspace size for aclsparseCsr2cscEx2.
+ *
+ * @param handle       IN, HOST, aclsparse handle.
+ * @param m            IN, HOST, number of rows (CSR) / columns (CSC).
+ * @param n            IN, HOST, number of columns (CSR) / rows (CSC).
+ * @param nnz          IN, HOST, number of nonzero elements.
+ * @param csrVal       IN, DEVICE, CSR nonzero values (length nnz).
+ * @param csrRowPtr    IN, DEVICE, CSR row pointers (length m+1).
+ * @param csrColInd    IN, DEVICE, CSR column indices (length nnz).
+ * @param cscVal       IN, DEVICE, CSC nonzero values (may be NULL for query).
+ * @param cscColPtr    IN, DEVICE, CSC column pointers (may be NULL for query).
+ * @param cscRowInd    IN, DEVICE, CSC row indices (may be NULL for query).
+ * @param valType      IN, HOST, data type of nonzero values.
+ * @param copyValues   IN, HOST, SYMBOLIC (structure only) or NUMERIC (structure + values).
+ * @param idxBase      IN, HOST, index base (0-based or 1-based).
+ * @param alg          IN, HOST, algorithm selector (ALG_DEFAULT).
+ * @param bufferSize   OUT, HOST, required workspace size in bytes.
+ * @return aclsparseStatus_t
+ */
+aclsparseStatus_t aclsparseCsr2cscEx2_bufferSize(
+    aclsparseHandle_t handle, int m, int n, int nnz,
+    const void *csrVal, const int *csrRowPtr, const int *csrColInd,
+    void *cscVal, int *cscColPtr, int *cscRowInd,
+    aclDataType valType, aclsparseAction_t copyValues,
+    aclsparseIndexBase_t idxBase, aclsparseCsr2CscAlg_t alg,
+    size_t *bufferSize);
+
+/**
+ * @brief Convert a sparse matrix from CSR format to CSC format.
+ *
+ * Performs the format conversion: given CSR (csrVal, csrRowPtr, csrColInd),
+ * produce CSC (cscVal, cscColPtr, cscRowInd). When copyValues is SYMBOLIC,
+ * only cscColPtr and cscRowInd are computed; cscVal is left unmodified.
+ * When copyValues is NUMERIC, all three output arrays are populated.
+ *
+ * @param handle       IN, HOST, aclsparse handle.
+ * @param m            IN, HOST, number of rows (CSR) / columns (CSC).
+ * @param n            IN, HOST, number of columns (CSR) / rows (CSC).
+ * @param nnz          IN, HOST, number of nonzero elements.
+ * @param csrVal       IN, DEVICE, CSR nonzero values (length nnz).
+ * @param csrRowPtr    IN, DEVICE, CSR row pointers (length m+1).
+ * @param csrColInd    IN, DEVICE, CSR column indices (length nnz).
+ * @param cscVal       OUT, DEVICE, CSC nonzero values (length nnz).
+ * @param cscColPtr    OUT, DEVICE, CSC column pointers (length n+1).
+ * @param cscRowInd    OUT, DEVICE, CSC row indices (length nnz).
+ * @param valType      IN, HOST, data type of nonzero values.
+ * @param copyValues   IN, HOST, SYMBOLIC (structure only) or NUMERIC (structure + values).
+ * @param idxBase      IN, HOST, index base (0-based or 1-based).
+ * @param alg          IN, HOST, algorithm selector (ALG_DEFAULT).
+ * @param buffer       IN, DEVICE, workspace (size from bufferSize query).
+ * @return aclsparseStatus_t
+ */
+aclsparseStatus_t aclsparseCsr2cscEx2(
+    aclsparseHandle_t handle, int m, int n, int nnz,
+    const void *csrVal, const int *csrRowPtr, const int *csrColInd,
+    void *cscVal, int *cscColPtr, int *cscRowInd,
+    aclDataType valType, aclsparseAction_t copyValues,
+    aclsparseIndexBase_t idxBase, aclsparseCsr2CscAlg_t alg,
+    void *buffer);
+
+// ============================================================================
 // Legacy API: aclsparseXcoosort — COO format in-place stable sort (dual-key)
 // ============================================================================
 
