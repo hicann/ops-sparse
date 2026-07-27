@@ -11,6 +11,7 @@
 #ifndef TEST_FRAME_VERIFY_H_
 #define TEST_FRAME_VERIFY_H_
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <iomanip>
@@ -19,6 +20,7 @@
 #include <string>
 #include <vector>
 
+#include "acl/acl.h"
 #include "types.h"
 
 namespace sparse_test {
@@ -177,6 +179,129 @@ private:
     size_t failCount_ = 0;
 };
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// Helpers: MIXED_TOLERANCE thresholds (experimental_standard.md)
+//   per-element max_abs_error_limit = max(fixed_value, 32 * ULP)
+//   ULP(x) = 2^(floor(log2|x|) - mantissaBits)  for finite x != 0
+//   ULP(0) = 2^(emin - mantissaBits)              (subnormal ULP)
+// ═══════════════════════════════════════════════════════════════════════════════
+inline double getUlpsAt(double magnitude, int mantissaBits, int emin)
+{
+    double absMag = std::abs(magnitude);
+    if (absMag == 0.0)
+        return std::pow(2.0, static_cast<double>(emin - mantissaBits));
+    int exp = 0;
+    std::frexp(absMag, &exp);
+    return std::ldexp(1.0, std::max(exp - 1, emin) - mantissaBits);
+}
+
+struct MixedToleranceDefaults {
+    double rtol;
+    double atol;
+    double maxAbsErrorLimitFixed;
+    int mantissaBits;
+    int emin;
+};
+
+inline MixedToleranceDefaults getMixedToleranceDefaults(aclDataType dtype)
+{
+    switch (dtype) {
+        case ACL_FLOAT16:       return {0.001953125, 0.001953125, 1e-1, 10, -14};
+        case ACL_BF16:          return {0.015625, 0.015625, 1.0, 7, -126};
+        case ACL_FLOAT:         return {0.0009765625, 1.52587890625e-5, 1e-2, 23, -126};
+        case ACL_FLOAT8_E4M3FN: return {0.25, 0.0625, 1.0, 3, -6};
+        case ACL_FLOAT8_E5M2:   return {0.5, 0.125, 1e-1, 2, -14};
+        default:                return {0.0009765625, 1.52587890625e-5, 1e-2, 23, -126};
+    }
+}
+
+inline void applyMixedToleranceInternal(VerifyConfig& cfg, const MixedToleranceDefaults& d)
+{
+    cfg.mode = PrecisionMode::MIXED_TOLERANCE;
+    cfg.mixedRtol = d.rtol;
+    cfg.mixedAtol = d.atol;
+    cfg.mixedRequiredMatchedRatio = 0.99;
+    cfg.mixedMantissaBits = d.mantissaBits;
+    cfg.mixedEmin = d.emin;
+}
+
+inline void applyMixedTolerance(VerifyConfig& cfg, aclDataType dtype,
+                                const float* goldenData, size_t count)
+{
+    auto d = getMixedToleranceDefaults(dtype);
+    applyMixedToleranceInternal(cfg, d);
+    cfg.mixedMaxAbsErrorLimit = d.maxAbsErrorLimitFixed;
+    (void)goldenData;
+    (void)count;
+}
+
+inline void applyMixedTolerance(VerifyConfig& cfg, aclDataType dtype, float goldenScalar)
+{
+    auto d = getMixedToleranceDefaults(dtype);
+    applyMixedToleranceInternal(cfg, d);
+    cfg.mixedMaxAbsErrorLimit = d.maxAbsErrorLimitFixed;
+    (void)goldenScalar;
+}
+
+class MixedToleranceStrategy : public VerifyStrategy {
+public:
+    MixedToleranceStrategy(double absTol, double relTol, double requiredMatchedRatio,
+                           double fixedLimit, int mantissaBits, int emin)
+        : absTol_(absTol), relTol_(relTol), requiredMatchedRatio_(requiredMatchedRatio),
+          fixedLimit_(fixedLimit), mantissaBits_(mantissaBits), emin_(emin)
+    {}
+
+protected:
+    void processElement(float outVal, float goldVal) override
+    {
+        if (std::isnan(outVal) || std::isnan(goldVal) || std::isinf(outVal) || std::isinf(goldVal)) {
+            maxAbsErrorLimitFailed_ = true;
+            failCount_++;
+            return;
+        }
+        double diff = std::abs(static_cast<double>(outVal) - static_cast<double>(goldVal));
+        if (diff > maxAbsError_)
+            maxAbsError_ = diff;
+        double goldAbs = std::abs(static_cast<double>(goldVal));
+        double tolLimit = absTol_ + relTol_ * goldAbs;
+        double ulpLimit = std::max(fixedLimit_, 32.0 * getUlpsAt(goldAbs, mantissaBits_, emin_));
+        if (diff > tolLimit)
+            failCount_++;
+        if (diff > ulpLimit)
+            maxAbsErrorLimitFailed_ = true;
+    }
+
+    bool reportResult(size_t count, size_t /*skippedCount*/, const std::string& caseId) override
+    {
+        size_t matchedCount = (count >= failCount_) ? count - failCount_ : 0;
+        double matchedRatio = (count > 0) ? static_cast<double>(matchedCount) / static_cast<double>(count) : 1.0;
+        bool ratioOk = matchedRatio >= requiredMatchedRatio_;
+        bool errorLimitOk = !maxAbsErrorLimitFailed_;
+        bool pass = ratioOk && errorLimitOk;
+
+        std::cout << std::scientific << std::setprecision(4);
+        std::cout << "[" << caseId << "] " << (pass ? "PASSED" : "FAILED")
+                  << " (matchedRatio=" << matchedRatio << " (req=" << requiredMatchedRatio_ << ")"
+                  << ", maxAbsErr=" << maxAbsError_
+                  << ", per-element-limit=max(" << fixedLimit_ << ", 32*ULP_at_each_element)"
+                  << ", " << failCount_ << "/" << count << " failures"
+                  << ", atol=" << absTol_ << ", rtol=" << relTol_ << ")" << std::endl;
+        std::cout << std::fixed << std::setprecision(6);
+        return pass;
+    }
+
+private:
+    double absTol_;
+    double relTol_;
+    double requiredMatchedRatio_;
+    double fixedLimit_;
+    int mantissaBits_;
+    int emin_;
+    size_t failCount_ = 0;
+    double maxAbsError_ = 0.0;
+    bool maxAbsErrorLimitFailed_ = false;
+};
+
 class Verifier {
 public:
     static bool verifyVector(const std::vector<float>& output, const std::vector<float>& golden,
@@ -199,6 +324,22 @@ public:
         std::cout << "[" << caseId << "] Output: " << output << " Golden: " << golden << std::endl;
         if (output == golden) return true;
         if (std::isnan(output) && std::isnan(golden)) return true;
+        if (cfg.mode == PrecisionMode::MIXED_TOLERANCE) {
+            if (std::isnan(output) || std::isnan(golden) || std::isinf(output) || std::isinf(golden)) {
+                std::cout << "[" << caseId << "] FAILED (special value mismatch)" << std::endl;
+                return false;
+            }
+            double diff = std::abs(static_cast<double>(output) - static_cast<double>(golden));
+            double goldAbs = std::abs(static_cast<double>(golden));
+            double tolLimit = cfg.mixedAtol + cfg.mixedRtol * goldAbs;
+            double ulpLimit = std::max(cfg.mixedMaxAbsErrorLimit,
+                                       32.0 * getUlpsAt(goldAbs, cfg.mixedMantissaBits, cfg.mixedEmin));
+            bool pass = (diff <= tolLimit) && (diff <= ulpLimit);
+            std::cout << "[" << caseId << "] " << (pass ? "PASSED" : "FAILED")
+                      << " (mixed tolerance, diff=" << diff << ", tolLimit=" << tolLimit
+                      << ", ulpLimit=" << ulpLimit << ")" << std::endl;
+            return pass;
+        }
         return std::abs(output - golden) < cfg.absTol;
     }
 
@@ -222,6 +363,10 @@ private:
                 return std::make_unique<ExactStrategy>();
             case PrecisionMode::INTEGER:
                 return std::make_unique<IntegerStrategy>();
+            case PrecisionMode::MIXED_TOLERANCE:
+                return std::make_unique<MixedToleranceStrategy>(
+                    cfg.mixedAtol, cfg.mixedRtol, cfg.mixedRequiredMatchedRatio,
+                    cfg.mixedMaxAbsErrorLimit, cfg.mixedMantissaBits, cfg.mixedEmin);
             case PrecisionMode::COMBINED:
             default:
                 return std::make_unique<MereMareStrategy>(cfg.mereThreshold, cfg.mareMultiplier);

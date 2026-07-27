@@ -22,6 +22,7 @@ enum class PrecisionMode {
     MERE_MARE,
     EXACT,
     INTEGER,
+    MIXED_TOLERANCE,
 };
 
 struct VerifyConfig {
@@ -56,6 +57,27 @@ struct VerifyConfig {
     }
     VerifyConfig& SetEpsilon(double e) {
         epsilonForRel = e;
+        return *this;
+    }
+
+    double mixedAtol = 1.52587890625e-5;
+    double mixedRtol = 0.0009765625;
+    double mixedRequiredMatchedRatio = 0.99;
+    double mixedMaxAbsErrorLimit = 1e-2;
+    int mixedMantissaBits = 23;
+    int mixedEmin = -126;
+
+    VerifyConfig& SetMixedTol(double a, double r) {
+        mixedAtol = a;
+        mixedRtol = r;
+        return *this;
+    }
+    VerifyConfig& SetMixedRequiredRatio(double r) {
+        mixedRequiredMatchedRatio = r;
+        return *this;
+    }
+    VerifyConfig& SetMixedMaxAbsErrLim(double l) {
+        mixedMaxAbsErrorLimit = l;
         return *this;
     }
 };
