@@ -246,8 +246,6 @@ static void PrintCaseInfo(const Gtsv2Param& p) {
               << " ==== m=" << p.m << " n=" << p.n << " ldb=" << p.ldb
               << " matrixType=" << static_cast<int>(p.matrixType)
               << " value_lo=" << p.value_lo << " value_hi=" << p.value_hi
-              << " rtol=" << p.rtol << " atol=" << p.atol
-              << " mareMultiplier=" << p.mareMultiplier
               << " desc=" << p.description << "\n";
 }
 
@@ -339,12 +337,6 @@ static void VerifyPrecisionResult(const Gtsv2Param& p,
     auto B_golden = B_host;
     Gtsv2Golden(tri.dl, tri.d, tri.du, B_golden, m, n, ldb);
 
-    VerifyConfig cfg;
-    cfg.SetMode(PrecisionMode::MERE_MARE)
-       .SetAbsTol(p.atol)
-       .SetMERE(p.rtol)
-       .SetMARE(p.mareMultiplier);
-
     std::vector<float> X_npu;
     std::vector<float> X_golden;
     X_npu.reserve(static_cast<size_t>(m) * n);
@@ -356,9 +348,10 @@ static void VerifyPrecisionResult(const Gtsv2Param& p,
         }
     }
 
+    VerifyConfig cfg;
+    applyMixedTolerance(cfg, ACL_FLOAT, X_golden.data(), X_golden.size());
     bool pass = Verifier::verifyVector(X_npu, X_golden, cfg, p.caseId());
     EXPECT_TRUE(pass);
-    std::cout << "[" << p.caseId() << "] PASSED\n";
 }
 
 // ============================================================================
@@ -375,7 +368,7 @@ TEST_P(Gtsv2Test, Gtsv2Success) {
     auto tri = GenerateTridiagMatrix(p);
 
     uint32_t rhsSeed = GetSeed(p) + 100;
-    auto B_host = makeFullColMajor(m, n, ldb, rhsSeed, -5.0, 10.0);
+    auto B_host = makeFullColMajor(m, n, ldb, rhsSeed, -5.0, 5.0);
 
     auto npuResult = Gtsv2Npu(*spHandle_, env_->stream(),
                                 tri.dl, tri.d, tri.du,

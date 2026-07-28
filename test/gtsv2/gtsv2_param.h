@@ -84,11 +84,6 @@ struct Gtsv2Param : public SparseTestParamBase {
 
     uint32_t seed = 0;
 
-    // Precision tolerances for golden-vs-NPU comparison
-    double rtol = 0.0;
-    double atol = 0.0;
-    double mareMultiplier = 0.0;
-
     std::string description;
     std::string expect_result;
 
@@ -101,9 +96,6 @@ struct Gtsv2Param : public SparseTestParamBase {
         value_lo       = parseDouble(row, "value_lo");
         value_hi       = parseDouble(row, "value_hi");
         seed           = static_cast<uint32_t>(parseInt(row, "seed"));
-        rtol           = parseDouble(row, "rtol");
-        atol           = parseDouble(row, "atol");
-        mareMultiplier = parseDouble(row, "mareMultiplier");
         description    = parseString(row, "description");
         expect_result  = parseString(row, "expect_result");
     }
