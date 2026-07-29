@@ -116,25 +116,34 @@ public:
 protected:
     bool shouldSkip(float outVal, float goldVal) override {
         if (VerifyStrategy::shouldSkip(outVal, goldVal)) return true;
-        if (std::isinf(outVal) || std::isinf(goldVal)) return true;
+        bool outAbnormal = std::isnan(outVal) || std::isinf(outVal);
+        bool goldAbnormal = std::isnan(goldVal) || std::isinf(goldVal);
+        if (outAbnormal && goldAbnormal) return true;
         return false;
     }
     void processElement(float outVal, float goldVal) override {
+        bool outAbnormal = std::isnan(outVal) || std::isinf(outVal);
+        bool goldAbnormal = std::isnan(goldVal) || std::isinf(goldVal);
+        if (outAbnormal || goldAbnormal) {
+            mismatchCount_++;
+            return;
+        }
         double relErr = std::abs(outVal - goldVal) / (std::abs(goldVal) + kEpsilon);
         sumRelErr_ += relErr;
         if (relErr > maxRelErr_) maxRelErr_ = relErr;
         if (relErr > outlierLimit_) outlierCount_++;
     }
     bool reportResult(size_t count, size_t skippedCount, const std::string& caseId) override {
-        size_t validCount = count - skippedCount;
-        double mere = (validCount > 0) ? sumRelErr_ / static_cast<double>(validCount) : 0.0;
+        size_t effectiveCount = count - skippedCount - mismatchCount_;
+        double mere = (effectiveCount > 0) ? sumRelErr_ / static_cast<double>(effectiveCount) : 0.0;
 
         std::cout << "[" << caseId << "] MERE=" << mere << " MARE=" << maxRelErr_
                   << " (threshold=" << threshold_ << ", outlier_limit=" << outlierLimit_;
         if (skippedCount > 0) std::cout << ", skipped " << skippedCount << " elements";
+        if (mismatchCount_ > 0) std::cout << ", mismatch " << mismatchCount_ << " elements";
         std::cout << ")" << std::endl;
 
-        bool pass = (mere < threshold_) && (maxRelErr_ < outlierLimit_);
+        bool pass = (mismatchCount_ == 0) && (mere < threshold_) && (maxRelErr_ < outlierLimit_);
         std::cout << "[" << caseId << "] " << (pass ? "PASSED" : "FAILED")
                   << " (MERE < threshold && MARE < " << multiplier_ << "*threshold, "
                   << outlierCount_ << " outliers out of " << count << " elements)" << std::endl;
@@ -148,6 +157,7 @@ private:
     double sumRelErr_ = 0.0;
     double maxRelErr_ = 0.0;
     size_t outlierCount_ = 0;
+    size_t mismatchCount_ = 0;
 };
 
 class ExactStrategy : public VerifyStrategy {

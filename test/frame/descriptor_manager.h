@@ -52,6 +52,95 @@ public:
         return m;
     }
 
+    static SpMatManager createCsc(int64_t rows, int64_t cols, int64_t nnz,
+                                   void* colOffsets, void* rowIndices, void* values,
+                                   aclsparseIndexType_t colOffsetType = ACL_SPARSE_INDEX_32I,
+                                   aclsparseIndexType_t rowIdxType = ACL_SPARSE_INDEX_32I,
+                                   aclsparseIndexBase_t idxBase = ACL_SPARSE_INDEX_BASE_ZERO,
+                                   aclDataType valueType = ACL_FLOAT) {
+        SpMatManager m;
+        auto s = aclsparseCreateCsc(&m.descr_, rows, cols, nnz, colOffsets, rowIndices,
+                                    values, colOffsetType, rowIdxType, idxBase, valueType);
+        if (s != ACL_SPARSE_STATUS_SUCCESS) throw std::runtime_error("aclsparseCreateCsc failed");
+        return m;
+    }
+
+    static SpMatManager createConstCsc(int64_t rows, int64_t cols, int64_t nnz,
+                                        const void* colOffsets, const void* rowIndices, const void* values,
+                                        aclsparseIndexType_t colOffsetType = ACL_SPARSE_INDEX_32I,
+                                        aclsparseIndexType_t rowIdxType = ACL_SPARSE_INDEX_32I,
+                                        aclsparseIndexBase_t idxBase = ACL_SPARSE_INDEX_BASE_ZERO,
+                                        aclDataType valueType = ACL_FLOAT) {
+        SpMatManager m;
+        aclsparseConstSpMatDescr_t constDescr = nullptr;
+        auto s = aclsparseCreateConstCsc(&constDescr, rows, cols, nnz, colOffsets, rowIndices,
+                                         values, colOffsetType, rowIdxType, idxBase, valueType);
+        if (s != ACL_SPARSE_STATUS_SUCCESS) throw std::runtime_error("aclsparseCreateConstCsc failed");
+        m.descr_ = const_cast<aclsparseSpMatDescr_t>(constDescr);
+        return m;
+    }
+
+    static SpMatManager createCoo(int64_t rows, int64_t cols, int64_t nnz,
+                                   void* rowInd, void* colInd, void* values,
+                                   aclsparseIndexType_t cooIdxType = ACL_SPARSE_INDEX_32I,
+                                   aclsparseIndexBase_t idxBase = ACL_SPARSE_INDEX_BASE_ZERO,
+                                   aclDataType valueType = ACL_FLOAT) {
+        SpMatManager m;
+        auto s = aclsparseCreateCoo(&m.descr_, rows, cols, nnz, rowInd, colInd,
+                                    values, cooIdxType, idxBase, valueType);
+        if (s != ACL_SPARSE_STATUS_SUCCESS) throw std::runtime_error("aclsparseCreateCoo failed");
+        return m;
+    }
+
+    static SpMatManager createConstCoo(int64_t rows, int64_t cols, int64_t nnz,
+                                        const void* rowInd, const void* colInd, const void* values,
+                                        aclsparseIndexType_t cooIdxType = ACL_SPARSE_INDEX_32I,
+                                        aclsparseIndexBase_t idxBase = ACL_SPARSE_INDEX_BASE_ZERO,
+                                        aclDataType valueType = ACL_FLOAT) {
+        SpMatManager m;
+        aclsparseConstSpMatDescr_t constDescr = nullptr;
+        auto s = aclsparseCreateConstCoo(&constDescr, rows, cols, nnz, rowInd, colInd,
+                                         values, cooIdxType, idxBase, valueType);
+        if (s != ACL_SPARSE_STATUS_SUCCESS) throw std::runtime_error("aclsparseCreateConstCoo failed");
+        m.descr_ = const_cast<aclsparseSpMatDescr_t>(constDescr);
+        return m;
+    }
+
+    static SpMatManager createSlicedEll(int64_t rows, int64_t cols, int64_t nnz,
+                                         void* slicePtr, void* colInd, void* values,
+                                         int64_t sliceNnz, int64_t numSlices,
+                                         aclsparseIndexType_t sellIdxType = ACL_SPARSE_INDEX_32I,
+                                         aclsparseIndexBase_t idxBase = ACL_SPARSE_INDEX_BASE_ZERO,
+                                         aclDataType valueType = ACL_FLOAT) {
+        SpMatManager m;
+        auto s = aclsparseCreateSlicedEll(&m.descr_, rows, cols, nnz, sliceNnz, numSlices,
+                                          slicePtr, colInd, values,
+                                          sellIdxType, idxBase, valueType);
+        if (s != ACL_SPARSE_STATUS_SUCCESS) throw std::runtime_error("aclsparseCreateSlicedEll failed");
+        return m;
+    }
+
+    static SpMatManager createConstSlicedEll(int64_t rows, int64_t cols, int64_t nnz,
+                                              const void* slicePtr, const void* colInd, const void* values,
+                                              int64_t sliceNnz, int64_t numSlices,
+                                              aclsparseIndexType_t sellIdxType = ACL_SPARSE_INDEX_32I,
+                                              aclsparseIndexBase_t idxBase = ACL_SPARSE_INDEX_BASE_ZERO,
+                                              aclDataType valueType = ACL_FLOAT) {
+        SpMatManager m;
+        aclsparseConstSpMatDescr_t constDescr = nullptr;
+        auto s = aclsparseCreateConstSlicedEll(&constDescr, rows, cols, nnz, sliceNnz, numSlices,
+                                               slicePtr, colInd, values,
+                                               sellIdxType, idxBase, valueType);
+        if (s != ACL_SPARSE_STATUS_SUCCESS) throw std::runtime_error("aclsparseCreateConstSlicedEll failed");
+        m.descr_ = const_cast<aclsparseSpMatDescr_t>(constDescr);
+        return m;
+    }
+
+    void setAttribute(aclsparseSpMatAttribute_t attr, const void* data, size_t dataSize) {
+        auto s = aclsparseSpMatSetAttribute(descr_, attr, data, dataSize);
+        if (s != ACL_SPARSE_STATUS_SUCCESS) throw std::runtime_error("aclsparseSpMatSetAttribute failed");
+    }
+
     aclsparseSpMatDescr_t get() { return descr_; }
     aclsparseConstSpMatDescr_t cget() const { return descr_; }
 
@@ -196,6 +285,7 @@ public:
 
     static DeviceBuffer alloc(size_t size) {
         DeviceBuffer b;
+        if (size == 0) return b;
         auto ret = aclrtMalloc(reinterpret_cast<void**>(&b.ptr_), size, ACL_MEM_MALLOC_HUGE_FIRST);
         if (ret != ACL_SUCCESS) throw std::runtime_error("aclrtMalloc failed");
         b.size_ = size;
@@ -203,6 +293,7 @@ public:
     }
 
     static DeviceBuffer copyFrom(const void* hostPtr, size_t size) {
+        if (size == 0) return DeviceBuffer();
         auto b = alloc(size);
         auto ret = aclrtMemcpy(b.ptr_, size, hostPtr, size, ACL_MEMCPY_HOST_TO_DEVICE);
         if (ret != ACL_SUCCESS) throw std::runtime_error("aclrtMemcpy H2D failed");
@@ -242,6 +333,37 @@ public:
 private:
     void* ptr_ = nullptr;
     size_t size_ = 0;
+};
+
+class SpSVDescrManager {
+public:
+    SpSVDescrManager() {
+        auto s = aclsparseSpSV_createDescr(&descr_);
+        if (s != ACL_SPARSE_STATUS_SUCCESS) throw std::runtime_error("aclsparseSpSV_createDescr failed");
+    }
+
+    aclsparseSpSVDescr_t get() { return descr_; }
+
+    ~SpSVDescrManager() {
+        if (descr_) aclsparseSpSV_destroyDescr(descr_);
+    }
+
+    SpSVDescrManager(const SpSVDescrManager&) = delete;
+    SpSVDescrManager& operator=(const SpSVDescrManager&) = delete;
+    SpSVDescrManager(SpSVDescrManager&& other) noexcept : descr_(other.descr_) {
+        other.descr_ = nullptr;
+    }
+    SpSVDescrManager& operator=(SpSVDescrManager&& other) noexcept {
+        if (this != &other) {
+            if (descr_) aclsparseSpSV_destroyDescr(descr_);
+            descr_ = other.descr_;
+            other.descr_ = nullptr;
+        }
+        return *this;
+    }
+
+private:
+    aclsparseSpSVDescr_t descr_ = nullptr;
 };
 
 }

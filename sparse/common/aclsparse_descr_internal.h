@@ -28,7 +28,7 @@
 #include <acl/acl.h>
 #include "cann_ops_sparse.h"
 
-// 稀疏矩阵描述符内部结构（CSR / CSC 共用）。
+// 稀疏矩阵描述符内部结构（CSR / CSC / COO / SLICED_ELL 共用）。
 struct aclsparseSpMatDescr {
     // 由 *Preprocess 写入：记录当前已预处理(active)的 workspace buffer。
     // SpMM/SpMV 据此决定走快路径(复用)还是就地重算（active buffer 机制）。
@@ -44,7 +44,23 @@ struct aclsparseSpMatDescr {
     aclsparseIndexType_t ptrType{};
     aclsparseIndexType_t IdxType{};
     aclDataType valueType{};
+    aclsparseFillMode_t fillMode = ACL_SPARSE_FILL_MODE_LOWER;
+    aclsparseDiagType_t diagType = ACL_SPARSE_DIAG_TYPE_NON_UNIT;
+    uint64_t sliceNnz = 0;
+    int64_t numSlices = 0;
 };
+
+inline aclsparseStatus_t ValidateSpMatCreateParams(
+    const void *descrPtr, int64_t rows, int64_t cols, int64_t nnz)
+{
+    if (descrPtr == nullptr) {
+        return ACL_SPARSE_STATUS_INVALID_VALUE;
+    }
+    if (rows < 0 || cols < 0 || nnz < 0) {
+        return ACL_SPARSE_STATUS_INVALID_VALUE;
+    }
+    return ACL_SPARSE_STATUS_SUCCESS;
+}
 
 // 校验 CSR 稀疏矩阵索引类型（严格模式）：当前仅支持 32 位且 ptr/col 类型一致。
 // 供 spmm、spmv/arch22 等仅支持 I32 索引的算子在 execute 路径使用。
@@ -60,16 +76,22 @@ inline aclsparseStatus_t AclsparseValidateSupportedCsrIndexTypes(aclsparseIndexT
     return ACL_SPARSE_STATUS_NOT_SUPPORTED;
 }
 
-// 校验 CSR 稀疏矩阵索引类型（扩展模式）：colIndType == I32，ptrType ∈ {I32, I64}。
-// 供 aclsparseCreateCsr / aclsparseCreateConstCsr 使用：CSR 描述符本身可承载
-// I64 rowOffsets，具体算子的 execute 路径再决定是否真正支持 I64 计算。
+// 校验 CSR 稀疏矩阵索引类型（扩展模式）：
+// 允许 (I32,I32)、(I64,I32)、(I64,I64) 三种组合，拒绝其余。
+// 供 aclsparseCreateCsr / aclsparseCreateConstCsr 使用。
 inline aclsparseStatus_t AclsparseValidateSupportedCsrIndexTypesExtended(aclsparseIndexType_t ptrType,
                                                                          aclsparseIndexType_t idxType)
 {
-    if (idxType != ACL_SPARSE_INDEX_32I) {
+    // ptrType 仅允许 I32 / I64
+    if (ptrType != ACL_SPARSE_INDEX_32I && ptrType != ACL_SPARSE_INDEX_64I) {
         return ACL_SPARSE_STATUS_NOT_SUPPORTED;
     }
-    if (ptrType != ACL_SPARSE_INDEX_32I && ptrType != ACL_SPARSE_INDEX_64I) {
+    // idxType 仅允许 I32 / I64
+    if (idxType != ACL_SPARSE_INDEX_32I && idxType != ACL_SPARSE_INDEX_64I) {
+        return ACL_SPARSE_STATUS_NOT_SUPPORTED;
+    }
+    // 拒绝 (I32, I64)：无算子支持此组合
+    if (ptrType == ACL_SPARSE_INDEX_32I && idxType == ACL_SPARSE_INDEX_64I) {
         return ACL_SPARSE_STATUS_NOT_SUPPORTED;
     }
     return ACL_SPARSE_STATUS_SUCCESS;

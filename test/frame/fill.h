@@ -494,4 +494,6 @@ inline std::vector<float> makeKnownSolutionPentadiag(
 }
 }
 
+#include "fill_sparse.h"
+
 #endif

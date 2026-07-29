@@ -18,6 +18,7 @@
 #include "cann_ops_sparse.h"
 #include "aclsparse_host_utils.h"
 #include "aclsparse_handle_internal.h"
+#include "aclsparse_descr_internal.h"
 
 #include <new>
 
@@ -196,20 +197,57 @@ aclsparseStatus_t aclsparseGetVersion(aclsparseHandle_t handle, int *version)
     return ACL_SPARSE_STATUS_SUCCESS;
 }
 
-aclsparseStatus_t aclsparseCreateCsc(aclsparseSpMatDescr_t * /*spMatDescr*/, int64_t /*rows*/, int64_t /*cols*/,
-    int64_t /*nnz*/, void * /*cscColOffsets*/, void * /*cscRowInd*/, void * /*cscValues*/,
-    aclsparseIndexType_t /*cscColOffsetsType*/, aclsparseIndexType_t /*cscRowIndType*/,
-    aclsparseIndexBase_t /*idxBase*/, aclDataType /*valueType*/)
+aclsparseStatus_t aclsparseCreateCsc(aclsparseSpMatDescr_t *spMatDescr, int64_t rows, int64_t cols,
+    int64_t nnz, void *cscColOffsets, void *cscRowInd, void *cscValues,
+    aclsparseIndexType_t cscColOffsetsType, aclsparseIndexType_t cscRowIndType,
+    aclsparseIndexBase_t idxBase, aclDataType valueType)
 {
-    return ACL_SPARSE_STATUS_NOT_SUPPORTED;
+    aclsparseStatus_t st = ValidateSpMatCreateParams(spMatDescr, rows, cols, nnz);
+    if (st != ACL_SPARSE_STATUS_SUCCESS) {
+        return st;
+    }
+    if (cscColOffsetsType != ACL_SPARSE_INDEX_32I && cscColOffsetsType != ACL_SPARSE_INDEX_64I) {
+        return ACL_SPARSE_STATUS_INVALID_VALUE;
+    }
+    if (cscRowIndType != ACL_SPARSE_INDEX_32I && cscRowIndType != ACL_SPARSE_INDEX_64I) {
+        return ACL_SPARSE_STATUS_INVALID_VALUE;
+    }
+    auto *inner = new (std::nothrow) aclsparseSpMatDescr();
+    if (inner == nullptr) {
+        return ACL_SPARSE_STATUS_ALLOC_FAILED;
+    }
+    inner->format = ACL_SPARSE_FORMAT_CSC;
+    inner->rows = static_cast<uint64_t>(rows);
+    inner->cols = static_cast<uint64_t>(cols);
+    inner->nnz = static_cast<uint64_t>(nnz);
+    inner->ptrs = cscColOffsets;
+    inner->idxs = cscRowInd;
+    inner->values = cscValues;
+    inner->baseType = idxBase;
+    inner->ptrType = cscColOffsetsType;
+    inner->IdxType = cscRowIndType;
+    inner->valueType = valueType;
+    *spMatDescr = inner;
+    return ACL_SPARSE_STATUS_SUCCESS;
 }
 
-aclsparseStatus_t aclsparseCreateConstCsc(aclsparseConstSpMatDescr_t * /*spMatDescr*/, int64_t /*rows*/,
-    int64_t /*cols*/, int64_t /*nnz*/, const void * /*cscColOffsets*/, const void * /*cscRowInd*/,
-    const void * /*cscValues*/, aclsparseIndexType_t /*cscColOffsetsType*/,
-    aclsparseIndexType_t /*cscRowIndType*/, aclsparseIndexBase_t /*idxBase*/, aclDataType /*valueType*/)
+aclsparseStatus_t aclsparseCreateConstCsc(aclsparseConstSpMatDescr_t *spMatDescr, int64_t rows,
+    int64_t cols, int64_t nnz, const void *cscColOffsets, const void *cscRowInd,
+    const void *cscValues, aclsparseIndexType_t cscColOffsetsType,
+    aclsparseIndexType_t cscRowIndType, aclsparseIndexBase_t idxBase, aclDataType valueType)
 {
-    return ACL_SPARSE_STATUS_NOT_SUPPORTED;
+    if (spMatDescr == nullptr) {
+        return ACL_SPARSE_STATUS_INVALID_VALUE;
+    }
+    aclsparseSpMatDescr_t tmp = nullptr;
+    aclsparseStatus_t st = aclsparseCreateCsc(&tmp, rows, cols, nnz,
+        const_cast<void *>(cscColOffsets), const_cast<void *>(cscRowInd),
+        const_cast<void *>(cscValues), cscColOffsetsType, cscRowIndType, idxBase, valueType);
+    if (st != ACL_SPARSE_STATUS_SUCCESS) {
+        return st;
+    }
+    *spMatDescr = tmp;
+    return ACL_SPARSE_STATUS_SUCCESS;
 }
 
 aclsparseStatus_t aclsparseSetPointerMode(aclsparseHandle_t handle, aclsparsePointerMode_t mode)

@@ -1374,6 +1374,88 @@ aclsparseStatus_t aclsparseXcsrsort(
     int *P,
     void *pBuffer);
 
+// ============================================================================
+// Generic API: aclsparseSpSV — Sparse Triangular Solve (Vector)
+// ============================================================================
+
+typedef enum aclsparseSpSVAlg_t {
+    ACL_SPARSE_SPSV_ALG_DEFAULT = 0
+} aclsparseSpSVAlg_t;
+
+typedef enum aclsparseSpSVUpdate_t {
+    ACL_SPARSE_SPSV_UPDATE_GENERAL = 0,
+    ACL_SPARSE_SPSV_UPDATE_DIAGONAL
+} aclsparseSpSVUpdate_t;
+
+struct aclsparseSpSVDescr;
+typedef struct aclsparseSpSVDescr* aclsparseSpSVDescr_t;
+
+typedef enum aclsparseSpMatAttribute_t {
+    ACL_SPARSE_SPMAT_FILL_MODE = 0,
+    ACL_SPARSE_SPMAT_DIAG_TYPE
+} aclsparseSpMatAttribute_t;
+
+aclsparseStatus_t aclsparseSpSV_createDescr(aclsparseSpSVDescr_t *spsvDescr);
+aclsparseStatus_t aclsparseSpSV_destroyDescr(aclsparseSpSVDescr_t spsvDescr);
+
+aclsparseStatus_t aclsparseSpSV_bufferSize(
+    aclsparseHandle_t handle, aclsparseOperation_t opA, const void *alpha,
+    aclsparseConstSpMatDescr_t matA, aclsparseConstDnVecDescr_t vecX,
+    aclsparseDnVecDescr_t vecY, aclDataType computeType,
+    aclsparseSpSVAlg_t alg, aclsparseSpSVDescr_t spsvDescr, size_t *bufferSize);
+
+aclsparseStatus_t aclsparseSpSV_analysis(
+    aclsparseHandle_t handle, aclsparseOperation_t opA, const void *alpha,
+    aclsparseConstSpMatDescr_t matA, aclsparseConstDnVecDescr_t vecX,
+    aclsparseDnVecDescr_t vecY, aclDataType computeType,
+    aclsparseSpSVAlg_t alg, aclsparseSpSVDescr_t spsvDescr, void *externalBuffer);
+
+aclsparseStatus_t aclsparseSpSV_solve(
+    aclsparseHandle_t handle, aclsparseOperation_t opA, const void *alpha,
+    aclsparseConstSpMatDescr_t matA, aclsparseConstDnVecDescr_t vecX,
+    aclsparseDnVecDescr_t vecY, aclDataType computeType,
+    aclsparseSpSVAlg_t alg, aclsparseSpSVDescr_t spsvDescr);
+
+aclsparseStatus_t aclsparseSpSV_updateMatrix(
+    aclsparseHandle_t handle, aclsparseSpSVDescr_t spsvDescr,
+    void *newValues, aclsparseSpSVUpdate_t updatePart);
+
+aclsparseStatus_t aclsparseSpMatSetAttribute(
+    aclsparseSpMatDescr_t spMatDescr, aclsparseSpMatAttribute_t attribute,
+    const void *data, size_t dataSize);
+
+aclsparseStatus_t aclsparseSpMatGetAttribute(
+    aclsparseConstSpMatDescr_t spMatDescr, aclsparseSpMatAttribute_t attribute,
+    void *data, size_t dataSize);
+
+// ============================================================================
+// Sparse Matrix Creation: COO / SLICED_ELL
+// ============================================================================
+
+aclsparseStatus_t aclsparseCreateCoo(aclsparseSpMatDescr_t *spMatDescr,
+    int64_t rows, int64_t cols, int64_t nnz,
+    void *cooRowInd, void *cooColInd, void *cooValues,
+    aclsparseIndexType_t cooIdxType, aclsparseIndexBase_t idxBase,
+    aclDataType valueType);
+
+aclsparseStatus_t aclsparseCreateConstCoo(aclsparseConstSpMatDescr_t *spMatDescr,
+    int64_t rows, int64_t cols, int64_t nnz,
+    const void *cooRowInd, const void *cooColInd, const void *cooValues,
+    aclsparseIndexType_t cooIdxType, aclsparseIndexBase_t idxBase,
+    aclDataType valueType);
+
+aclsparseStatus_t aclsparseCreateSlicedEll(aclsparseSpMatDescr_t *spMatDescr,
+    int64_t rows, int64_t cols, int64_t nnz, int64_t sliceNnz, int64_t numSlices,
+    void *sellSlicePtr, void *sellColInd, void *sellValues,
+    aclsparseIndexType_t sellIdxType, aclsparseIndexBase_t idxBase,
+    aclDataType valueType);
+
+aclsparseStatus_t aclsparseCreateConstSlicedEll(aclsparseConstSpMatDescr_t *spMatDescr,
+    int64_t rows, int64_t cols, int64_t nnz, int64_t sliceNnz, int64_t numSlices,
+    const void *sellSlicePtr, const void *sellColInd, const void *sellValues,
+    aclsparseIndexType_t sellIdxType, aclsparseIndexBase_t idxBase,
+    aclDataType valueType);
+
 #ifdef __cplusplus
 }
 #endif

@@ -20,7 +20,47 @@
 #include "cann_ops_sparse.h"
 #include "aclsparse_descr_internal.h"
 
+#include <cstdint>
 #include <new>
+
+namespace {
+
+static aclsparseStatus_t ValidateAttributeParams(const void *spMatDescr, const void *data)
+{
+    if (spMatDescr == nullptr) {
+        return ACL_SPARSE_STATUS_INVALID_VALUE;
+    }
+    if (data == nullptr) {
+        return ACL_SPARSE_STATUS_INVALID_VALUE;
+    }
+    return ACL_SPARSE_STATUS_SUCCESS;
+}
+
+static aclsparseStatus_t ValidateAttributeAccess(
+    const void *spMatDescr, const void *data,
+    aclsparseSpMatAttribute_t attribute, size_t dataSize)
+{
+    aclsparseStatus_t st = ValidateAttributeParams(spMatDescr, data);
+    if (st != ACL_SPARSE_STATUS_SUCCESS) {
+        return st;
+    }
+    if (attribute == ACL_SPARSE_SPMAT_FILL_MODE) {
+        if (dataSize != sizeof(aclsparseFillMode_t) ||
+            reinterpret_cast<uintptr_t>(data) % alignof(aclsparseFillMode_t) != 0) {
+            return ACL_SPARSE_STATUS_INVALID_VALUE;
+        }
+    } else if (attribute == ACL_SPARSE_SPMAT_DIAG_TYPE) {
+        if (dataSize != sizeof(aclsparseDiagType_t) ||
+            reinterpret_cast<uintptr_t>(data) % alignof(aclsparseDiagType_t) != 0) {
+            return ACL_SPARSE_STATUS_INVALID_VALUE;
+        }
+    } else {
+        return ACL_SPARSE_STATUS_INVALID_VALUE;
+    }
+    return ACL_SPARSE_STATUS_SUCCESS;
+}
+
+} // namespace
 
 extern "C" {
 
@@ -565,6 +605,164 @@ aclsparseStatus_t aclsparseCreateConstDnMat(aclsparseConstDnMatDescr_t *dnMatDes
         return st;
     }
     *dnMatDescr = tmp;
+    return ACL_SPARSE_STATUS_SUCCESS;
+}
+
+aclsparseStatus_t aclsparseSpMatSetAttribute(
+    aclsparseSpMatDescr_t spMatDescr, aclsparseSpMatAttribute_t attribute,
+    const void *data, size_t dataSize)
+{
+    aclsparseStatus_t st = ValidateAttributeAccess(spMatDescr, data, attribute, dataSize);
+    if (st != ACL_SPARSE_STATUS_SUCCESS) {
+        return st;
+    }
+    if (attribute == ACL_SPARSE_SPMAT_FILL_MODE) {
+        aclsparseFillMode_t fm = *static_cast<const aclsparseFillMode_t *>(data);
+        if (fm != ACL_SPARSE_FILL_MODE_LOWER && fm != ACL_SPARSE_FILL_MODE_UPPER) {
+            return ACL_SPARSE_STATUS_INVALID_VALUE;
+        }
+        spMatDescr->fillMode = fm;
+        return ACL_SPARSE_STATUS_SUCCESS;
+    }
+    if (attribute == ACL_SPARSE_SPMAT_DIAG_TYPE) {
+        aclsparseDiagType_t dt = *static_cast<const aclsparseDiagType_t *>(data);
+        if (dt != ACL_SPARSE_DIAG_TYPE_NON_UNIT && dt != ACL_SPARSE_DIAG_TYPE_UNIT) {
+            return ACL_SPARSE_STATUS_INVALID_VALUE;
+        }
+        spMatDescr->diagType = dt;
+        return ACL_SPARSE_STATUS_SUCCESS;
+    }
+    return ACL_SPARSE_STATUS_INVALID_VALUE;
+}
+
+aclsparseStatus_t aclsparseSpMatGetAttribute(
+    aclsparseConstSpMatDescr_t spMatDescr, aclsparseSpMatAttribute_t attribute,
+    void *data, size_t dataSize)
+{
+    aclsparseStatus_t st = ValidateAttributeAccess(spMatDescr, data, attribute, dataSize);
+    if (st != ACL_SPARSE_STATUS_SUCCESS) {
+        return st;
+    }
+    if (attribute == ACL_SPARSE_SPMAT_FILL_MODE) {
+        *static_cast<aclsparseFillMode_t *>(data) = spMatDescr->fillMode;
+        return ACL_SPARSE_STATUS_SUCCESS;
+    }
+    if (attribute == ACL_SPARSE_SPMAT_DIAG_TYPE) {
+        *static_cast<aclsparseDiagType_t *>(data) = spMatDescr->diagType;
+        return ACL_SPARSE_STATUS_SUCCESS;
+    }
+    return ACL_SPARSE_STATUS_INVALID_VALUE;
+}
+
+aclsparseStatus_t aclsparseCreateCoo(aclsparseSpMatDescr_t *spMatDescr,
+    int64_t rows, int64_t cols, int64_t nnz,
+    void *cooRowInd, void *cooColInd, void *cooValues,
+    aclsparseIndexType_t cooIdxType, aclsparseIndexBase_t idxBase,
+    aclDataType valueType)
+{
+    aclsparseStatus_t st = ValidateSpMatCreateParams(spMatDescr, rows, cols, nnz);
+    if (st != ACL_SPARSE_STATUS_SUCCESS) {
+        return st;
+    }
+    if (cooIdxType != ACL_SPARSE_INDEX_32I && cooIdxType != ACL_SPARSE_INDEX_64I) {
+        return ACL_SPARSE_STATUS_INVALID_VALUE;
+    }
+    auto *inner = new (std::nothrow) aclsparseSpMatDescr();
+    if (inner == nullptr) {
+        return ACL_SPARSE_STATUS_ALLOC_FAILED;
+    }
+    inner->format = ACL_SPARSE_FORMAT_COO;
+    inner->rows = static_cast<uint64_t>(rows);
+    inner->cols = static_cast<uint64_t>(cols);
+    inner->nnz = static_cast<uint64_t>(nnz);
+    // COO reuses the 'ptrs' field to store cooRowInd (there is no row-offset
+    // pointer array in COO). 'ptrType' is set to cooIdxType so that the
+    // ptrType == IdxType check in SpSV passes naturally for COO.
+    inner->ptrs = cooRowInd;
+    inner->idxs = cooColInd;
+    inner->values = cooValues;
+    inner->baseType = idxBase;
+    inner->ptrType = cooIdxType;
+    inner->IdxType = cooIdxType;
+    inner->valueType = valueType;
+    *spMatDescr = inner;
+    return ACL_SPARSE_STATUS_SUCCESS;
+}
+
+aclsparseStatus_t aclsparseCreateConstCoo(aclsparseConstSpMatDescr_t *spMatDescr,
+    int64_t rows, int64_t cols, int64_t nnz,
+    const void *cooRowInd, const void *cooColInd, const void *cooValues,
+    aclsparseIndexType_t cooIdxType, aclsparseIndexBase_t idxBase,
+    aclDataType valueType)
+{
+    if (spMatDescr == nullptr) {
+        return ACL_SPARSE_STATUS_INVALID_VALUE;
+    }
+    aclsparseSpMatDescr_t tmp = nullptr;
+    aclsparseStatus_t st = aclsparseCreateCoo(&tmp, rows, cols, nnz,
+        const_cast<void *>(cooRowInd), const_cast<void *>(cooColInd),
+        const_cast<void *>(cooValues), cooIdxType, idxBase, valueType);
+    if (st != ACL_SPARSE_STATUS_SUCCESS) {
+        return st;
+    }
+    *spMatDescr = tmp;
+    return ACL_SPARSE_STATUS_SUCCESS;
+}
+
+aclsparseStatus_t aclsparseCreateSlicedEll(aclsparseSpMatDescr_t *spMatDescr,
+    int64_t rows, int64_t cols, int64_t nnz, int64_t sliceNnz, int64_t numSlices,
+    void *sellSlicePtr, void *sellColInd, void *sellValues,
+    aclsparseIndexType_t sellIdxType, aclsparseIndexBase_t idxBase,
+    aclDataType valueType)
+{
+    aclsparseStatus_t st = ValidateSpMatCreateParams(spMatDescr, rows, cols, nnz);
+    if (st != ACL_SPARSE_STATUS_SUCCESS) {
+        return st;
+    }
+    if (sellIdxType != ACL_SPARSE_INDEX_32I && sellIdxType != ACL_SPARSE_INDEX_64I) {
+        return ACL_SPARSE_STATUS_INVALID_VALUE;
+    }
+    if (sliceNnz < 0 || numSlices < 0) {
+        return ACL_SPARSE_STATUS_INVALID_VALUE;
+    }
+    auto *inner = new (std::nothrow) aclsparseSpMatDescr();
+    if (inner == nullptr) {
+        return ACL_SPARSE_STATUS_ALLOC_FAILED;
+    }
+    inner->format = ACL_SPARSE_FORMAT_SLICED_ELL;
+    inner->rows = static_cast<uint64_t>(rows);
+    inner->cols = static_cast<uint64_t>(cols);
+    inner->nnz = static_cast<uint64_t>(nnz);
+    inner->sliceNnz = static_cast<uint64_t>(sliceNnz);
+    inner->numSlices = numSlices;
+    inner->ptrs = sellSlicePtr;
+    inner->idxs = sellColInd;
+    inner->values = sellValues;
+    inner->baseType = idxBase;
+    inner->ptrType = sellIdxType;
+    inner->IdxType = sellIdxType;
+    inner->valueType = valueType;
+    *spMatDescr = inner;
+    return ACL_SPARSE_STATUS_SUCCESS;
+}
+
+aclsparseStatus_t aclsparseCreateConstSlicedEll(aclsparseConstSpMatDescr_t *spMatDescr,
+    int64_t rows, int64_t cols, int64_t nnz, int64_t sliceNnz, int64_t numSlices,
+    const void *sellSlicePtr, const void *sellColInd, const void *sellValues,
+    aclsparseIndexType_t sellIdxType, aclsparseIndexBase_t idxBase,
+    aclDataType valueType)
+{
+    if (spMatDescr == nullptr) {
+        return ACL_SPARSE_STATUS_INVALID_VALUE;
+    }
+    aclsparseSpMatDescr_t tmp = nullptr;
+    aclsparseStatus_t st = aclsparseCreateSlicedEll(&tmp, rows, cols, nnz, sliceNnz, numSlices,
+        const_cast<void *>(sellSlicePtr), const_cast<void *>(sellColInd),
+        const_cast<void *>(sellValues), sellIdxType, idxBase, valueType);
+    if (st != ACL_SPARSE_STATUS_SUCCESS) {
+        return st;
+    }
+    *spMatDescr = tmp;
     return ACL_SPARSE_STATUS_SUCCESS;
 }
 
