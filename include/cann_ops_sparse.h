@@ -1366,6 +1366,30 @@ aclsparseStatus_t aclsparseSpMVOp(
     aclsparseDnVecDescr_t vecZ);
 
 // ============================================================================
+// Generic API: aclsparseScatter
+// ============================================================================
+
+/**
+ * @brief 将稀疏向量 X 的非零值散布到稠密向量 Y 的对应位置。
+ *
+ * 执行操作：Y[X.indices[i]] = X.values[i]，i ∈ [0, X.nnz)。
+ * - idxBase = ONE 时，indices 基于 1，内部访问 Y 时减 1 调整。
+ * - 索引重复时 last-write-wins（行为不确定，与 cuSPARSE 一致）。
+ * - 索引未排序允许。
+ * - 支持 valueType ∈ {FP32, FP16, BF16}，idxType ∈ {I32, I64}。
+ * - 异步执行，同步由调用方通过 stream 负责。
+ *
+ * @param handle IN, HOST, aclsparse 库上下文句柄。
+ * @param vecX   IN, HOST(descr)/DEVICE(data), 稀疏向量描述符（只读）。
+ * @param vecY   IN/OUT, HOST(descr)/DEVICE(data), 稠密向量描述符，其 values 被 X 散布写入。
+ * @return aclsparseStatus_t 成功返回 ACL_SPARSE_STATUS_SUCCESS。
+ */
+aclsparseStatus_t aclsparseScatter(
+    aclsparseHandle_t handle,
+    aclsparseConstSpVecDescr_t vecX,
+    aclsparseDnVecDescr_t vecY);
+
+// ============================================================================
 // Legacy API: aclsparseXcsrsort
 // ============================================================================
 

@@ -209,6 +209,66 @@ private:
     aclsparseDnVecDescr_t descr_ = nullptr;
 };
 
+// ============================================================================
+// SpVecManager: RAII wrapper for aclsparseCreateSpVec / CreateConstSpVec /
+// DestroySpVec. Follows the same style as DnVecManager / SpMatManager.
+// Used by SpVec-DnVec operators (e.g. aclsparseScatter / aclsparseGather).
+// ============================================================================
+class SpVecManager {
+public:
+    SpVecManager() = default;
+
+    static SpVecManager create(int64_t size, int64_t nnz,
+                                void* indices, void* values,
+                                aclsparseIndexType_t idxType,
+                                aclsparseIndexBase_t idxBase,
+                                aclDataType valueType) {
+        SpVecManager m;
+        auto s = aclsparseCreateSpVec(&m.descr_, size, nnz, indices, values,
+                                       idxType, idxBase, valueType);
+        if (s != ACL_SPARSE_STATUS_SUCCESS) throw std::runtime_error("aclsparseCreateSpVec failed");
+        return m;
+    }
+
+    static SpVecManager createConst(int64_t size, int64_t nnz,
+                                     const void* indices, const void* values,
+                                     aclsparseIndexType_t idxType,
+                                     aclsparseIndexBase_t idxBase,
+                                     aclDataType valueType) {
+        SpVecManager m;
+        aclsparseConstSpVecDescr_t constDescr = nullptr;
+        auto s = aclsparseCreateConstSpVec(&constDescr, size, nnz, indices, values,
+                                            idxType, idxBase, valueType);
+        if (s != ACL_SPARSE_STATUS_SUCCESS) throw std::runtime_error("aclsparseCreateConstSpVec failed");
+        m.descr_ = const_cast<aclsparseSpVecDescr_t>(constDescr);
+        return m;
+    }
+
+    aclsparseSpVecDescr_t get() { return descr_; }
+    aclsparseConstSpVecDescr_t cget() const { return descr_; }
+
+    ~SpVecManager() {
+        if (descr_) aclsparseDestroySpVec(descr_);
+    }
+
+    SpVecManager(const SpVecManager&) = delete;
+    SpVecManager& operator=(const SpVecManager&) = delete;
+    SpVecManager(SpVecManager&& other) noexcept : descr_(other.descr_) {
+        other.descr_ = nullptr;
+    }
+    SpVecManager& operator=(SpVecManager&& other) noexcept {
+        if (this != &other) {
+            if (descr_) aclsparseDestroySpVec(descr_);
+            descr_ = other.descr_;
+            other.descr_ = nullptr;
+        }
+        return *this;
+    }
+
+private:
+    aclsparseSpVecDescr_t descr_ = nullptr;
+};
+
 class DnMatManager {
 public:
     DnMatManager() = default;

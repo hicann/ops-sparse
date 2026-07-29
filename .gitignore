@@ -82,3 +82,7 @@ opencode.json
 
 # Local model config (generated from template)
 agent/agents/model_config.json
+
+oat_reports/
+
+log/
