@@ -578,6 +578,47 @@ aclsparseStatus_t aclsparseSpMM(
     const void *beta, aclsparseDnMatDescr_t matC, aclDataType computeType,
     aclsparseSpMMAlg_t alg, void *buffer);
 
+// ============================================================================
+// SDDMM (Sampled Dense-Dense Matrix Multiplication) Generic API
+// ============================================================================
+//  C_out = (alpha * X * Y^T + beta * C) ∘ spy(C)
+//  X: m×k dense, Y: n×k dense, C: m×n sparse (CSR), values updated in-place.
+
+// Algorithm enum for SDDMM.
+typedef enum aclsparseSDDMMAlg_t {
+    ACL_SPARSE_SDDMM_ALG_DEFAULT = 0,
+} aclsparseSDDMMAlg_t;
+
+/**
+ * @brief 计算 SDDMM 所需 workspace 字节数。
+ */
+aclsparseStatus_t aclsparseSDDMMBufferSize(
+    aclsparseHandle_t handle, aclsparseOperation_t opX, aclsparseOperation_t opY,
+    const void *alpha, aclsparseConstDnMatDescr_t matX, aclsparseConstDnMatDescr_t matY,
+    const void *beta, aclsparseSpMatDescr_t matC, aclDataType computeType,
+    aclsparseSDDMMAlg_t alg, size_t *size);
+
+/**
+ * @brief 对稀疏矩阵进行预处理，加速后续 SDDMM 计算。
+ */
+aclsparseStatus_t aclsparseSDDMMPreprocess(
+    aclsparseHandle_t handle, aclsparseOperation_t opX, aclsparseOperation_t opY,
+    const void *alpha, aclsparseConstDnMatDescr_t matX, aclsparseConstDnMatDescr_t matY,
+    const void *beta, aclsparseSpMatDescr_t matC, aclDataType computeType,
+    aclsparseSDDMMAlg_t alg, void *buffer);
+
+/**
+ * @brief 采样稠密-稠密矩阵乘法：C = (alpha * X * Y^T + beta * C) ∘ spy(C)
+ *
+ * @note 线程安全：本接口内部使用 pattern cache 加速重复调用，该 cache 非线程安全。
+ *       多 stream 并发调用时，调用者须保证串行访问，或使用独立的 matC 描述符。
+ */
+aclsparseStatus_t aclsparseSDDMM(
+    aclsparseHandle_t handle, aclsparseOperation_t opX, aclsparseOperation_t opY,
+    const void *alpha, aclsparseConstDnMatDescr_t matX, aclsparseConstDnMatDescr_t matY,
+    const void *beta, aclsparseSpMatDescr_t matC, aclDataType computeType,
+    aclsparseSDDMMAlg_t alg, void *buffer);
+
 /**
  * @brief 创建 ops-sparse handle
  *
