@@ -29,6 +29,7 @@
 | [aclsparseSpVecGetIndexBase](#aclsparsespvecgetindexbase) | 获取稀疏向量的索引基值 |
 | [aclsparseSpVecGetValues](#aclsparsespvecgetvalues) | 获取稀疏向量描述符的 values 指针 |
 | [aclsparseSpVecSetValues](#aclsparsespvecsetvalues) | 设置稀疏向量描述符的 values 指针 |
+| [aclsparseGather](#aclsparsegather) | 从稠密向量中按稀疏索引收集元素 |
 | [aclsparseCreateCsr](#aclsparsecreatecsr) | 创建CSR格式稀疏矩阵 |
 | [aclsparseCreateCsc](#aclsparsecreatecsc) | 创建CSC格式稀疏矩阵（**暂未支持**） |
 | [aclsparseDestroySpMat](#aclsparsedestroyspmat) | 销毁稀疏矩阵对象 |
@@ -425,6 +426,48 @@ aclsparseStatus_t aclsparseSpVecSetValues(
 
 - `ACL_SPARSE_STATUS_SUCCESS`：成功
 - `ACL_SPARSE_STATUS_INVALID_VALUE`：`spVecDescr` 为空指针
+
+---
+
+### aclsparseGather
+
+```c
+aclsparseStatus_t aclsparseGather(
+    aclsparseHandle_t handle,
+    aclsparseConstDnVecDescr_t vecY,
+    aclsparseSpVecDescr_t vecX);
+```
+
+**功能**：从稠密向量 Y 中按稀疏向量 X 的索引数组收集元素，满足 `X.values[i] = Y[X.indices[i] - idxBase]`（i = 0 .. nnz-1）。调用后 `X.values` 被覆写为从 Y 中收集到的值。不需要 workspace，不需要 preprocess 阶段，单步调用即可完成计算。
+
+**产品支持情况**：
+
+- Ascend 950PR / Ascend 950DT：支持
+- Atlas A3 训练系列产品 / Atlas A3 推理系列产品：不支持
+- Atlas A2 训练系列产品 / Atlas A2 推理系列产品：不支持
+
+**参数说明**：
+
+- `handle`（IN）：HOST，ops-sparse 库上下文句柄，携带 stream，须先调用 `aclsparseSetStream`。
+- `vecY`（IN）：HOST，稠密向量 Y 的描述符（数据源），仅读取 values。
+- `vecX`（IN/OUT）：HOST，稀疏向量 X 的描述符：读取 indices 和 idxBase，写入 values。
+
+**约束说明**：
+
+- handle 不可为 nullptr，否则返回 `ACL_SPARSE_STATUS_HANDLE_IS_NULLPTR`
+- vecY、vecX 不可为 nullptr，否则返回 `ACL_SPARSE_STATUS_INVALID_VALUE`
+- vecX.valueType 与 vecY.valueType 必须一致
+- vecX.size（稀疏向量的稠密维度）<= vecY.size（稠密向量的大小）
+- vecX.indices 中每个索引值 `X.indices[i] - idxBase` 必须在 `[0, vecY.size)` 范围内（运行时不做边界检查，越界访问将导致未定义行为）
+- 支持索引乱序（indices 不需要排序）
+- 支持 vecX.indices 中存在重复元素
+
+**返回值**：
+
+- `ACL_SPARSE_STATUS_SUCCESS`：成功
+- `ACL_SPARSE_STATUS_HANDLE_IS_NULLPTR`：handle 为空
+- `ACL_SPARSE_STATUS_INVALID_VALUE`：参数非法（空指针等）
+- 其他值：失败
 
 ---
 

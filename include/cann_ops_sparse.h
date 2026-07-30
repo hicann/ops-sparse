@@ -280,6 +280,25 @@ aclsparseStatus_t aclsparseConstSpVecGetValues(aclsparseConstSpVecDescr_t spVecD
 
 aclsparseStatus_t aclsparseSpVecSetValues(aclsparseSpVecDescr_t spVecDescr, void *values);
 
+// ============================================================================
+// Generic API: aclsparseGather
+// ============================================================================
+
+/**
+ * @brief Gather elements from dense vector Y into sparse vector X values.
+ *
+ * X.values[i] = Y[X.indices[i] - idxBase] for i = 0 .. nnz-1.
+ *
+ * @param handle IN, HOST, aclsparse handle.
+ * @param vecY   IN, HOST, const dense vector descriptor.
+ * @param vecX   IN/OUT, HOST, sparse vector descriptor.
+ * @return aclsparseStatus_t
+ */
+aclsparseStatus_t aclsparseGather(
+    aclsparseHandle_t handle,
+    aclsparseConstDnVecDescr_t vecY,
+    aclsparseSpVecDescr_t vecX);
+
 /**
  * @brief 获取稠密向量描述符的全部字段。
  *
