@@ -9,6 +9,8 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # ----------------------------------------------------------------------------------------------------------
 
+PIGZ_SKIPPED=false
+
 set -euo pipefail
 
 run_command() {
@@ -300,8 +302,9 @@ install_pigz() {
 
     read -p "Install pigz? [Y/n] " -n 1 -r
     echo
-    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+    if [[ -n "$REPLY" && ! $REPLY =~ ^[Yy]$ ]]; then
         echo "Skipping pigz installation"
+        PIGZ_SKIPPED=true
         return
     fi
 
@@ -480,7 +483,20 @@ main() {
     install_patch
 
     echo -e "===================================================="
-    echo "All dependencies installed successfully!"
+    if [[ "${PIGZ_SKIPPED:-false}" == "true" ]]; then
+        local install_hint
+        case "$OS" in
+            macos)
+                install_hint="brew install pigz"
+                ;;
+            *)
+                install_hint="sudo $PKG_MANAGER install pigz"
+                ;;
+        esac
+        echo "All mandatory dependencies installed successfully! (pigz skipped, run '$install_hint' to install manually)"
+    else
+        echo "All dependencies installed successfully!"
+    fi
     echo "===================================================="
 }
 
