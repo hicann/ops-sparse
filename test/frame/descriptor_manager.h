@@ -166,57 +166,6 @@ private:
     aclsparseSpMatDescr_t descr_ = nullptr;
 };
 
-class SpVecManager {
-public:
-    SpVecManager() = default;
-
-    static SpVecManager create(int64_t size, int64_t nnz,
-                                void* indices, void* values,
-                                aclsparseIndexType_t idxType = ACL_SPARSE_INDEX_32I,
-                                aclsparseIndexBase_t idxBase = ACL_SPARSE_INDEX_BASE_ZERO,
-                                aclDataType valueType = ACL_FLOAT) {
-        SpVecManager m;
-        auto s = aclsparseCreateSpVec(&m.descr_, size, nnz, indices, values, idxType, idxBase, valueType);
-        if (s != ACL_SPARSE_STATUS_SUCCESS) throw std::runtime_error("aclsparseCreateSpVec failed");
-        return m;
-    }
-
-    static SpVecManager createConst(int64_t size, int64_t nnz,
-                                     const void* indices, const void* values,
-                                     aclsparseIndexType_t idxType = ACL_SPARSE_INDEX_32I,
-                                     aclsparseIndexBase_t idxBase = ACL_SPARSE_INDEX_BASE_ZERO,
-                                     aclDataType valueType = ACL_FLOAT) {
-        SpVecManager m;
-        aclsparseConstSpVecDescr_t constDescr = nullptr;
-        auto s = aclsparseCreateConstSpVec(&constDescr, size, nnz, indices, values, idxType, idxBase, valueType);
-        if (s != ACL_SPARSE_STATUS_SUCCESS) throw std::runtime_error("aclsparseCreateConstSpVec failed");
-        m.descr_ = const_cast<aclsparseSpVecDescr_t>(constDescr);
-        return m;
-    }
-
-    aclsparseSpVecDescr_t get() { return descr_; }
-    aclsparseConstSpVecDescr_t cget() const { return descr_; }
-
-    ~SpVecManager() {
-        if (descr_) aclsparseDestroySpVec(descr_);
-    }
-
-    SpVecManager(const SpVecManager&) = delete;
-    SpVecManager& operator=(const SpVecManager&) = delete;
-    SpVecManager(SpVecManager&& other) noexcept : descr_(other.descr_) { other.descr_ = nullptr; }
-    SpVecManager& operator=(SpVecManager&& other) noexcept {
-        if (this != &other) {
-            if (descr_) aclsparseDestroySpVec(descr_);
-            descr_ = other.descr_;
-            other.descr_ = nullptr;
-        }
-        return *this;
-    }
-
-private:
-    aclsparseSpVecDescr_t descr_ = nullptr;
-};
-
 class DnVecManager {
 public:
     DnVecManager() = default;
