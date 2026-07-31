@@ -203,6 +203,10 @@ typedef enum aclsparseIndexType_t {
     ACL_SPARSE_INDEX_64I       // 64-bit signed integer [0, 2^63 - 1]（暂未支持，CreateCsr 将返回 NOT_SUPPORTED）
 } aclsparseIndexType_t;
 
+typedef enum aclsparseDenseToSparseAlg_t {
+    ACL_SPARSE_DENSETOSPARSE_ALG_DEFAULT = 0
+} aclsparseDenseToSparseAlg_t;
+
 // This type indicates if the base of the matrix indices is zero or one.
 typedef enum aclsparseIndexBase_t {
     ACL_SPARSE_INDEX_BASE_ZERO = 0,  // The base index is zero (C compatibility).
@@ -351,17 +355,18 @@ aclsparseStatus_t aclsparseDnVecSetValues(aclsparseDnVecDescr_t dnVecDescr, void
  *
  * @param spMatDescr IN/OUT, HOST, 稀疏矩阵描述符。
  *                      用于描述稀疏矩阵的属性和数据。
- * @param rows IN, HOST, 矩阵的行数。
- * @param cols IN, HOST, 矩阵的列数。
- * @param nnz IN, HOST, 矩阵的非零元素个数。
+ * @param rows IN, HOST, 矩阵的行数，必须为非负数。
+ * @param cols IN, HOST, 矩阵的列数，必须为非负数。
+ * @param nnz IN, HOST, 矩阵的非零元素个数，必须为非负数。
  * @param csrRowOffsets IN, DEVICE, 指向CSR格式行偏移量数组的指针。
  *                         该数组的长度为rows + 1，用于表示每行的非零元素起始位置。
  * @param csrColInd IN, DEVICE, 指向CSR格式列索引数组的指针。
  *                       该数组的长度为nnz，用于表示每个非零元素的列索引。
  * @param csrValues IN, DEVICE, 指向CSR格式非零元素数组的指针。
  *                     该数组的长度为nnz，用于存储矩阵的非零元素值。
- * @param csrRowOffsetsType IN, HOST, 行偏移量数组的数据类型。
- * @param csrColIndType IN, HOST, 列索引数组的数据类型。
+ * @param csrRowOffsetsType IN, HOST, 行偏移量数组的数据类型，支持 I32 / I64。
+ * @param csrColIndType IN, HOST, 列索引数组的数据类型，支持 I32 / I64；
+ *                          可独立于 csrRowOffsetsType 选择。
  * @param idxBase IN, HOST, 索引的基值，可以是0或1。
  *                        0表示索引从0开始，1表示索引从1开始。
  * @param valueType IN, HOST, 非零元素的数据类型。
@@ -381,7 +386,9 @@ aclsparseStatus_t aclsparseCreateConstCsr(aclsparseConstSpMatDescr_t *spMatDescr
 /**
  * @brief 创建一个CSC（Compressed Sparse Column）稀疏矩阵。
  *
- * @note 当前版本暂未支持：SpMV / SpMM 仅实现 CSR 路径，调用本接口返回 ACL_SPARSE_STATUS_NOT_SUPPORTED。
+ * @note 该接口可创建CSC稀疏矩阵描述符，可供DenseToSparse等支持CSC格式的接口使用。
+ *       SpMV当前仅支持CSR格式，传入CSC描述符将返回ACL_SPARSE_STATUS_NOT_SUPPORTED；
+ *       SpMM当前仅支持CSR格式，传入CSC描述符将返回ACL_SPARSE_STATUS_MATRIX_TYPE_NOT_SUPPORTED。
  *
  * @param spMatDescr IN, HOST, 稀疏矩阵描述符，用于存储稀疏矩阵的元数据。
  * @param rows IN, HOST, 矩阵的行数。
@@ -408,6 +415,19 @@ aclsparseStatus_t aclsparseCreateCsc(aclsparseSpMatDescr_t *spMatDescr, int64_t 
 aclsparseStatus_t aclsparseCreateConstCsc(aclsparseConstSpMatDescr_t *spMatDescr, int64_t rows, int64_t cols, int64_t nnz,
     const void *cscColOffsets, const void *cscRowInd, const void *cscValues, aclsparseIndexType_t cscColOffsetsType,
     aclsparseIndexType_t cscRowIndType, aclsparseIndexBase_t idxBase, aclDataType valueType);
+
+aclsparseStatus_t aclsparseCreateBlockedEll(
+    aclsparseSpMatDescr_t *descr, int64_t rows, int64_t cols,
+    int64_t ellBlockSize, int64_t ellCols, void *ellColInd, void *ellValue,
+    aclsparseIndexType_t indexType, aclsparseIndexBase_t indexBase,
+    aclDataType valueType);
+
+aclsparseStatus_t aclsparseCsrSetPointers(aclsparseSpMatDescr_t descr,
+    void *rowOffsets, void *colIndices, void *values);
+aclsparseStatus_t aclsparseCscSetPointers(aclsparseSpMatDescr_t descr,
+    void *colOffsets, void *rowIndices, void *values);
+aclsparseStatus_t aclsparseCooSetPointers(aclsparseSpMatDescr_t descr,
+    void *rowIndices, void *colIndices, void *values);
 
 /**
  * @brief 销毁稀疏矩阵对象。
@@ -500,10 +520,11 @@ aclsparseStatus_t aclsparseSpMV(aclsparseHandle_t handle, aclsparseOperation_t o
  * 用于描述 SpMM 中的 B / C 稠密矩阵。
  *
  * @param dnMatDescr IN/OUT, HOST，输出的稠密矩阵描述符。
- * @param rows       IN, HOST，矩阵的行数。
- * @param cols       IN, HOST，矩阵的列数。
- * @param ld         IN, HOST，leading dimension。行主序时需 >= cols；列主序时需 >= rows。
- * @param values     IN, DEVICE，矩阵数据指针。
+ * @param rows       IN, HOST，矩阵的行数，允许为 0，不允许为负数。
+ * @param cols       IN, HOST，矩阵的列数，允许为 0，不允许为负数。
+ * @param ld         IN, HOST，leading dimension，必须大于 0。行主序时需 >= cols；
+ *                   列主序时需 >= rows；该约束同样适用于零维矩阵。
+ * @param values     IN, DEVICE，矩阵数据指针，必须为非空，包括零维矩阵。
  * @param valueType  IN, HOST，元素数据类型。支持 ACL_FLOAT / ACL_FLOAT16 / ACL_INT8
  *                   （用于 B 矩阵）；C 矩阵在 INT8 路径下为 ACL_INT32。
  * @param order      IN, HOST，布局：ACL_SPARSE_ORDER_ROW / ACL_SPARSE_ORDER_COL。
@@ -515,6 +536,8 @@ aclsparseStatus_t aclsparseCreateDnMat(aclsparseDnMatDescr_t *dnMatDescr,
 
 /**
  * @brief 创建只读(const)稠密矩阵描述符。
+ *
+ * rows/cols、ld、values、valueType 和 order 的契约与 aclsparseCreateDnMat 相同。
  */
 aclsparseStatus_t aclsparseCreateConstDnMat(aclsparseConstDnMatDescr_t *dnMatDescr,
     int64_t rows, int64_t cols, int64_t ld, const void *values,
@@ -571,6 +594,19 @@ aclsparseStatus_t aclsparseConstDnMatGetValues(aclsparseConstDnMatDescr_t dnMatD
  * @return aclsparseStatus_t
  */
 aclsparseStatus_t aclsparseDnMatSetValues(aclsparseDnMatDescr_t dnMatDescr, void *values);
+
+aclsparseStatus_t aclsparseDenseToSparseGetBufferSize(
+    aclsparseHandle_t handle, aclsparseConstDnMatDescr_t matA,
+    aclsparseSpMatDescr_t matB, aclsparseDenseToSparseAlg_t alg,
+    size_t *bufferSize);
+aclsparseStatus_t aclsparseDenseToSparseAnalysis(
+    aclsparseHandle_t handle, aclsparseConstDnMatDescr_t matA,
+    aclsparseSpMatDescr_t matB, aclsparseDenseToSparseAlg_t alg,
+    void *buffer);
+aclsparseStatus_t aclsparseDenseToSparseConvert(
+    aclsparseHandle_t handle, aclsparseConstDnMatDescr_t matA,
+    aclsparseSpMatDescr_t matB, aclsparseDenseToSparseAlg_t alg,
+    void *buffer);
 
 /**
  * @brief 计算 SpMM 所需 workspace 字节数。

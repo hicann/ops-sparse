@@ -21,6 +21,7 @@
 #include "aclsparse_descr_internal.h"
 
 #include <cstdint>
+#include <limits>
 #include <new>
 
 namespace {
@@ -342,6 +343,9 @@ aclsparseStatus_t aclsparseCreateCsr(aclsparseSpMatDescr_t *spMatDescr, int64_t 
     if (spMatDescr == nullptr) {
         return ACL_SPARSE_STATUS_INVALID_VALUE;
     }
+    if (rows < 0 || cols < 0 || nnz < 0) {
+        return ACL_SPARSE_STATUS_INVALID_VALUE;
+    }
     aclsparseStatus_t idxSt =
         AclsparseValidateSupportedCsrIndexTypesExtended(csrRowOffsetsType, csrColIndType);
     if (idxSt != ACL_SPARSE_STATUS_SUCCESS) {
@@ -383,6 +387,99 @@ aclsparseStatus_t aclsparseCreateConstCsr(aclsparseConstSpMatDescr_t *spMatDescr
         return st;
     }
     *spMatDescr = tmp;
+    return ACL_SPARSE_STATUS_SUCCESS;
+}
+
+aclsparseStatus_t aclsparseCreateBlockedEll(
+    aclsparseSpMatDescr_t *descr, int64_t rows, int64_t cols,
+    int64_t ellBlockSize, int64_t ellCols, void *ellColInd, void *ellValue,
+    aclsparseIndexType_t indexType, aclsparseIndexBase_t indexBase,
+    aclDataType valueType)
+{
+    if (descr == nullptr || rows < 0 || cols < 0) {
+        return ACL_SPARSE_STATUS_INVALID_VALUE;
+    }
+    if (ellBlockSize <= 0) {
+        return ACL_SPARSE_STATUS_INVALID_VALUE;
+    }
+    const int64_t safeEllBlockSize = ellBlockSize > 0 ? ellBlockSize : 1;
+    if (ellCols < 0 || ellCols > cols ||
+        (indexType != ACL_SPARSE_INDEX_32I && indexType != ACL_SPARSE_INDEX_64I) ||
+        (indexBase != ACL_SPARSE_INDEX_BASE_ZERO && indexBase != ACL_SPARSE_INDEX_BASE_ONE) ||
+        rows % safeEllBlockSize != 0 || cols % safeEllBlockSize != 0 ||
+        ellCols % safeEllBlockSize != 0 ||
+        (rows != 0 && ellCols > std::numeric_limits<int64_t>::max() / rows)) {
+        return ACL_SPARSE_STATUS_INVALID_VALUE;
+    }
+    const int64_t valueCount = rows * ellCols;
+    const int64_t indexCount =
+        (rows / safeEllBlockSize) * (ellCols / safeEllBlockSize);
+    if ((indexCount > 0 && ellColInd == nullptr) ||
+        (valueCount > 0 && ellValue == nullptr)) {
+        return ACL_SPARSE_STATUS_INVALID_VALUE;
+    }
+    auto *inner = new (std::nothrow) aclsparseSpMatDescr();
+    if (inner == nullptr) {
+        return ACL_SPARSE_STATUS_ALLOC_FAILED;
+    }
+    inner->format = ACL_SPARSE_FORMAT_BLOCKED_ELL;
+    inner->rows = static_cast<uint64_t>(rows);
+    inner->cols = static_cast<uint64_t>(cols);
+    inner->nnz = static_cast<uint64_t>(valueCount);
+    inner->idxs = ellColInd;
+    inner->ellColInd = ellColInd;
+    inner->values = ellValue;
+    inner->baseType = indexBase;
+    inner->ptrType = indexType;
+    inner->IdxType = indexType;
+    inner->valueType = valueType;
+    inner->ellBlockSize = static_cast<uint64_t>(ellBlockSize);
+    inner->ellCols = static_cast<uint64_t>(ellCols);
+    *descr = inner;
+    return ACL_SPARSE_STATUS_SUCCESS;
+}
+
+static aclsparseStatus_t SetCompressedPointers(aclsparseSpMatDescr_t descr,
+    aclsparseFormat_t format, void *offsets, void *indices, void *values)
+{
+    if (descr == nullptr || descr->format != format ||
+        (offsets == nullptr && descr->rows > 0 && descr->cols > 0) ||
+        (descr->nnz > 0 && (indices == nullptr || values == nullptr))) {
+        return ACL_SPARSE_STATUS_INVALID_VALUE;
+    }
+    descr->ptrs = offsets;
+    descr->idxs = indices;
+    descr->values = values;
+    return ACL_SPARSE_STATUS_SUCCESS;
+}
+
+aclsparseStatus_t aclsparseCsrSetPointers(aclsparseSpMatDescr_t descr,
+    void *rowOffsets, void *colIndices, void *values)
+{
+    return SetCompressedPointers(descr, ACL_SPARSE_FORMAT_CSR, rowOffsets,
+        colIndices, values);
+}
+
+aclsparseStatus_t aclsparseCscSetPointers(aclsparseSpMatDescr_t descr,
+    void *colOffsets, void *rowIndices, void *values)
+{
+    return SetCompressedPointers(descr, ACL_SPARSE_FORMAT_CSC, colOffsets,
+        rowIndices, values);
+}
+
+aclsparseStatus_t aclsparseCooSetPointers(aclsparseSpMatDescr_t descr,
+    void *rowIndices, void *colIndices, void *values)
+{
+    if (descr == nullptr || descr->format != ACL_SPARSE_FORMAT_COO ||
+        (descr->nnz > 0 &&
+         (rowIndices == nullptr || colIndices == nullptr || values == nullptr))) {
+        return ACL_SPARSE_STATUS_INVALID_VALUE;
+    }
+    descr->rowInds = rowIndices;
+    descr->colInds = colIndices;
+    descr->ptrs = rowIndices;
+    descr->idxs = colIndices;
+    descr->values = values;
     return ACL_SPARSE_STATUS_SUCCESS;
 }
 
@@ -464,7 +561,10 @@ aclsparseStatus_t aclsparseCreateDnMat(aclsparseDnMatDescr_t *dnMatDescr,
     if (dnMatDescr == nullptr) {
         return ACL_SPARSE_STATUS_INVALID_VALUE;
     }
-    if (rows <= 0 || cols <= 0 || ld <= 0) {
+    if (rows < 0 || cols < 0) {
+        return ACL_SPARSE_STATUS_INVALID_VALUE;
+    }
+    if (ld <= 0) {
         return ACL_SPARSE_STATUS_INVALID_VALUE;
     }
     if (values == nullptr) {
@@ -680,6 +780,8 @@ aclsparseStatus_t aclsparseCreateCoo(aclsparseSpMatDescr_t *spMatDescr,
     // ptrType == IdxType check in SpSV passes naturally for COO.
     inner->ptrs = cooRowInd;
     inner->idxs = cooColInd;
+    inner->rowInds = cooRowInd;
+    inner->colInds = cooColInd;
     inner->values = cooValues;
     inner->baseType = idxBase;
     inner->ptrType = cooIdxType;

@@ -28,7 +28,7 @@
 #include <acl/acl.h>
 #include "cann_ops_sparse.h"
 
-// 稀疏矩阵描述符内部结构（CSR / CSC / COO / SLICED_ELL 共用）。
+// 稀疏矩阵描述符内部结构（CSR / CSC / COO / BELL / SLICED_ELL 共用）。
 struct aclsparseSpMatDescr {
     // 由 *Preprocess 写入：记录当前已预处理(active)的 workspace buffer。
     // SpMM/SpMV 据此决定走快路径(复用)还是就地重算（active buffer 机制）。
@@ -48,6 +48,11 @@ struct aclsparseSpMatDescr {
     aclsparseDiagType_t diagType = ACL_SPARSE_DIAG_TYPE_NON_UNIT;
     uint64_t sliceNnz = 0;
     int64_t numSlices = 0;
+    void *rowInds = nullptr;
+    void *colInds = nullptr;
+    uint64_t ellBlockSize = 0;
+    uint64_t ellCols = 0;
+    void *ellColInd = nullptr;
 };
 
 inline aclsparseStatus_t ValidateSpMatCreateParams(
@@ -77,7 +82,7 @@ inline aclsparseStatus_t AclsparseValidateSupportedCsrIndexTypes(aclsparseIndexT
 }
 
 // 校验 CSR 稀疏矩阵索引类型（扩展模式）：
-// 允许 (I32,I32)、(I64,I32)、(I64,I64) 三种组合，拒绝其余。
+// ptrType / idxType 可分别使用 I32 或 I64，允许四种组合，拒绝其余类型。
 // 供 aclsparseCreateCsr / aclsparseCreateConstCsr 使用。
 inline aclsparseStatus_t AclsparseValidateSupportedCsrIndexTypesExtended(aclsparseIndexType_t ptrType,
                                                                          aclsparseIndexType_t idxType)
@@ -88,10 +93,6 @@ inline aclsparseStatus_t AclsparseValidateSupportedCsrIndexTypesExtended(aclspar
     }
     // idxType 仅允许 I32 / I64
     if (idxType != ACL_SPARSE_INDEX_32I && idxType != ACL_SPARSE_INDEX_64I) {
-        return ACL_SPARSE_STATUS_NOT_SUPPORTED;
-    }
-    // 拒绝 (I32, I64)：无算子支持此组合
-    if (ptrType == ACL_SPARSE_INDEX_32I && idxType == ACL_SPARSE_INDEX_64I) {
         return ACL_SPARSE_STATUS_NOT_SUPPORTED;
     }
     return ACL_SPARSE_STATUS_SUCCESS;
