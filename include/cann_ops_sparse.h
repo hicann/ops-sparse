@@ -1540,6 +1540,49 @@ aclsparseStatus_t aclsparseCreateConstSlicedEll(aclsparseConstSpMatDescr_t *spMa
     aclsparseIndexType_t sellIdxType, aclsparseIndexBase_t idxBase,
     aclDataType valueType);
 
+// ============================================================================
+// Legacy API: aclsparseXcscsort — CSC format in-place stable sort (single-key)
+// ============================================================================
+
+/**
+ * @brief Query workspace size for aclsparseXcscsort.
+ *
+ * @param handle               IN,  HOST,  aclsparse handle.
+ * @param m                    IN,  HOST,  number of rows.
+ * @param n                    IN,  HOST,  number of columns.
+ * @param nnz                  IN,  HOST,  number of nonzero elements.
+ * @param cscColPtr            IN,  DEVICE, CSC column pointers (length n+1).
+ * @param cscRowInd            IN,  DEVICE, CSC row indices (length nnz); may be NULL when nnz==0.
+ * @param pBufferSizeInBytes   OUT, HOST,  required workspace size in bytes.
+ * @return aclsparseStatus_t
+ */
+aclsparseStatus_t aclsparseXcscsort_bufferSizeExt(
+    aclsparseHandle_t handle, int m, int n, int nnz,
+    const int *cscColPtr, const int *cscRowInd,
+    size_t *pBufferSizeInBytes);
+
+/**
+ * @brief Stable-sort CSC arrays by column (single-key: row index ascending within each column).
+ *
+ * In-place sort. P is both input (caller presets 0:1:(nnz-1)) and output (sort
+ * permutation). pBuffer must be 128-byte aligned. cscColPtr is not modified.
+ *
+ * @param handle    IN,  HOST,    aclsparse handle.
+ * @param m         IN,  HOST,    number of rows.
+ * @param n         IN,  HOST,    number of columns.
+ * @param nnz       IN,  HOST,    number of nonzero elements.
+ * @param descrA    IN,  HOST,    matrix descriptor (provides indexBase).
+ * @param cscColPtr IN,  DEVICE,  CSC column pointers (length n+1, not modified).
+ * @param cscRowInd IN/OUT, DEVICE, row indices (sorted ascending within each column on output).
+ * @param P         IN/OUT, DEVICE, permutation (length nnz); sortedVal[i] = origVal(P[i]).
+ * @param pBuffer   IN,  DEVICE,  workspace (from bufferSizeExt), must be 128-byte aligned.
+ * @return aclsparseStatus_t
+ */
+aclsparseStatus_t aclsparseXcscsort(
+    aclsparseHandle_t handle, int m, int n, int nnz,
+    const aclsparseMatDescr_t descrA,
+    const int *cscColPtr, int *cscRowInd, int *P, void *pBuffer);
+
 #ifdef __cplusplus
 }
 #endif

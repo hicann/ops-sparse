@@ -50,6 +50,8 @@
 | [aclsparseSpMM](#aclsparsespmm) | 稀疏矩阵-稠密矩阵乘法 |
 | [aclsparseSgtsv2](#aclsparsesgtsv2) | 三对角线性方程组带选主元求解（FP32，Multiple RHS） |
 | [aclsparseSgtsv2_bufferSizeExt](#aclsparsesgtsv2_buffersizeext) | 查询 aclsparseSgtsv2 所需工作区大小 |
+| [aclsparseXcscsort_bufferSizeExt](#aclsparsexcscsort_buffersizeext) | 获取CSC排序缓冲区大小 |
+| [aclsparseXcscsort](#aclsparsexcscsort) | CSC格式按列稳定排序 |
 
 ## 接口详情
 
@@ -1192,6 +1194,76 @@ aclsparseStatus_t aclsparseSgtsv2_bufferSizeExt(
 - `ACL_SPARSE_STATUS_SUCCESS`：成功
 - `ACL_SPARSE_STATUS_HANDLE_IS_NULLPTR`：handle 为空
 - `ACL_SPARSE_STATUS_INVALID_VALUE`：参数非法（m/n/ldb 越界、空指针等）
+- 其他值：失败
+
+---
+
+### aclsparseXcscsort_bufferSizeExt
+
+```c
+aclsparseStatus_t aclsparseXcscsort_bufferSizeExt(
+    aclsparseHandle_t handle,
+    int m,
+    int n,
+    int nnz,
+    const int *cscColPtr,
+    const int *cscRowInd,
+    size_t *pBufferSizeInBytes
+);
+```
+
+**功能**：查询CSC格式按列稳定排序（`aclsparseXcscsort`）所需的workspace缓冲区大小。仅做参数校验与字节数计算，不启动kernel、不引入Device同步。
+
+**参数说明**：
+
+- `handle`（IN）：HOST，aclsparse句柄。
+- `m`（IN）：HOST，矩阵行数。
+- `n`（IN）：HOST，矩阵列数。
+- `nnz`（IN）：HOST，非零元素个数。
+- `cscColPtr`（IN）：DEVICE，CSC列偏移数组，长度为`n + 1`。
+- `cscRowInd`（IN）：DEVICE，CSC行索引数组，长度为`nnz`；`nnz == 0`时可为`nullptr`。
+- `pBufferSizeInBytes`（OUT）：HOST，返回所需的workspace字节数。`nnz == 0`时置为0；否则为`2 * nnz * sizeof(int32_t)`。
+
+**返回值**：
+
+- `ACL_SPARSE_STATUS_SUCCESS`：成功
+- 其他值：失败
+
+---
+
+### aclsparseXcscsort
+
+```c
+aclsparseStatus_t aclsparseXcscsort(
+    aclsparseHandle_t handle,
+    int m,
+    int n,
+    int nnz,
+    const aclsparseMatDescr_t descrA,
+    const int *cscColPtr,
+    int *cscRowInd,
+    int *P,
+    void *pBuffer
+);
+```
+
+**功能**：对CSC格式稀疏矩阵每列的行索引执行原地稳定升序排序（单键排序），并使用相同排列重排`P`。`cscColPtr`不修改；`P`既是输入（调用方须预设为`0, 1, ..., nnz - 1`）又是输出（记录最终排列，满足`sortedVal[i] = origVal(P[i])`）。`pBuffer`须128字节对齐。接口异步执行，读取结果前须同步handle绑定的stream。
+
+**参数说明**：
+
+- `handle`（IN）：HOST，aclsparse句柄。
+- `m`（IN）：HOST，矩阵行数。
+- `n`（IN）：HOST，矩阵列数。
+- `nnz`（IN）：HOST，非零元素个数。
+- `descrA`（IN）：HOST，Legacy矩阵描述符，提供`indexBase`；其他属性不参与排序，矩阵类型隐式视为`GENERAL`。
+- `cscColPtr`（IN）：DEVICE，CSC列偏移数组，长度为`n + 1`，排序期间不修改。
+- `cscRowInd`（IN/OUT）：DEVICE，行索引数组，长度为`nnz`；输出时每列内部稳定升序。
+- `P`（IN/OUT）：DEVICE，排列数组，长度为`nnz`；调用方须先初始化为`0, 1, ..., nnz - 1`，排序后`sortedVal[i] = origVal(P[i])`。
+- `pBuffer`（IN）：DEVICE，由`aclsparseXcscsort_bufferSizeExt`查询大小并由调用方分配的workspace，地址须128字节对齐。
+
+**返回值**：
+
+- `ACL_SPARSE_STATUS_SUCCESS`：成功
 - 其他值：失败
 
 ---
