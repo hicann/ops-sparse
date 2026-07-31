@@ -32,12 +32,14 @@ struct aclsparseSpMatDescr;
 struct aclsparseDnVecDescr;
 struct aclsparseDnMatDescr;
 struct aclsparseSpVecDescr;
+struct aclsparseSpSMDescr;
 
 typedef struct aclsparseContext* aclsparseHandle_t;
 typedef struct aclsparseSpMatDescr* aclsparseSpMatDescr_t;
 typedef struct aclsparseDnVecDescr* aclsparseDnVecDescr_t;
 typedef struct aclsparseDnMatDescr* aclsparseDnMatDescr_t;
 typedef struct aclsparseSpVecDescr* aclsparseSpVecDescr_t;
+typedef struct aclsparseSpSMDescr* aclsparseSpSMDescr_t;
 
 typedef struct aclsparseSpMatDescr const* aclsparseConstSpMatDescr_t;
 typedef struct aclsparseDnVecDescr const* aclsparseConstDnVecDescr_t;
@@ -637,6 +639,64 @@ aclsparseStatus_t aclsparseSDDMM(
     const void *alpha, aclsparseConstDnMatDescr_t matX, aclsparseConstDnMatDescr_t matY,
     const void *beta, aclsparseSpMatDescr_t matC, aclDataType computeType,
     aclsparseSDDMMAlg_t alg, void *buffer);
+
+// ============================================================================
+// Generic SpSM (Sparse Triangular Solve with Multiple Right-Hand Sides)
+// 对标 cuSPARSE Generic API cusparseSpSM。三阶段: BufferSize → Analysis → Solve。
+// 求解 op(A) * X = alpha * B, A 为 CSR 稀疏三角矩阵 (UNIT/NON_UNIT diagonal, m×m)。
+// ============================================================================
+
+// SpSM 算法枚举。
+typedef enum aclsparseSpSMAlg_t {
+    ACL_SPARSE_SPSM_ALG_DEFAULT = 0
+} aclsparseSpSMAlg_t;
+
+/**
+ * @brief 创建 SpSM 描述符 (跨三阶段共享)。
+ */
+aclsparseStatus_t aclsparseSpSMCreateDescr(aclsparseSpSMDescr_t *spsmDescr);
+
+/**
+ * @brief 销毁 SpSM 描述符。
+ */
+aclsparseStatus_t aclsparseSpSMDestroyDescr(aclsparseSpSMDescr_t spsmDescr);
+
+/**
+ * @brief 查询 SpSM 所需 workspace 字节数。数学公式: op(A) * X = alpha * op(B)。
+ * @note opB 当前仅支持 ACL_SPARSE_OP_NON_TRANSPOSE (接口签名对齐 cuSPARSE,
+ *       内部实现未支持 B 转置, 传 T/CONJUGATE 返回 ACL_SPARSE_STATUS_NOT_SUPPORTED)。
+ */
+aclsparseStatus_t aclsparseSpSMBufferSize(
+    aclsparseHandle_t handle, aclsparseOperation_t opA, aclsparseOperation_t opB,
+    const void *alpha, aclsparseConstSpMatDescr_t matA,
+    aclsparseConstDnMatDescr_t matB, aclsparseDnMatDescr_t matC,
+    aclDataType computeType, aclsparseSpSMAlg_t alg,
+    aclsparseSpSMDescr_t spsmDescr, size_t *bufferSize);
+
+/**
+ * @brief SpSM 分析阶段: opA=T 时 host 侧 CSR→CSC 转置, host CPU 计算 level scheduling
+ *        拓扑分层, 缓存 tiling 到描述符, 绑定 active buffer。后续 Solve 复用。
+ *        数学公式: op(A) * X = alpha * op(B)。
+ * @note opB 当前仅支持 ACL_SPARSE_OP_NON_TRANSPOSE (见 aclsparseSpSMBufferSize 注释)。
+ */
+aclsparseStatus_t aclsparseSpSMAnalysis(
+    aclsparseHandle_t handle, aclsparseOperation_t opA, aclsparseOperation_t opB,
+    const void *alpha, aclsparseConstSpMatDescr_t matA,
+    aclsparseConstDnMatDescr_t matB, aclsparseDnMatDescr_t matC,
+    aclDataType computeType, aclsparseSpSMAlg_t alg,
+    aclsparseSpSMDescr_t spsmDescr, void *buffer);
+
+/**
+ * @brief SpSM 求解阶段: 异步执行三角求解 op(A) * X = alpha * op(B)。
+ *        复用 Analysis 绑定的 active buffer。禁止 host 侧 stream 同步。
+ * @note opB 当前仅支持 ACL_SPARSE_OP_NON_TRANSPOSE (见 aclsparseSpSMBufferSize 注释)。
+ */
+aclsparseStatus_t aclsparseSpSM(
+    aclsparseHandle_t handle, aclsparseOperation_t opA, aclsparseOperation_t opB,
+    const void *alpha, aclsparseConstSpMatDescr_t matA,
+    aclsparseConstDnMatDescr_t matB, aclsparseDnMatDescr_t matC,
+    aclDataType computeType, aclsparseSpSMAlg_t alg,
+    aclsparseSpSMDescr_t spsmDescr);
 
 /**
  * @brief 创建 ops-sparse handle
