@@ -32,6 +32,9 @@ struct SpSVNpuResult {
 struct SpSVNpuConfig {
     std::string format = "CSR";
     bool isI64 = false;
+    bool isRowPtrI64 = false;  // effective rowPtr (or colOffset for CSC) index width
+    bool isColIndI64 = false;  // effective colInd (or rowInd for CSC/COO) index width
+    int32_t idxBase = 0;  // 0=INDEX_BASE_ZERO, 1=INDEX_BASE_ONE
     bool lower = true;
     bool unitDiag = false;
     aclsparseOperation_t opA = ACL_SPARSE_OP_NON_TRANSPOSE;
@@ -49,26 +52,49 @@ struct SpSVDeviceSetup {
 };
 
 static inline SpSVDeviceSetup SetupCsrDescriptor(const CsrMatrix& csr, int64_t m,
-                                                   aclsparseIndexType_t idxType) {
+                                                   aclsparseIndexType_t rowPtrType,
+                                                   aclsparseIndexType_t colIndType,
+                                                   aclsparseIndexBase_t idxBase) {
     SpSVDeviceSetup setup;
-    if (idxType == ACL_SPARSE_INDEX_64I) {
+    // Row offsets: independently sized by rowPtrType
+    if (rowPtrType == ACL_SPARSE_INDEX_64I) {
         std::vector<int64_t> rowOff64(csr.rowOffsets.begin(), csr.rowOffsets.end());
-        std::vector<int64_t> colIdx64(csr.colIndices.begin(), csr.colIndices.end());
+        if (idxBase == ACL_SPARSE_INDEX_BASE_ONE) {
+            for (auto& v : rowOff64) v++;
+        }
         setup.dIdx0 = DeviceBuffer::copyFrom(rowOff64.data(), rowOff64.size() * sizeof(int64_t));
+    } else {
+        std::vector<int32_t> rowOff(csr.rowOffsets);
+        if (idxBase == ACL_SPARSE_INDEX_BASE_ONE) {
+            for (auto& v : rowOff) v++;
+        }
+        setup.dIdx0 = DeviceBuffer::copyFrom(rowOff.data(), rowOff.size() * sizeof(int32_t));
+    }
+    // Column indices: independently sized by colIndType
+    if (colIndType == ACL_SPARSE_INDEX_64I) {
+        std::vector<int64_t> colIdx64(csr.colIndices.begin(), csr.colIndices.end());
+        if (idxBase == ACL_SPARSE_INDEX_BASE_ONE) {
+            for (auto& v : colIdx64) v++;
+        }
         setup.dIdx1 = DeviceBuffer::copyFrom(colIdx64.data(), colIdx64.size() * sizeof(int64_t));
     } else {
-        setup.dIdx0 = DeviceBuffer::copyFrom(csr.rowOffsets.data(), csr.rowOffsets.size() * sizeof(int32_t));
-        setup.dIdx1 = DeviceBuffer::copyFrom(csr.colIndices.data(), csr.colIndices.size() * sizeof(int32_t));
+        std::vector<int32_t> colIdx(csr.colIndices);
+        if (idxBase == ACL_SPARSE_INDEX_BASE_ONE) {
+            for (auto& v : colIdx) v++;
+        }
+        setup.dIdx1 = DeviceBuffer::copyFrom(colIdx.data(), colIdx.size() * sizeof(int32_t));
     }
     setup.dVals = DeviceBuffer::copyFrom(csr.values.data(), csr.values.size() * sizeof(float));
     setup.matA = SpMatManager::createCsr(m, m, csr.nnz, setup.dIdx0.get(), setup.dIdx1.get(),
-                                           setup.dVals.get(), idxType, idxType,
-                                           ACL_SPARSE_INDEX_BASE_ZERO, ACL_FLOAT);
+                                           setup.dVals.get(), rowPtrType, colIndType,
+                                           idxBase, ACL_FLOAT);
     return setup;
 }
 
 static inline SpSVDeviceSetup SetupCscDescriptor(const CsrMatrix& csr, int64_t m,
-                                                   aclsparseIndexType_t idxType) {
+                                                   aclsparseIndexType_t colOffType,
+                                                   aclsparseIndexType_t rowIndType,
+                                                   aclsparseIndexBase_t idxBase) {
     CscMatrix csc;
     csc.rows = m; csc.cols = m; csc.nnz = csr.nnz;
     csc.colOffsets.assign(m + 1, 0);
@@ -85,25 +111,35 @@ static inline SpSVDeviceSetup SetupCscDescriptor(const CsrMatrix& csr, int64_t m
             csc.values[dest] = csr.values[k];
         }
     }
+    if (idxBase == ACL_SPARSE_INDEX_BASE_ONE) {
+        for (auto& v : csc.colOffsets) v++;
+        for (auto& v : csc.rowIndices) v++;
+    }
     SpSVDeviceSetup setup;
-    if (idxType == ACL_SPARSE_INDEX_64I) {
+    // Column offsets: independently sized by colOffType
+    if (colOffType == ACL_SPARSE_INDEX_64I) {
         std::vector<int64_t> colOff64(csc.colOffsets.begin(), csc.colOffsets.end());
-        std::vector<int64_t> rowIdx64(csc.rowIndices.begin(), csc.rowIndices.end());
         setup.dIdx0 = DeviceBuffer::copyFrom(colOff64.data(), colOff64.size() * sizeof(int64_t));
-        setup.dIdx1 = DeviceBuffer::copyFrom(rowIdx64.data(), rowIdx64.size() * sizeof(int64_t));
     } else {
         setup.dIdx0 = DeviceBuffer::copyFrom(csc.colOffsets.data(), csc.colOffsets.size() * sizeof(int32_t));
+    }
+    // Row indices: independently sized by rowIndType
+    if (rowIndType == ACL_SPARSE_INDEX_64I) {
+        std::vector<int64_t> rowIdx64(csc.rowIndices.begin(), csc.rowIndices.end());
+        setup.dIdx1 = DeviceBuffer::copyFrom(rowIdx64.data(), rowIdx64.size() * sizeof(int64_t));
+    } else {
         setup.dIdx1 = DeviceBuffer::copyFrom(csc.rowIndices.data(), csc.rowIndices.size() * sizeof(int32_t));
     }
     setup.dVals = DeviceBuffer::copyFrom(csc.values.data(), csc.values.size() * sizeof(float));
     setup.matA = SpMatManager::createCsc(m, m, csc.nnz, setup.dIdx0.get(), setup.dIdx1.get(),
-                                           setup.dVals.get(), idxType, idxType,
-                                           ACL_SPARSE_INDEX_BASE_ZERO, ACL_FLOAT);
+                                           setup.dVals.get(), colOffType, rowIndType,
+                                           idxBase, ACL_FLOAT);
     return setup;
 }
 
 static inline SpSVDeviceSetup SetupCooDescriptor(const CsrMatrix& csr, int64_t m,
-                                                   aclsparseIndexType_t idxType) {
+                                                   aclsparseIndexType_t idxType,
+                                                   aclsparseIndexBase_t idxBase) {
     CooMatrix coo;
     coo.rows = m; coo.cols = m; coo.nnz = csr.nnz;
     coo.rowIndices.reserve(csr.nnz);
@@ -115,6 +151,10 @@ static inline SpSVDeviceSetup SetupCooDescriptor(const CsrMatrix& csr, int64_t m
             coo.colIndices.push_back(csr.colIndices[k]);
             coo.values.push_back(csr.values[k]);
         }
+    }
+    if (idxBase == ACL_SPARSE_INDEX_BASE_ONE) {
+        for (auto& v : coo.rowIndices) v++;
+        for (auto& v : coo.colIndices) v++;
     }
     SpSVDeviceSetup setup;
     if (idxType == ACL_SPARSE_INDEX_64I) {
@@ -129,14 +169,21 @@ static inline SpSVDeviceSetup SetupCooDescriptor(const CsrMatrix& csr, int64_t m
     setup.dVals = DeviceBuffer::copyFrom(coo.values.data(), coo.values.size() * sizeof(float));
     setup.matA = SpMatManager::createCoo(m, m, coo.nnz, setup.dIdx0.get(), setup.dIdx1.get(),
                                            setup.dVals.get(), idxType,
-                                           ACL_SPARSE_INDEX_BASE_ZERO, ACL_FLOAT);
+                                           idxBase, ACL_FLOAT);
     return setup;
 }
 
 static inline SpSVDeviceSetup SetupSlicedEllDescriptor(const CsrMatrix& csr, int64_t m,
                                                        aclsparseIndexType_t idxType,
+                                                       aclsparseIndexBase_t idxBase,
                                                        int32_t sliceWidth = 1) {
     SlicedEllMatrix ell = csrToSlicedEll(csr, sliceWidth);
+    if (idxBase == ACL_SPARSE_INDEX_BASE_ONE) {
+        for (auto& v : ell.sliceOffsets) v++;
+        for (auto& v : ell.colIndices) {
+            if (v >= 0) v++;
+        }
+    }
     SpSVDeviceSetup setup;
     if (idxType == ACL_SPARSE_INDEX_64I) {
         std::vector<int64_t> sliceOff64(ell.sliceOffsets.begin(), ell.sliceOffsets.end());
@@ -153,17 +200,20 @@ static inline SpSVDeviceSetup SetupSlicedEllDescriptor(const CsrMatrix& csr, int
                                                 static_cast<int64_t>(ell.sliceWidth),
                                                 static_cast<int64_t>(ell.sliceOffsets.size()) - 1,
                                                 idxType,
-                                                ACL_SPARSE_INDEX_BASE_ZERO, ACL_FLOAT);
+                                                idxBase, ACL_FLOAT);
     return setup;
 }
 
 static inline SpSVDeviceSetup SetupMatrixDescriptor(const CsrMatrix& csr, const SpSVNpuConfig& cfg) {
     int64_t m = csr.rows;
-    aclsparseIndexType_t idxType = cfg.isI64 ? ACL_SPARSE_INDEX_64I : ACL_SPARSE_INDEX_32I;
-    if (cfg.format == "CSR") return SetupCsrDescriptor(csr, m, idxType);
-    if (cfg.format == "CSC") return SetupCscDescriptor(csr, m, idxType);
-    if (cfg.format == "COO") return SetupCooDescriptor(csr, m, idxType);
-    if (cfg.format == "SLICED_ELL") return SetupSlicedEllDescriptor(csr, m, idxType, cfg.sliceWidth);
+    aclsparseIndexType_t rowPtrType = cfg.isRowPtrI64 ? ACL_SPARSE_INDEX_64I : ACL_SPARSE_INDEX_32I;
+    aclsparseIndexType_t colIndType = cfg.isColIndI64 ? ACL_SPARSE_INDEX_64I : ACL_SPARSE_INDEX_32I;
+    aclsparseIndexBase_t idxBase = (cfg.idxBase == 1) ? ACL_SPARSE_INDEX_BASE_ONE : ACL_SPARSE_INDEX_BASE_ZERO;
+    if (cfg.format == "CSR") return SetupCsrDescriptor(csr, m, rowPtrType, colIndType, idxBase);
+    if (cfg.format == "CSC") return SetupCscDescriptor(csr, m, rowPtrType, colIndType, idxBase);
+    // COO and SLICED_ELL use a single index type for both arrays; map via colIndType
+    if (cfg.format == "COO") return SetupCooDescriptor(csr, m, colIndType, idxBase);
+    if (cfg.format == "SLICED_ELL") return SetupSlicedEllDescriptor(csr, m, colIndType, idxBase, cfg.sliceWidth);
     throw std::runtime_error("Unsupported format: " + cfg.format);
 }
 

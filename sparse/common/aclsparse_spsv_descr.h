@@ -30,12 +30,16 @@ struct aclsparseSpSVDescr {
     int64_t cachedNnz = 0;
     int32_t cachedFormat = 0;
     int32_t cachedDiagType = 0;
+    int32_t cachedIdxBase = 0;        // 0=0-based, 1=1-based (Fortran indexing)
     int32_t cachedOpA = -1;           // operation type (0=NON_TRANSPOSE, 1=TRANSPOSE, 2=CONJUGATE_TRANSPOSE)
     int32_t cachedFillMode = 0;       // LOWER(0) or UPPER(1)
     int32_t cachedNumSlices = 0;      // for SELL format
     int32_t cachedSliceWidth = 0;     // for SELL format (stores mat->sliceNnz)
-    size_t cachedIdxSize = 4;         // index element size: 4 bytes (I32) or 8 bytes (I64)
-    int32_t cachedIndexType = 0;      // 0=I32, 1=I64
+    size_t cachedIdxSize = 4;         // rowPtr element size: 4 bytes (I32) or 8 bytes (I64)
+    size_t cachedColIndSize = 4;     // colInd element size: 4 bytes (I32) or 8 bytes (I64)
+    int32_t cachedPermType = 0;      // 0=int32 workspace arrays, 1=int64 (nnz > INT32_MAX)
+    int32_t cachedIndexType = 0;      // 0=I32, 1=I64 for rowPtr (ptrType)
+    int32_t cachedColIndType = 0;    // 0=I32, 1=I64 for colInd (idxType)
 
     // Weak reference to the user's matrix values pointer at analysis time.
     // The user must keep this memory valid until solve completes. If the user

@@ -199,8 +199,14 @@ typedef enum aclsparseFillMode_t {
 
 // This type indicates the index type for representing the sparse matrix indices.
 typedef enum aclsparseIndexType_t {
-    ACL_SPARSE_INDEX_32I = 0,  // 32-bit signed integer [0, 2^31 - 1]（当前 SpMV/SpMM 已实现）
-    ACL_SPARSE_INDEX_64I       // 64-bit signed integer [0, 2^63 - 1]（暂未支持，CreateCsr 将返回 NOT_SUPPORTED）
+    ACL_SPARSE_INDEX_32I = 0,  // 32-bit signed integer [0, 2^31 - 1]
+    ACL_SPARSE_INDEX_64I       // 64-bit signed integer [0, 2^63 - 1]
+                               // Per-operator I64 support:
+                               //   SpSV  — fully supported; rowPtr (ptrType) and colInd (idxType) may
+                               //           be mixed: allowed (I32,I32), (I64,I32), (I64,I64).
+                               //           (I32,I64) is rejected (no practical use case).
+                               //   SpMV  — I64 not yet supported (returns NOT_SUPPORTED).
+                               //   SpMM  — I64 not yet supported (returns NOT_SUPPORTED).
 } aclsparseIndexType_t;
 
 typedef enum aclsparseDenseToSparseAlg_t {

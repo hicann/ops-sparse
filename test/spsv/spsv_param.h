@@ -24,6 +24,10 @@ struct SpSVParam : public SparseTestParamBase {
     int32_t slice_width = 1;
     std::string format = "CSR";
     std::string index_type = "i32";
+    int32_t index_base = 0;  // 0=0-based, 1=1-based
+    std::string rowptr_type;  // empty = use index_type; supports mixed index widths (e.g. i64 rowptr + i32 colind)
+    std::string colind_type;  // empty = use index_type
+    bool force_permtype64 = false;  // set SPSV_FORCE_PERMT_64=1 env var before execution
     std::string fill_mode = "LOWER";
     std::string diag_type = "NON_UNIT";
     std::string op_type = "NON_TRANSPOSE";
@@ -46,6 +50,10 @@ struct SpSVParam : public SparseTestParamBase {
         slice_width     = parseInt(row, "slice_width");
         format          = parseString(row, "format");
         index_type      = parseString(row, "index_type");
+        index_base      = static_cast<int32_t>(parseInt(row, "index_base"));
+        rowptr_type     = parseString(row, "rowptr_type");
+        colind_type     = parseString(row, "colind_type");
+        force_permtype64 = parseBool(row, "force_permtype64");
         fill_mode       = parseString(row, "fill_mode");
         diag_type       = parseString(row, "diag_type");
         op_type         = parseString(row, "op_type");
@@ -80,6 +88,14 @@ struct SpSVParam : public SparseTestParamBase {
         return op_type == "TRANSPOSE" || op_type == "CONJUGATE_TRANSPOSE";
     }
     bool isI64() const { return index_type == "i64"; }
+    // Effective rowPtr/column-offset index type: use rowptr_type if set, else index_type
+    bool isRowPtrI64() const {
+        return rowptr_type.empty() ? isI64() : (rowptr_type == "i64");
+    }
+    // Effective colInd/rowInd index type: use colind_type if set, else index_type
+    bool isColIndI64() const {
+        return colind_type.empty() ? isI64() : (colind_type == "i64");
+    }
 };
 
 inline void PrintTo(const SpSVParam& p, std::ostream* os) {

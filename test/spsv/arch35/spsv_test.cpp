@@ -16,6 +16,35 @@
 
 namespace sparse_test {
 
+// RAII guard for environment variables to ensure cleanup even on exceptions
+class RAIIEnvGuard {
+public:
+    RAIIEnvGuard() : needs_cleanup_(false) {}
+    ~RAIIEnvGuard() { cleanup(); }
+
+    void set(const char* name, const char* value) {
+        if (needs_cleanup_) {
+            unsetenv(name_.c_str());
+        }
+        name_ = name;
+        value_ = value;
+        setenv(name, value, 1);
+        needs_cleanup_ = true;
+    }
+
+    void cleanup() {
+        if (needs_cleanup_) {
+            unsetenv(name_.c_str());
+            needs_cleanup_ = false;
+        }
+    }
+
+private:
+    std::string name_;
+    std::string value_;
+    bool needs_cleanup_;
+};
+
 static CsrMatrix GenerateTriangularMatrix(const SpSVParam& p) {
     bool lower = p.isLower();
     bool unitDiag = p.isUnitDiag();
@@ -142,6 +171,26 @@ static void RunDeterministicCheck(aclsparseHandle_t handle, aclrtStream stream,
         << "[" << p.case_name << "] Deterministic check FAILED";
 }
 
+static std::vector<float> GenerateInputVector(const SpSVParam& p) {
+    if (p.case_name.find("x_zero") != std::string::npos) {
+        return std::vector<float>(p.m, 0.0f);
+    }
+    return makeDenseFloat(p.m, -5.0, 5.0, p.seed + 1);
+}
+
+static std::vector<float> ComputeGolden(const CsrMatrix& csr,
+                                         const std::vector<float>& xVec,
+                                         const SpSVParam& p,
+                                         bool lower, bool unitDiag,
+                                         bool transpose) {
+    if (p.structure == "missing_diag" || p.structure == "empty_non_unit") {
+        // Use manual forward/backward substitution for structures where the exact
+        // IEEE-754 division-by-zero semantics must be preserved (diagVal=0 → Inf/NaN).
+        return SpSVGoldenManual(csr, xVec, p.alpha, lower, unitDiag, transpose);
+    }
+    return SpSVGolden(csr, xVec, p.alpha, lower, unitDiag, transpose);
+}
+
 TEST_P(SpSVTest, GenericSuccess) {
     auto p = GetParam();
     std::cout << "\n==== " << p.case_name
@@ -156,29 +205,20 @@ TEST_P(SpSVTest, GenericSuccess) {
         csr = unsortCsrRowIndices(csr, p.seed + 100);
     }
 
-    std::vector<float> xVec;
-    if (p.case_name.find("x_zero") != std::string::npos) {
-        xVec.assign(p.m, 0.0f);
-    } else {
-        xVec = makeDenseFloat(p.m, -5.0, 5.0, p.seed + 1);
-    }
+    std::vector<float> xVec = GenerateInputVector(p);
 
     bool lower = p.isLower();
     bool unitDiag = p.isUnitDiag();
     bool transpose = p.isTranspose();
 
-    std::vector<float> yGolden;
-    if (p.structure == "missing_diag" || p.structure == "empty_non_unit") {
-        // Use manual forward/backward substitution for structures where the exact
-        // IEEE-754 division-by-zero semantics must be preserved (diagVal=0 → Inf/NaN).
-        yGolden = SpSVGoldenManual(csr, xVec, p.alpha, lower, unitDiag, transpose);
-    } else {
-        yGolden = SpSVGolden(csr, xVec, p.alpha, lower, unitDiag, transpose);
-    }
+    std::vector<float> yGolden = ComputeGolden(csr, xVec, p, lower, unitDiag, transpose);
 
     SpSVNpuConfig cfg;
     cfg.format = p.format;
     cfg.isI64 = p.isI64();
+    cfg.isRowPtrI64 = p.isRowPtrI64();
+    cfg.isColIndI64 = p.isColIndI64();
+    cfg.idxBase = p.index_base;
     cfg.lower = lower;
     cfg.unitDiag = unitDiag;
     cfg.opA = (p.op_type == "TRANSPOSE") ? ACL_SPARSE_OP_TRANSPOSE :
@@ -188,6 +228,11 @@ TEST_P(SpSVTest, GenericSuccess) {
     cfg.nullVec = p.null_vec;
     cfg.updateMode = p.update_mode;
     cfg.sliceWidth = p.slice_width;
+
+    RAIIEnvGuard perm64Guard;
+    if (p.force_permtype64 || p.case_name.rfind("I64_PERM64_", 0) == 0) {
+        perm64Guard.set("SPSV_FORCE_PERMT_64", "1");
+    }
 
     SpSVNpuResult npuResult;
     try {

@@ -361,7 +361,16 @@ aclsparseStatus_t aclsparseSpMatGetAttribute(
 | ACL_SPARSE_INDEX_32I | ✅ | 32-bit 有符号整数索引 |
 | ACL_SPARSE_INDEX_64I | ✅ | 64-bit 有符号整数索引 |
 
-约束：rowOffsets 和 colInd 的索引类型必须一致。即使使用 64I 索引，矩阵维度 m 仍须 ≤ INT32_MAX（kernel 内部 levelRow/diagPtr 等数组采用 int32_t）。
+SpSV 允许 rowOffsets（ptrType）与 colInd（idxType）独立指定索引宽度，但需满足以下支持矩阵：
+
+| rowOffsets 类型 | colInd 类型 | 支持 | 典型场景 |
+|:---:|:---:|:---:|------|
+| I32 | I32 | ✅ | 标准路径；nnz ≤ INT32_MAX |
+| I64 | I32 | ✅ | 混合宽度路径；nnz 可超过 INT32_MAX，colInd 受限于 m ≤ INT32_MAX，I32 即可 |
+| I64 | I64 | ✅ | 全 I64 路径；nnz 可超过 INT32_MAX |
+| I32 | I64 | ❌ | 不受支持：I32 rowPtr 无法寻址 nnz > INT32_MAX，此组合无实用场景 |
+
+无论使用哪种索引类型组合，矩阵维度 m（rows/cols）始终须 ≤ INT32_MAX（kernel 内部 levelRow/diagPtr 等数组采用 int32_t）。
 
 ## 支持的矩阵操作
 
@@ -389,12 +398,12 @@ aclsparseStatus_t aclsparseSpMatGetAttribute(
 
 - handle 不可为 nullptr，且须先调用 `aclsparseSetStream` 设置 stream
 - matA 必须为方阵（rows == cols）
-- matA 的索引基址仅支持 `ACL_SPARSE_INDEX_BASE_ZERO`
+- matA 的索引基址支持 `ACL_SPARSE_INDEX_BASE_ZERO`（C 兼容性）和 `ACL_SPARSE_INDEX_BASE_ONE`（Fortran 兼容性）；1-based 输入时 analysis 阶段在 device 侧构建 0-based workspace CSR 副本，需要额外 workspace
 - computeType 仅支持 `ACL_FLOAT`
 - alg 仅支持 `ACL_SPARSE_SPSV_ALG_DEFAULT`
 - matA 的值类型仅支持 `ACL_FLOAT`
-- matA 的 rowOffsets 和 colInd 索引类型必须一致
-- 即使使用 ACL_SPARSE_INDEX_64I 索引类型，矩阵维度 m（rows/cols）不得超过 INT32_MAX（2,147,483,647）；nnz 不受此限制，可超过 INT32_MAX
+- matA 的 rowOffsets 与 colInd 索引宽度可独立指定，支持组合详见上方"支持的索引类型"章节；仅 (I32, I64) 组合不受支持
+- 矩阵维度 m（rows/cols）不得超过 INT32_MAX（2,147,483,647）；nnz 可超过 INT32_MAX，但此时必须使用 I64 rowOffsets（ptrType=ACL_SPARSE_INDEX_64I），colInd 可为 I32 或 I64
 - 允许 matA 索引未排序（colInd 无需按行内升序排列）
 - 当 m == 0 时，所有调用均合法：bufferSize 返回 0，analysis 和 solve 不启动 device kernel 直接返回 SUCCESS
 - 所有接口支持异步执行，host 侧无 D2H 同步操作
@@ -413,7 +422,7 @@ aclsparseStatus_t aclsparseSpMatGetAttribute(
 ### SpSVDescr 生命周期
 
 - analysis 完成后，descr 内部缓存以下运行时常量：
-  - 矩阵属性缓存（analysis 时从 matA 快照）：cachedM、cachedNnz、cachedFormat、cachedFillMode、cachedDiagType、cachedOpA、cachedIndexType
+  - 矩阵属性缓存（analysis 时从 matA 快照）：cachedM、cachedNnz、cachedFormat、cachedFillMode、cachedDiagType、cachedOpA、cachedIndexType（rowPtr 索引宽度）、cachedColIndType（colInd 索引宽度）、cachedIdxBase（索引基址）
   - 运行时上下文（solve/updateMatrix 时使用）：workspaceBuffer（workspace 指针）、currentValues（values 弱引用，由 updateMatrix 更新）、以及 workspace 内部偏移字段（levelPtrOffset、levelRowOffset、diagPtrOffset、csrRowPtrOffset、csrColIndOffset、csrValuesOffset、permOffset、transValuesOffset、transPermOffset）。这些内部字段用户不应直接访问。
 
 ### 维度匹配
@@ -429,9 +438,10 @@ aclsparseStatus_t aclsparseSpMatGetAttribute(
 ### Workspace 说明
 
 - **首部 TilingData 区域**：workspace 首 512 字节预留为 `SpsvTilingData` 运行时数据区。analysis kernel 将 `numLevels`（层数）和 `maxLevelWidth`（最大层宽）写入该区域，solve kernel 从中读取（而非从 host 传入的 kernel 参数中读取）
-- CSR/CSC 格式：workspace 存储 Level Schedule 数据（diagPtr + levelPtr + levelRow + validCount）
+- CSR/CSC 格式（0-based）：workspace 存储 Level Schedule 数据（diagPtr + levelPtr + levelRow + validCount）
   - `validCount`（m × int32_t）：每行的有效依赖元素计数，用于 unsorted CSR 场景下跳过已处理的依赖项，提升求解性能
-- COO/SLICED_ELL 格式：workspace 额外存储 CSR 副本（rowPtr + colInd + values + perm）
+- COO/SLICED_ELL 格式：workspace 额外存储 CSR 副本（rowPtr + colInd + values + perm），用于格式转换
+- 1-based CSR/CSC 格式（INDEX_BASE_ONE）：workspace 额外存储 0-based CSR 副本（rowPtr + colInd + values + perm），用于将 1-based 输入归一化为 0-based 进行下游处理
 - 转置操作（TRANSPOSE/CONJUGATE_TRANSPOSE）：workspace 额外存储转置后的 CSR 副本
 - workspace 大小由 `aclsparseSpSV_bufferSize` 计算，用户自行分配
 - workspace 在 analysis 和 solve 之间须保持有效，不可释放

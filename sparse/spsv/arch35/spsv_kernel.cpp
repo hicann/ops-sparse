@@ -26,41 +26,45 @@ using namespace AscendC;
 // expanded into the function signature of both the serial and parallel
 // variant, so the parameter list never appears twice in the source.
 
-#define SPSV_COO_BUILD_PARAMS(T) \
-    __gm__ const T *cooRowInd,   \
-    __gm__ const T *cooColInd,   \
+// Dual-template parameter macros for mixed index widths (RowPtrT, ColIndT).
+// RowPtrT: element type for row-offset arrays (ptrType from matrix descriptor).
+// ColIndT: element type for column-index arrays (idxType from matrix descriptor).
+
+#define SPSV_COO_BUILD_PARAMS(RowPtrT, ColIndT, PermT) \
+    __gm__ const RowPtrT *cooRowInd,   \
+    __gm__ const ColIndT *cooColInd,   \
     __gm__ const float *cooValues, \
-    __gm__ T *wsRowPtr,          \
-    __gm__ T *wsColInd,          \
+    __gm__ RowPtrT *wsRowPtr,          \
+    __gm__ ColIndT *wsColInd,          \
     __gm__ float *wsValues,      \
-    __gm__ int32_t *perm,        \
-    __gm__ int32_t *scratch,     \
-    int64_t m, int64_t nnz
+    __gm__ PermT *perm,          \
+    __gm__ PermT *scratch,       \
+    int64_t m, int64_t nnz, int32_t idxBase
 
-#define SPSV_SLICED_ELL_PARAMS(T) \
-    __gm__ const T *slicePtr,    \
-    __gm__ const T *sellColInd,  \
+#define SPSV_SLICED_ELL_PARAMS(RowPtrT, ColIndT, PermT) \
+    __gm__ const RowPtrT *slicePtr,    \
+    __gm__ const ColIndT *sellColInd,  \
     __gm__ const float *sellValues, \
-    __gm__ T *wsRowPtr,          \
-    __gm__ T *wsColInd,          \
+    __gm__ RowPtrT *wsRowPtr,          \
+    __gm__ ColIndT *wsColInd,          \
     __gm__ float *wsValues,      \
-    __gm__ int32_t *perm,        \
-    int64_t m, int32_t numSlices, int32_t sliceWidth
+    __gm__ PermT *perm,          \
+    int64_t m, int32_t numSlices, int32_t sliceWidth, int32_t idxBase
 
-#define SPSV_TRANS_PARAMS(T) \
-    __gm__ const T *rowPtr, \
-    __gm__ const T *colInd, \
+#define SPSV_TRANS_PARAMS(RowPtrT, ColIndT, PermT) \
+    __gm__ const RowPtrT *rowPtr, \
+    __gm__ const ColIndT *colInd, \
     __gm__ const float *values, \
-    __gm__ T *transRowPtr,  \
-    __gm__ T *transColInd,  \
+    __gm__ RowPtrT *transRowPtr,  \
+    __gm__ ColIndT *transColInd,  \
     __gm__ float *transValues, \
-    __gm__ int32_t *transPerm, \
-    __gm__ int32_t *scratch, \
-    int64_t m, int64_t nnz
+    __gm__ PermT *transPerm, \
+    __gm__ PermT *scratch, \
+    int64_t m, int64_t nnz, int32_t idxBase
 
-#define SPSV_WORKSPACE_CSR_PARAMS(T) \
-    __gm__ const T *rowPtr, \
-    __gm__ const T *colInd, \
+#define SPSV_WORKSPACE_CSR_PARAMS(RowPtrT, ColIndT) \
+    __gm__ const RowPtrT *rowPtr, \
+    __gm__ const ColIndT *colInd, \
     __gm__ const float *values, \
     __gm__ uint8_t *workspace, \
     int64_t m, int64_t nnz, \
@@ -69,52 +73,57 @@ using namespace AscendC;
     int64_t transRowPtrOffset, int64_t transColIndOffset, \
     int64_t transValuesOffset, int64_t transPermOffset, \
     int64_t diagPtrOffset, \
-    int32_t format, int32_t opA, int32_t numSlices, int32_t sliceWidth
+    int32_t format, int32_t opA, int32_t numSlices, int32_t sliceWidth, \
+    int32_t permType, int32_t idxBase
 
-// SPSV_WORKSPACE_CSR_SETUP: shared local-variable declaration and setup
-// call used by both SpsvBuildWorkspaceCsr and SpsvBuildWorkspaceCsrParallel.
-// Declares nine workspace-local pointers, calls SpsvSetupFormatWsPtrs to
-// populate them from workspace offsets, and initializes the src* aliases.
-// Expanding this as a macro (rather than duplicating 19 lines verbatim)
-// eliminates the codecheck duplicate-lines warning while preserving the
-// two separate caller functions required by the serial/parallel split.
-#define SPSV_WORKSPACE_CSR_SETUP(T)                                            \
-    __gm__ int32_t *diagPtr;                                                   \
-    __gm__ T *wsRowPtr = nullptr;                                              \
-    __gm__ T *wsColInd = nullptr;                                              \
-    __gm__ float *wsValues = nullptr;                                          \
-    __gm__ int32_t *permWs = nullptr;                                          \
-    __gm__ T *tRowPtr = nullptr;                                               \
-    __gm__ T *tColInd = nullptr;                                               \
-    __gm__ float *tValues = nullptr;                                           \
-    __gm__ int32_t *tPerm = nullptr;                                           \
-    SpsvSetupFormatWsPtrs<T>(workspace,                                        \
-        csrRowPtrOffset, csrColIndOffset, csrValuesOffset, permOffset,         \
-        transRowPtrOffset, transColIndOffset, transValuesOffset, transPermOffset, \
-        diagPtrOffset, format, opA,                                            \
-        &diagPtr, &wsRowPtr, &wsColInd, &wsValues, &permWs,                    \
-        &tRowPtr, &tColInd, &tValues, &tPerm);                                 \
-    __gm__ const T *srcRowPtr = rowPtr;                                        \
-    __gm__ const T *srcColInd = colInd;                                        \
-    __gm__ const float *srcValues = values
+// Declare and initialize workspace CSR pointers.
+// Declares 10 local variables (wsRowPtr, wsColInd, wsValues, tRowPtr, tColInd,
+// tValues, srcRowPtr, srcColInd, srcValues, srcIdxBase) from macro parameters.
+#define SPSV_WORKSPACE_CSR_SETUP(RowPtrT, ColIndT)                              \
+    __gm__ RowPtrT *wsRowPtr = nullptr;                                         \
+    __gm__ ColIndT *wsColInd = nullptr;                                         \
+    __gm__ float *wsValues = nullptr;                                           \
+    __gm__ RowPtrT *tRowPtr = nullptr;                                          \
+    __gm__ ColIndT *tColInd = nullptr;                                          \
+    __gm__ float *tValues = nullptr;                                            \
+    __gm__ const RowPtrT *srcRowPtr = rowPtr;                                   \
+    __gm__ const ColIndT *srcColInd = colInd;                                   \
+    __gm__ const float *srcValues = values;                                     \
+    int32_t srcIdxBase = idxBase;                                               \
+    if (format == 2 || format == 3 || idxBase == 1) {                           \
+        wsRowPtr = (__gm__ RowPtrT *)(workspace + csrRowPtrOffset);             \
+        wsColInd = (__gm__ ColIndT *)(workspace + csrColIndOffset);             \
+        wsValues = (__gm__ float *)(workspace + csrValuesOffset);               \
+    }                                                                           \
+    if (opA != 0 && transRowPtrOffset >= 0) {                                   \
+        tRowPtr = (__gm__ RowPtrT *)(workspace + transRowPtrOffset);            \
+        tColInd = (__gm__ ColIndT *)(workspace + transColIndOffset);            \
+        tValues = (__gm__ float *)(workspace + transValuesOffset);              \
+    }
+
+// Setup workspace pointer helpers below are called from SpsvBuildWorkspaceCsr
+// and SpsvBuildWorkspaceCsrParallel with runtime permType branching.
 
 // Serial COO -> CSR conversion (single-thread, thread 0 only).
-template <typename IdxT>
-__simt_callee__ inline void SpsvBuildCsrFromCoo(SPSV_COO_BUILD_PARAMS(IdxT))
+template <typename RowPtrT, typename ColIndT, typename PermT>
+__simt_callee__ inline void SpsvBuildCsrFromCoo(SPSV_COO_BUILD_PARAMS(RowPtrT, ColIndT, PermT))
 {
     // wsRowPtr has m+1 elements (allocated by host via ComputeWorkspaceSize).
+    // idxBase: 0 for 0-based COO, 1 for 1-based (Fortran). Subtract idxBase
+    // when reading row/col indices to normalize to 0-based workspace CSR.
     for (int64_t i = 0; i <= m; i++) {
         wsRowPtr[i] = 0;
     }
     for (int64_t p = 0; p < nnz; p++) {
-        // Bounds check: COO row/col indices must be in [0, m). Host
-        // guarantees valid input; this guard prevents silent GM corruption
-        // on illegal data.
-        int32_t r = static_cast<int32_t>(cooRowInd[p]);
-        int32_t c = static_cast<int32_t>(cooColInd[p]);
-        if (r < 0 || r >= static_cast<int32_t>(m) || c < 0 || c >= static_cast<int32_t>(m)) {
+        // Bounds check in original type first to avoid int64-to-int32 truncation
+        // silently wrapping large unsigned values into [0, m). Host guarantees
+        // valid input; this guard prevents silent GM corruption on illegal data.
+        RowPtrT rawR = cooRowInd[p] - static_cast<RowPtrT>(idxBase);
+        ColIndT rawC = cooColInd[p] - static_cast<ColIndT>(idxBase);
+        if (rawR < 0 || rawR >= static_cast<RowPtrT>(m) || rawC < 0 || rawC >= static_cast<ColIndT>(m)) {
             continue;
         }
+        int32_t r = static_cast<int32_t>(rawR);
         wsRowPtr[r + 1]++;
     }
     for (int64_t i = 0; i < m; i++) {
@@ -124,26 +133,28 @@ __simt_callee__ inline void SpsvBuildCsrFromCoo(SPSV_COO_BUILD_PARAMS(IdxT))
         scratch[i] = 0;
     }
     for (int64_t p = 0; p < nnz; p++) {
-        int32_t row = static_cast<int32_t>(cooRowInd[p]);
-        int32_t col = static_cast<int32_t>(cooColInd[p]);
-        // Bounds check: skip entries with invalid row or column index to
-        // prevent out-of-bounds access to workspace arrays and propagate
-        // corruption instead of silently corrupting unrelated data.
-        if (row < 0 || row >= static_cast<int32_t>(m) || col < 0 || col >= static_cast<int32_t>(m)) {
+        // Bounds check in original type first to avoid int64-to-int32 truncation.
+        RowPtrT rawR = cooRowInd[p] - static_cast<RowPtrT>(idxBase);
+        ColIndT rawC = cooColInd[p] - static_cast<ColIndT>(idxBase);
+        if (rawR < 0 || rawR >= static_cast<RowPtrT>(m) || rawC < 0 || rawC >= static_cast<ColIndT>(m)) {
             continue;
         }
-        int32_t pos = static_cast<int32_t>(wsRowPtr[row]) + scratch[row];
+        int32_t row = static_cast<int32_t>(rawR);
+        RowPtrT pos = wsRowPtr[row] + static_cast<RowPtrT>(scratch[row]);
         scratch[row]++;
-        wsColInd[pos] = cooColInd[p];
+        // Write 0-based column index to workspace CSR directly in ColIndT
+        // to remain consistent with the parallel path (Issue 12 fix).
+        wsColInd[pos] = cooColInd[p] - static_cast<ColIndT>(idxBase);
         wsValues[pos] = cooValues[p];
-        perm[pos] = static_cast<int32_t>(p);
+        perm[pos] = static_cast<PermT>(p);
     }
 }
 
 // Parallel COO -> CSR conversion. All threads in the block participate using
 // atomic histogram and scatter (multi-core serial phase path).
-template <typename IdxT>
-__simt_callee__ inline void SpsvBuildCsrFromCooParallel(SPSV_COO_BUILD_PARAMS(IdxT))
+// idxBase: 0 for 0-based COO, 1 for 1-based (Fortran).
+template <typename RowPtrT, typename ColIndT, typename PermT>
+__simt_callee__ inline void SpsvBuildCsrFromCooParallel(SPSV_COO_BUILD_PARAMS(RowPtrT, ColIndT, PermT))
 {
     for (int64_t i = static_cast<int64_t>(threadIdx.x);
          i <= m;
@@ -160,7 +171,7 @@ __simt_callee__ inline void SpsvBuildCsrFromCooParallel(SPSV_COO_BUILD_PARAMS(Id
     for (int64_t p = static_cast<int64_t>(threadIdx.x);
          p < nnz;
          p += static_cast<int64_t>(blockDim.x)) {
-        int32_t r = static_cast<int32_t>(cooRowInd[p]);
+        int32_t r = static_cast<int32_t>(cooRowInd[p]) - idxBase;
         if (r < 0 || r >= static_cast<int32_t>(m)) {
             continue;
         }
@@ -178,51 +189,56 @@ __simt_callee__ inline void SpsvBuildCsrFromCooParallel(SPSV_COO_BUILD_PARAMS(Id
     for (int64_t p = static_cast<int64_t>(threadIdx.x);
          p < nnz;
          p += static_cast<int64_t>(blockDim.x)) {
-        int32_t row = static_cast<int32_t>(cooRowInd[p]);
+        int32_t row = static_cast<int32_t>(cooRowInd[p]) - idxBase;
         if (row < 0 || row >= static_cast<int32_t>(m)) {
             continue;
         }
         int32_t pos = static_cast<int32_t>(wsRowPtr[row]) +
                       asc_atomic_add(&scratch[row], 1);
-        wsColInd[pos] = cooColInd[p];
+        // Write 0-based column index to workspace CSR.
+        wsColInd[pos] = cooColInd[p] - static_cast<ColIndT>(idxBase);
         wsValues[pos] = cooValues[p];
-        perm[pos] = static_cast<int32_t>(p);
+        perm[pos] = static_cast<PermT>(p);
     }
     asc_syncthreads();
 }
 
-template <typename IdxT>
-__simt_callee__ inline void SpsvBuildCsrFromSlicedEll(SPSV_SLICED_ELL_PARAMS(IdxT))
+template <typename RowPtrT, typename ColIndT, typename PermT>
+__simt_callee__ inline void SpsvBuildCsrFromSlicedEll(SPSV_SLICED_ELL_PARAMS(RowPtrT, ColIndT, PermT))
 {
     int64_t nnzCounter = 0;
     for (int64_t i = 0; i < m; i++) {
-        wsRowPtr[i] = static_cast<IdxT>(nnzCounter);
+        wsRowPtr[i] = static_cast<RowPtrT>(nnzCounter);
         for (int32_t s = 0; s < numSlices; s++) {
             int64_t sliceStart = static_cast<int64_t>(slicePtr[s]);
             for (int32_t k = 0; k < sliceWidth; k++) {
                 int64_t p = sliceStart + i * sliceWidth + k;
                 if (sellColInd[p] >= 0) {
-                    wsColInd[nnzCounter] = sellColInd[p];
+                    wsColInd[nnzCounter] = sellColInd[p] - static_cast<ColIndT>(idxBase);
                     wsValues[nnzCounter] = sellValues[p];
-                    perm[nnzCounter] = static_cast<int32_t>(p);
+                    perm[nnzCounter] = static_cast<PermT>(p);
                     nnzCounter++;
                 }
             }
         }
     }
-    wsRowPtr[m] = static_cast<IdxT>(nnzCounter);
+    wsRowPtr[m] = static_cast<RowPtrT>(nnzCounter);
 }
 
 // Serial CSR transpose (single-thread, thread 0 only).
-template <typename IdxT>
-__simt_callee__ inline void SpsvTransposeCsr(SPSV_TRANS_PARAMS(IdxT))
+// idxBase: 0 for 0-based source CSR, 1 for 1-based (Fortran). Subtract idxBase
+// when reading source rowPtr and colInd to normalize to 0-based transposed CSR.
+template <typename RowPtrT, typename ColIndT, typename PermT>
+__simt_callee__ inline void SpsvTransposeCsr(SPSV_TRANS_PARAMS(RowPtrT, ColIndT, PermT))
 {
     for (int64_t i = 0; i <= m; i++) {
         transRowPtr[i] = 0;
     }
     for (int64_t i = 0; i < m; i++) {
-        for (IdxT p = rowPtr[i]; p < rowPtr[i + 1]; p++) {
-            int32_t col = static_cast<int32_t>(colInd[p]);
+        RowPtrT rowStart = rowPtr[i] - static_cast<RowPtrT>(idxBase);
+        RowPtrT rowEnd = rowPtr[i + 1] - static_cast<RowPtrT>(idxBase);
+        for (RowPtrT p = rowStart; p < rowEnd; p++) {
+            int32_t col = static_cast<int32_t>(colInd[p]) - idxBase;
             // Bounds check: skip entries with column index out of range
             // [0, m) to prevent out-of-bounds write to transRowPtr
             // (which has m+1 entries).
@@ -239,41 +255,47 @@ __simt_callee__ inline void SpsvTransposeCsr(SPSV_TRANS_PARAMS(IdxT))
         scratch[i] = 0;
     }
     for (int64_t i = 0; i < m; i++) {
-        for (IdxT p = rowPtr[i]; p < rowPtr[i + 1]; p++) {
-            int32_t col = static_cast<int32_t>(colInd[p]);
+        RowPtrT rowStart = rowPtr[i] - static_cast<RowPtrT>(idxBase);
+        RowPtrT rowEnd = rowPtr[i + 1] - static_cast<RowPtrT>(idxBase);
+        for (RowPtrT p = rowStart; p < rowEnd; p++) {
+            int32_t col = static_cast<int32_t>(colInd[p]) - idxBase;
             // Bounds check: skip entries with column index out of range
             // [0, m) to prevent out-of-bounds read from
             // transRowPtr/scratch arrays.
             if (col < 0 || col >= static_cast<int32_t>(m)) {
                 continue;
             }
-            int32_t pos = static_cast<int32_t>(transRowPtr[col]) + scratch[col];
+            RowPtrT pos = transRowPtr[col] + static_cast<RowPtrT>(scratch[col]);
             scratch[col]++;
-            transColInd[pos] = static_cast<IdxT>(i);
+            transColInd[pos] = static_cast<ColIndT>(i);
             transValues[pos] = values[p];
-            transPerm[pos] = static_cast<int32_t>(p);
+            transPerm[pos] = static_cast<PermT>(p);
         }
     }
 }
 
 // Helper macros for SpsvTransposeCsrParallel to factor out the common row-iteration
 // and column-bounds-check structure shared between the histogram and scatter passes.
-#define SPSV_TRANSPOSE_FOREACH_ROW(IdxT)                                       \
+// idxBase is applied to rowPtr and colInd reads in SpsvTransposeCsrParallel below.
+// RowPtrT is for iterating rowPtr offsets; ColIndT is for reading colInd values.
+#define SPSV_TRANSPOSE_FOREACH_ROW(RowPtrT, idxBase)                           \
     for (int64_t i = static_cast<int64_t>(threadIdx.x);                        \
          i < m;                                                                \
          i += static_cast<int64_t>(blockDim.x))                                \
-        for (IdxT p = rowPtr[i]; p < rowPtr[i + 1]; p++)
+        for (RowPtrT p = rowPtr[i] - static_cast<RowPtrT>(idxBase);            \
+             p < rowPtr[i + 1] - static_cast<RowPtrT>(idxBase); p++)
 
-#define SPSV_TRANSPOSE_BOUNDSCHECK_COL(IdxT)                                   \
-    int32_t col = static_cast<int32_t>(colInd[p]);                             \
+#define SPSV_TRANSPOSE_BOUNDSCHECK_COL(ColIndT, idxBase)                       \
+    int32_t col = static_cast<int32_t>(colInd[p]) - idxBase;                   \
     if (col < 0 || col >= static_cast<int32_t>(m)) {                           \
         continue;                                                              \
     }
 
 // Parallel CSR transpose. All threads in the block participate using atomic
 // histogram and scatter.
-template <typename IdxT>
-__simt_callee__ inline void SpsvTransposeCsrParallel(SPSV_TRANS_PARAMS(IdxT))
+// idxBase: 0 for 0-based source CSR, 1 for 1-based (Fortran).
+template <typename RowPtrT, typename ColIndT, typename PermT>
+__simt_callee__ inline void SpsvTransposeCsrParallel(SPSV_TRANS_PARAMS(RowPtrT, ColIndT, PermT))
 {
     for (int64_t i = static_cast<int64_t>(threadIdx.x);
          i <= m;
@@ -287,8 +309,8 @@ __simt_callee__ inline void SpsvTransposeCsrParallel(SPSV_TRANS_PARAMS(IdxT))
     }
     asc_syncthreads();
 
-    SPSV_TRANSPOSE_FOREACH_ROW(IdxT) {
-        SPSV_TRANSPOSE_BOUNDSCHECK_COL(IdxT)
+    SPSV_TRANSPOSE_FOREACH_ROW(RowPtrT, idxBase) {
+        SPSV_TRANSPOSE_BOUNDSCHECK_COL(ColIndT, idxBase)
         asc_atomic_add(&transRowPtr[col + 1], 1);
     }
     asc_syncthreads();
@@ -300,13 +322,13 @@ __simt_callee__ inline void SpsvTransposeCsrParallel(SPSV_TRANS_PARAMS(IdxT))
     }
     asc_syncthreads();
 
-    SPSV_TRANSPOSE_FOREACH_ROW(IdxT) {
-        SPSV_TRANSPOSE_BOUNDSCHECK_COL(IdxT)
-        int32_t pos = static_cast<int32_t>(transRowPtr[col]) +
-                      asc_atomic_add(&scratch[col], 1);
-        transColInd[pos] = static_cast<IdxT>(i);
+    SPSV_TRANSPOSE_FOREACH_ROW(RowPtrT, idxBase) {
+        SPSV_TRANSPOSE_BOUNDSCHECK_COL(ColIndT, idxBase)
+        RowPtrT pos = transRowPtr[col] + static_cast<RowPtrT>(
+                       asc_atomic_add(&scratch[col], 1));
+        transColInd[pos] = static_cast<ColIndT>(i);
         transValues[pos] = values[p];
-        transPerm[pos] = static_cast<int32_t>(p);
+        transPerm[pos] = static_cast<PermT>(p);
     }
     asc_syncthreads();
 }
@@ -316,58 +338,29 @@ __simt_callee__ inline void SpsvTransposeCsrParallel(SPSV_TRANS_PARAMS(IdxT))
 // used by SpsvBuildWorkspaceCsrImpl regardless of the PARALLEL template flag.
 // ---------------------------------------------------------------------------
 
-// Sets up the workspace pointer aliases needed for format conversion and
-// transpose. diagPtr is always initialized from workspace; ws* pointers are
-// initialized only when format == 2 or 3; t* pointers are initialized only
-// when opA != 0 and transRowPtrOffset >= 0.
-template <typename IdxT>
-__simt_callee__ inline void SpsvSetupFormatWsPtrs(
-    __gm__ uint8_t *workspace,
-    int64_t csrRowPtrOffset, int64_t csrColIndOffset,
-    int64_t csrValuesOffset, int64_t permOffset,
-    int64_t transRowPtrOffset, int64_t transColIndOffset,
-    int64_t transValuesOffset, int64_t transPermOffset,
-    int64_t diagPtrOffset,
-    int32_t format, int32_t opA,
-    __gm__ int32_t **diagPtrOut,
-    __gm__ IdxT **wsRowPtrOut, __gm__ IdxT **wsColIndOut,
-    __gm__ float **wsValuesOut, __gm__ int32_t **permOut,
-    __gm__ IdxT **tRowPtrOut, __gm__ IdxT **tColIndOut,
-    __gm__ float **tValuesOut, __gm__ int32_t **tPermOut)
-{
-    *diagPtrOut = (__gm__ int32_t *)(workspace + diagPtrOffset);
-    if (format == 2 || format == 3) {
-        *wsRowPtrOut = (__gm__ IdxT *)(workspace + csrRowPtrOffset);
-        *wsColIndOut = (__gm__ IdxT *)(workspace + csrColIndOffset);
-        *wsValuesOut = (__gm__ float *)(workspace + csrValuesOffset);
-        *permOut = (__gm__ int32_t *)(workspace + permOffset);
-    }
-    if (opA != 0 && transRowPtrOffset >= 0) {
-        *tRowPtrOut = (__gm__ IdxT *)(workspace + transRowPtrOffset);
-        *tColIndOut = (__gm__ IdxT *)(workspace + transColIndOffset);
-        *tValuesOut = (__gm__ float *)(workspace + transValuesOffset);
-        *tPermOut = (__gm__ int32_t *)(workspace + transPermOffset);
-    }
-}
+// SpsvSetupFormatWsPtrs has been removed — workspace pointer setup is now
+// done inline in SpsvBuildWorkspaceCsr / SpsvBuildWorkspaceCsrParallel so
+// that permType-based branching determines whether perm/transPerm/diagPtr
+// are int32_t* or int64_t* (__gm__ void* casts at each use site).
 
-template <typename IdxT>
+template <typename RowPtrT, typename ColIndT, typename PermT>
 __simt_callee__ inline int32_t SpsvComputeLevelForRow(
-    __gm__ const IdxT *useRowPtr,
-    __gm__ const IdxT *useColInd,
-    __gm__ const int32_t *diagPtr,
+    __gm__ const RowPtrT *useRowPtr,
+    __gm__ const ColIndT *useColInd,
+    __gm__ const PermT *diagPtr,
     int64_t row, bool forward, int64_t m)
 {
     int32_t maxLvl = 0;
-    IdxT rs = useRowPtr[row];
-    IdxT re = useRowPtr[row + 1];
-    for (IdxT p = rs; p < re; p++) {
+    RowPtrT rs = useRowPtr[row];
+    RowPtrT re = useRowPtr[row + 1];
+    for (RowPtrT p = rs; p < re; p++) {
         int32_t col = static_cast<int32_t>(useColInd[p]);
         if (col < 0 || col >= static_cast<int32_t>(m)) {
             continue;
         }
         bool isDep = forward ? (col < static_cast<int32_t>(row)) : (col > static_cast<int32_t>(row));
         if (isDep) {
-            int32_t dep = diagPtr[col] + 1;
+            int32_t dep = static_cast<int32_t>(diagPtr[col]) + 1;
             if (dep > maxLvl) {
                 maxLvl = dep;
             }
@@ -376,11 +369,11 @@ __simt_callee__ inline int32_t SpsvComputeLevelForRow(
     return maxLvl;
 }
 
-template <typename IdxT>
+template <typename RowPtrT, typename ColIndT, typename PermT>
 __simt_callee__ inline void SpsvComputeLevels(
-    __gm__ const IdxT *useRowPtr,
-    __gm__ const IdxT *useColInd,
-    __gm__ int32_t *diagPtr,
+    __gm__ const RowPtrT *useRowPtr,
+    __gm__ const ColIndT *useColInd,
+    __gm__ PermT *diagPtr,
     int64_t m, bool forward)
 {
     for (int64_t i = 0; i < m; i++) {
@@ -388,28 +381,31 @@ __simt_callee__ inline void SpsvComputeLevels(
     }
     if (forward) {
         for (int64_t i = 0; i < m; i++) {
-            diagPtr[i] = SpsvComputeLevelForRow<IdxT>(useRowPtr, useColInd, diagPtr, i, true, m);
+            diagPtr[i] = SpsvComputeLevelForRow<RowPtrT, ColIndT, PermT>(
+                useRowPtr, useColInd, diagPtr, i, true, m);
         }
     } else {
         for (int64_t i = m - 1; i >= 0; i--) {
-            diagPtr[i] = SpsvComputeLevelForRow<IdxT>(useRowPtr, useColInd, diagPtr, i, false, m);
+            diagPtr[i] = SpsvComputeLevelForRow<RowPtrT, ColIndT, PermT>(
+                useRowPtr, useColInd, diagPtr, i, false, m);
         }
     }
 }
 
+template <typename PermT>
 __simt_callee__ inline int32_t SpsvBuildLevelHistogram(
-    __gm__ int32_t *diagPtr, __gm__ int32_t *levelPtr, int64_t m)
+    __gm__ PermT *diagPtr, __gm__ int32_t *levelPtr, int64_t m)
 {
     int32_t numLevels = 0;
     for (int64_t i = 0; i < m; i++) {
-        if (diagPtr[i] > numLevels) numLevels = diagPtr[i];
+        if (static_cast<int32_t>(diagPtr[i]) > numLevels) numLevels = static_cast<int32_t>(diagPtr[i]);
     }
     numLevels += 1;
     for (int32_t k = 0; k <= numLevels; k++) {
         levelPtr[k] = 0;
     }
     for (int64_t i = 0; i < m; i++) {
-        levelPtr[diagPtr[i] + 1]++;
+        levelPtr[static_cast<int32_t>(diagPtr[i]) + 1]++;
     }
     for (int32_t k = 0; k < numLevels; k++) {
         levelPtr[k + 1] += levelPtr[k];
@@ -417,17 +413,17 @@ __simt_callee__ inline int32_t SpsvBuildLevelHistogram(
     return numLevels;
 }
 
-template <typename IdxT>
+template <typename RowPtrT, typename ColIndT>
 __simt_callee__ inline void SpsvResolveEffectivePtrs(
-    __gm__ const IdxT *rowPtr,
-    __gm__ const IdxT *colInd,
+    __gm__ const RowPtrT *rowPtr,
+    __gm__ const ColIndT *colInd,
     __gm__ uint8_t *workspace,
     int32_t fillMode, int32_t opA,
     int64_t csrRowPtrOffset, int64_t csrColIndOffset,
     int64_t transRowPtrOffset, int64_t transColIndOffset,
-    int32_t format,
-    __gm__ const IdxT **effRowPtr,
-    __gm__ const IdxT **effColInd,
+    int32_t format, int32_t idxBase,
+    __gm__ const RowPtrT **effRowPtr,
+    __gm__ const ColIndT **effColInd,
     bool *effForward)
 {
     *effRowPtr = rowPtr;
@@ -435,13 +431,15 @@ __simt_callee__ inline void SpsvResolveEffectivePtrs(
     int32_t effFillMode = fillMode;
     int32_t effOpA = opA;
 
-    if (format == 2 || format == 3) {
-        *effRowPtr = (__gm__ const IdxT *)(workspace + csrRowPtrOffset);
-        *effColInd = (__gm__ const IdxT *)(workspace + csrColIndOffset);
+    // Use workspace CSR if format requires conversion (COO/SELL) OR
+    // if input is 1-based CSR (analysis phase built 0-based copy there).
+    if (format == 2 || format == 3 || idxBase == 1) {
+        *effRowPtr = (__gm__ const RowPtrT *)(workspace + csrRowPtrOffset);
+        *effColInd = (__gm__ const ColIndT *)(workspace + csrColIndOffset);
     }
     if (effOpA != 0 && transRowPtrOffset >= 0) {
-        *effRowPtr = (__gm__ const IdxT *)(workspace + transRowPtrOffset);
-        *effColInd = (__gm__ const IdxT *)(workspace + transColIndOffset);
+        *effRowPtr = (__gm__ const RowPtrT *)(workspace + transRowPtrOffset);
+        *effColInd = (__gm__ const ColIndT *)(workspace + transColIndOffset);
         effFillMode = (effFillMode == 0) ? 1 : 0;
         effOpA = 0;
     }
@@ -450,29 +448,29 @@ __simt_callee__ inline void SpsvResolveEffectivePtrs(
     if (effFillMode == 1 && effOpA != 0) *effForward = true;
 }
 
-template <typename IdxT>
+template <typename RowPtrT, typename ColIndT, typename PermT>
 __simt_callee__ inline void SpsvComputeDiagAndValidCount(
-    __gm__ const IdxT *effRowPtr,
-    __gm__ const IdxT *effColInd,
-    __gm__ int32_t *diagPtr,
+    __gm__ const RowPtrT *effRowPtr,
+    __gm__ const ColIndT *effColInd,
+    __gm__ PermT *diagPtr,
     __gm__ int32_t *validCount,
     int64_t row, bool effForward)
 {
-    IdxT rs = effRowPtr[row];
-    IdxT re = effRowPtr[row + 1];
+    RowPtrT rs = effRowPtr[row];
+    RowPtrT re = effRowPtr[row + 1];
 
-    diagPtr[row] = -1;
-    for (IdxT p = rs; p < re; p++) {
-        if (effColInd[p] == static_cast<IdxT>(row)) {
-            diagPtr[row] = static_cast<int32_t>(p);
+    diagPtr[row] = static_cast<PermT>(-1);
+    for (RowPtrT p = rs; p < re; p++) {
+        if (effColInd[p] == static_cast<ColIndT>(row)) {
+            diagPtr[row] = static_cast<PermT>(p);
             break;
         }
     }
 
     int32_t vc = 0;
     if (effForward) {
-        for (IdxT p = rs; p < re; p++) {
-            if (effColInd[p] < static_cast<IdxT>(row)) {
+        for (RowPtrT p = rs; p < re; p++) {
+            if (effColInd[p] < static_cast<ColIndT>(row)) {
                 vc++;
             } else {
                 break;
@@ -480,10 +478,10 @@ __simt_callee__ inline void SpsvComputeDiagAndValidCount(
         }
     } else {
         // Guard against empty row (re == rs): without this, p = re - 1 would
-        // underflow if IdxT were ever instantiated as unsigned.
+        // underflow if RowPtrT were ever instantiated as unsigned.
         if (re > rs) {
-            for (IdxT p = re - 1; p >= rs; p--) {
-                if (effColInd[p] > static_cast<IdxT>(row)) {
+            for (RowPtrT p = re - 1; p >= rs; p--) {
+                if (effColInd[p] > static_cast<ColIndT>(row)) {
                     vc++;
                 } else {
                     break;
@@ -510,8 +508,8 @@ __simt_callee__ inline void SpsvComputeDiagAndValidCount(
 //         (thread 0 only, O(m)).
 // Pass 3: Scatter (parallel over rows; each thread writes its row's entries
 //         at wsRowPtr[i] + k without atomics since rows are disjoint).
-template <typename IdxT>
-__simt_callee__ inline void SpsvBuildCsrFromSlicedEllParallel(SPSV_SLICED_ELL_PARAMS(IdxT))
+template <typename RowPtrT, typename ColIndT, typename PermT>
+__simt_callee__ inline void SpsvBuildCsrFromSlicedEllParallel(SPSV_SLICED_ELL_PARAMS(RowPtrT, ColIndT, PermT))
 {
     for (int64_t i = static_cast<int64_t>(threadIdx.x);
          i < m;
@@ -526,7 +524,7 @@ __simt_callee__ inline void SpsvBuildCsrFromSlicedEllParallel(SPSV_SLICED_ELL_PA
                 }
             }
         }
-        wsRowPtr[i] = static_cast<IdxT>(count);
+        wsRowPtr[i] = static_cast<RowPtrT>(count);
     }
     asc_syncthreads();
 
@@ -534,10 +532,10 @@ __simt_callee__ inline void SpsvBuildCsrFromSlicedEllParallel(SPSV_SLICED_ELL_PA
         int64_t running = 0;
         for (int64_t i = 0; i < m; i++) {
             int64_t cnt = static_cast<int64_t>(wsRowPtr[i]);
-            wsRowPtr[i] = static_cast<IdxT>(running);
+            wsRowPtr[i] = static_cast<RowPtrT>(running);
             running += cnt;
         }
-        wsRowPtr[m] = static_cast<IdxT>(running);
+        wsRowPtr[m] = static_cast<RowPtrT>(running);
     }
     asc_syncthreads();
 
@@ -550,9 +548,9 @@ __simt_callee__ inline void SpsvBuildCsrFromSlicedEllParallel(SPSV_SLICED_ELL_PA
             for (int32_t k = 0; k < sliceWidth; k++) {
                 int64_t p = sliceStart + i * sliceWidth + k;
                 if (sellColInd[p] >= 0) {
-                    wsColInd[pos] = sellColInd[p];
+                    wsColInd[pos] = sellColInd[p] - static_cast<ColIndT>(idxBase);
                     wsValues[pos] = sellValues[p];
-                    perm[pos] = static_cast<int32_t>(p);
+                    perm[pos] = static_cast<PermT>(p);
                     pos++;
                 }
             }
@@ -561,56 +559,215 @@ __simt_callee__ inline void SpsvBuildCsrFromSlicedEllParallel(SPSV_SLICED_ELL_PA
     asc_syncthreads();
 }
 
-// Serial workspace CSR build. Dispatches to sequential format-conversion
-// helpers (SpsvBuildCsrFromCoo / SpsvBuildCsrFromSlicedEll / SpsvTransposeCsr)
-// for the single-core analysis path.
-template <typename IdxT>
-__simt_callee__ inline void SpsvBuildWorkspaceCsr(SPSV_WORKSPACE_CSR_PARAMS(IdxT))
+// ConvertFormatToCsr: dispatch format conversion to serial helpers (COO/SELL/1-based CSR).
+// Requires local variables: wsRowPtr, wsColInd, wsValues, workspace, rowPtr, colInd, values,
+// permOffset, diagPtrOffset, m, nnz, numSlices, sliceWidth, format, permType, idxBase.
+// Outputs: updates srcRowPtr, srcColInd, srcValues, srcIdxBase.
+#define SPSV_CONVERT_FORMAT_TO_CSR_SERIAL(RowPtrT, ColIndT) \
+    do { \
+        if (format == 2) { \
+            if (permType == 0) { \
+                __gm__ int32_t *permWs = (__gm__ int32_t *)(workspace + permOffset); \
+                __gm__ int32_t *dgPtr = (__gm__ int32_t *)(workspace + diagPtrOffset); \
+                SpsvBuildCsrFromCoo<RowPtrT, ColIndT, int32_t>(rowPtr, colInd, values, \
+                    wsRowPtr, wsColInd, wsValues, permWs, dgPtr, m, nnz, idxBase); \
+            } else { \
+                __gm__ int64_t *permWs = (__gm__ int64_t *)(workspace + permOffset); \
+                __gm__ int64_t *dgPtr = (__gm__ int64_t *)(workspace + diagPtrOffset); \
+                SpsvBuildCsrFromCoo<RowPtrT, ColIndT, int64_t>(rowPtr, colInd, values, \
+                    wsRowPtr, wsColInd, wsValues, permWs, dgPtr, m, nnz, idxBase); \
+            } \
+            srcRowPtr = wsRowPtr; \
+            srcColInd = wsColInd; \
+            srcValues = wsValues; \
+            srcIdxBase = 0; \
+        } else if (format == 3) { \
+            if (permType == 0) { \
+                __gm__ int32_t *permWs = (__gm__ int32_t *)(workspace + permOffset); \
+                SpsvBuildCsrFromSlicedEll<RowPtrT, ColIndT, int32_t>(rowPtr, colInd, values, \
+                    wsRowPtr, wsColInd, wsValues, permWs, m, numSlices, sliceWidth, idxBase); \
+            } else { \
+                __gm__ int64_t *permWs = (__gm__ int64_t *)(workspace + permOffset); \
+                SpsvBuildCsrFromSlicedEll<RowPtrT, ColIndT, int64_t>(rowPtr, colInd, values, \
+                    wsRowPtr, wsColInd, wsValues, permWs, m, numSlices, sliceWidth, idxBase); \
+            } \
+            srcRowPtr = wsRowPtr; \
+            srcColInd = wsColInd; \
+            srcValues = wsValues; \
+            srcIdxBase = 0; \
+        } else if (format == 0 && idxBase == 1) { \
+            RowPtrT rowBase = static_cast<RowPtrT>(idxBase); \
+            ColIndT colBase = static_cast<ColIndT>(idxBase); \
+            for (int64_t i = 0; i <= m; i++) { \
+                wsRowPtr[i] = rowPtr[i] - rowBase; \
+            } \
+            for (int64_t i = 0; i < nnz; i++) { \
+                wsColInd[i] = colInd[i] - colBase; \
+                wsValues[i] = values[i]; \
+            } \
+            if (permType == 0) { \
+                __gm__ int32_t *permWs = (__gm__ int32_t *)(workspace + permOffset); \
+                for (int64_t i = 0; i < nnz; i++) { \
+                    permWs[i] = static_cast<int32_t>(i); \
+                } \
+            } else { \
+                __gm__ int64_t *permWs = (__gm__ int64_t *)(workspace + permOffset); \
+                for (int64_t i = 0; i < nnz; i++) { \
+                    permWs[i] = static_cast<int64_t>(i); \
+                } \
+            } \
+            srcRowPtr = wsRowPtr; \
+            srcColInd = wsColInd; \
+            srcValues = wsValues; \
+            srcIdxBase = 0; \
+        } \
+    } while (0)
+
+// ConvertFormatToCsrParallel: dispatch format conversion to parallel helpers with int64 serial fallback.
+// Same local variable requirements as SPSV_CONVERT_FORMAT_TO_CSR_SERIAL.
+#define SPSV_CONVERT_FORMAT_TO_CSR_PARALLEL(RowPtrT, ColIndT) \
+    do { \
+        if (format == 2) { \
+            if (permType == 0) { \
+                __gm__ int32_t *permWs = (__gm__ int32_t *)(workspace + permOffset); \
+                __gm__ int32_t *dgPtr = (__gm__ int32_t *)(workspace + diagPtrOffset); \
+                SpsvBuildCsrFromCooParallel<RowPtrT, ColIndT, int32_t>(rowPtr, colInd, values, \
+                    wsRowPtr, wsColInd, wsValues, permWs, dgPtr, m, nnz, idxBase); \
+            } else { \
+                if (threadIdx.x == 0) { \
+                    __gm__ int64_t *permWs = (__gm__ int64_t *)(workspace + permOffset); \
+                    __gm__ int64_t *dgPtr = (__gm__ int64_t *)(workspace + diagPtrOffset); \
+                    SpsvBuildCsrFromCoo<RowPtrT, ColIndT, int64_t>(rowPtr, colInd, values, \
+                        wsRowPtr, wsColInd, wsValues, permWs, dgPtr, m, nnz, idxBase); \
+                } \
+                asc_syncthreads(); \
+            } \
+            srcRowPtr = wsRowPtr; \
+            srcColInd = wsColInd; \
+            srcValues = wsValues; \
+            srcIdxBase = 0; \
+        } else if (format == 3) { \
+            if (permType == 0) { \
+                __gm__ int32_t *permWs = (__gm__ int32_t *)(workspace + permOffset); \
+                SpsvBuildCsrFromSlicedEllParallel<RowPtrT, ColIndT, int32_t>(rowPtr, colInd, values, \
+                    wsRowPtr, wsColInd, wsValues, permWs, m, numSlices, sliceWidth, idxBase); \
+            } else { \
+                if (threadIdx.x == 0) { \
+                    __gm__ int64_t *permWs = (__gm__ int64_t *)(workspace + permOffset); \
+                    SpsvBuildCsrFromSlicedEll<RowPtrT, ColIndT, int64_t>(rowPtr, colInd, values, \
+                        wsRowPtr, wsColInd, wsValues, permWs, m, numSlices, sliceWidth, idxBase); \
+                } \
+                asc_syncthreads(); \
+            } \
+            srcRowPtr = wsRowPtr; \
+            srcColInd = wsColInd; \
+            srcValues = wsValues; \
+            srcIdxBase = 0; \
+        } else if (format == 0 && idxBase == 1) { \
+            RowPtrT rowBase = static_cast<RowPtrT>(idxBase); \
+            ColIndT colBase = static_cast<ColIndT>(idxBase); \
+            for (int64_t i = static_cast<int64_t>(threadIdx.x); i <= m; \
+                 i += static_cast<int64_t>(blockDim.x)) { \
+                wsRowPtr[i] = rowPtr[i] - rowBase; \
+            } \
+            if (permType == 0) { \
+                __gm__ int32_t *permWs = (__gm__ int32_t *)(workspace + permOffset); \
+                for (int64_t i = static_cast<int64_t>(threadIdx.x); i < nnz; \
+                     i += static_cast<int64_t>(blockDim.x)) { \
+                    wsColInd[i] = colInd[i] - colBase; \
+                    wsValues[i] = values[i]; \
+                    permWs[i] = static_cast<int32_t>(i); \
+                } \
+            } else { \
+                __gm__ int64_t *permWs = (__gm__ int64_t *)(workspace + permOffset); \
+                for (int64_t i = static_cast<int64_t>(threadIdx.x); i < nnz; \
+                     i += static_cast<int64_t>(blockDim.x)) { \
+                    wsColInd[i] = colInd[i] - colBase; \
+                    wsValues[i] = values[i]; \
+                    permWs[i] = static_cast<int64_t>(i); \
+                } \
+            } \
+            asc_syncthreads(); \
+            srcRowPtr = wsRowPtr; \
+            srcColInd = wsColInd; \
+            srcValues = wsValues; \
+            srcIdxBase = 0; \
+        } \
+    } while (0)
+
+// TransposeCsrIfNeeded: transpose src CSR into workspace if opA != 0 (serial version).
+// Requires local variables: srcRowPtr, srcColInd, srcValues, srcIdxBase,
+// tRowPtr, tColInd, tValues, workspace, transPermOffset, diagPtrOffset,
+// transRowPtrOffset, opA, permType, m, nnz.
+#define SPSV_TRANSPOSE_CSR_IF_NEEDED_SERIAL(RowPtrT, ColIndT) \
+    do { \
+        if (opA != 0 && transRowPtrOffset >= 0) { \
+            if (permType == 0) { \
+                __gm__ int32_t *tPermWs = (__gm__ int32_t *)(workspace + transPermOffset); \
+                __gm__ int32_t *dgPtr = (__gm__ int32_t *)(workspace + diagPtrOffset); \
+                SpsvTransposeCsr<RowPtrT, ColIndT, int32_t>(srcRowPtr, srcColInd, srcValues, \
+                    tRowPtr, tColInd, tValues, tPermWs, dgPtr, m, nnz, srcIdxBase); \
+            } else { \
+                __gm__ int64_t *tPermWs = (__gm__ int64_t *)(workspace + transPermOffset); \
+                __gm__ int64_t *dgPtr = (__gm__ int64_t *)(workspace + diagPtrOffset); \
+                SpsvTransposeCsr<RowPtrT, ColIndT, int64_t>(srcRowPtr, srcColInd, srcValues, \
+                    tRowPtr, tColInd, tValues, tPermWs, dgPtr, m, nnz, srcIdxBase); \
+            } \
+        } \
+    } while (0)
+
+// TransposeCsrIfNeededParallel: transpose src CSR into workspace if opA != 0 (parallel, int64 serial fallback).
+#define SPSV_TRANSPOSE_CSR_IF_NEEDED_PARALLEL(RowPtrT, ColIndT) \
+    do { \
+        if (opA != 0 && transRowPtrOffset >= 0) { \
+            if (permType == 0) { \
+                __gm__ int32_t *tPermWs = (__gm__ int32_t *)(workspace + transPermOffset); \
+                __gm__ int32_t *dgPtr = (__gm__ int32_t *)(workspace + diagPtrOffset); \
+                SpsvTransposeCsrParallel<RowPtrT, ColIndT, int32_t>(srcRowPtr, srcColInd, srcValues, \
+                    tRowPtr, tColInd, tValues, tPermWs, dgPtr, m, nnz, srcIdxBase); \
+            } else { \
+                if (threadIdx.x == 0) { \
+                    __gm__ int64_t *tPermWs = (__gm__ int64_t *)(workspace + transPermOffset); \
+                    __gm__ int64_t *dgPtr = (__gm__ int64_t *)(workspace + diagPtrOffset); \
+                    SpsvTransposeCsr<RowPtrT, ColIndT, int64_t>(srcRowPtr, srcColInd, srcValues, \
+                        tRowPtr, tColInd, tValues, tPermWs, dgPtr, m, nnz, srcIdxBase); \
+                } \
+                asc_syncthreads(); \
+            } \
+        } \
+    } while (0)
+
+// Serial workspace CSR build. Delegates to SPSV_CONVERT_FORMAT_TO_CSR_SERIAL /
+// SPSV_TRANSPOSE_CSR_IF_NEEDED_SERIAL macros for the single-core analysis path.
+// permType selects the element width of perm/transPerm/diagPtr workspace
+// arrays: 0=int32_t, 1=int64_t (nnz > INT32_MAX).
+// idxBase: 0 for 0-based input, 1 for 1-based (Fortran indexing).
+// Dual-template: RowPtrT for row-offset arrays, ColIndT for column-index arrays.
+template <typename RowPtrT, typename ColIndT>
+__simt_callee__ inline void SpsvBuildWorkspaceCsr(SPSV_WORKSPACE_CSR_PARAMS(RowPtrT, ColIndT))
 {
-    SPSV_WORKSPACE_CSR_SETUP(IdxT);
-    if (format == 2) {
-        SpsvBuildCsrFromCoo<IdxT>(rowPtr, colInd, values,
-            wsRowPtr, wsColInd, wsValues, permWs, diagPtr, m, nnz);
-        srcRowPtr = wsRowPtr;
-        srcColInd = wsColInd;
-        srcValues = wsValues;
-    } else if (format == 3) {
-        SpsvBuildCsrFromSlicedEll<IdxT>(rowPtr, colInd, values,
-            wsRowPtr, wsColInd, wsValues, permWs, m, numSlices, sliceWidth);
-        srcRowPtr = wsRowPtr;
-        srcColInd = wsColInd;
-        srcValues = wsValues;
-    }
-    if (opA != 0 && transRowPtrOffset >= 0) {
-        SpsvTransposeCsr<IdxT>(srcRowPtr, srcColInd, srcValues,
-            tRowPtr, tColInd, tValues, tPerm, diagPtr, m, nnz);
-    }
+    SPSV_WORKSPACE_CSR_SETUP(RowPtrT, ColIndT)
+
+    SPSV_CONVERT_FORMAT_TO_CSR_SERIAL(RowPtrT, ColIndT);
+    SPSV_TRANSPOSE_CSR_IF_NEEDED_SERIAL(RowPtrT, ColIndT);
 }
 
-// Parallel workspace CSR build. Dispatches to parallel atomic helpers
-// (SpsvBuildCsrFromCooParallel / SpsvBuildCsrFromSlicedEllParallel /
-// SpsvTransposeCsrParallel) for the multi-core serial phase path.
-template <typename IdxT>
-__simt_callee__ inline void SpsvBuildWorkspaceCsrParallel(SPSV_WORKSPACE_CSR_PARAMS(IdxT))
+// Parallel workspace CSR build. Delegates to SPSV_CONVERT_FORMAT_TO_CSR_PARALLEL /
+// SPSV_TRANSPOSE_CSR_IF_NEEDED_PARALLEL macros for the multi-core serial phase path.
+// When permType==1 (nnz > INT32_MAX), falls back to serial conversion
+// in thread 0 to avoid int64 atomic_add dependency.
+// TODO(ops-perf): when nnz > INT32_MAX, format conversion falls back to single-thread
+// serial execution which may be slow for very large matrices. Consider multi-core
+// parallel with per-thread range partitioning and final reduction.
+// idxBase: 0 for 0-based input, 1 for 1-based (Fortran indexing).
+// Dual-template: RowPtrT for row-offset arrays, ColIndT for column-index arrays.
+template <typename RowPtrT, typename ColIndT>
+__simt_callee__ inline void SpsvBuildWorkspaceCsrParallel(SPSV_WORKSPACE_CSR_PARAMS(RowPtrT, ColIndT))
 {
-    SPSV_WORKSPACE_CSR_SETUP(IdxT);
-    if (format == 2) {
-        SpsvBuildCsrFromCooParallel<IdxT>(rowPtr, colInd, values,
-            wsRowPtr, wsColInd, wsValues, permWs, diagPtr, m, nnz);
-        srcRowPtr = wsRowPtr;
-        srcColInd = wsColInd;
-        srcValues = wsValues;
-    } else if (format == 3) {
-        SpsvBuildCsrFromSlicedEllParallel<IdxT>(rowPtr, colInd, values,
-            wsRowPtr, wsColInd, wsValues, permWs, m, numSlices, sliceWidth);
-        srcRowPtr = wsRowPtr;
-        srcColInd = wsColInd;
-        srcValues = wsValues;
-    }
-    if (opA != 0 && transRowPtrOffset >= 0) {
-        SpsvTransposeCsrParallel<IdxT>(srcRowPtr, srcColInd, srcValues,
-            tRowPtr, tColInd, tValues, tPerm, diagPtr, m, nnz);
-    }
+    SPSV_WORKSPACE_CSR_SETUP(RowPtrT, ColIndT)
+
+    SPSV_CONVERT_FORMAT_TO_CSR_PARALLEL(RowPtrT, ColIndT);
+    SPSV_TRANSPOSE_CSR_IF_NEEDED_PARALLEL(RowPtrT, ColIndT);
 }
 
 // Parallel level histogram build using all threads in the block.
@@ -622,8 +779,9 @@ __simt_callee__ inline void SpsvBuildWorkspaceCsrParallel(SPSV_WORKSPACE_CSR_PAR
 // the correct prefix-sum of per-level row counts. SpsvFinalizeLevelPtr (called
 // by the separate SpsvAnalysisFinalPhase kernel after the parallel scatter)
 // right-shifts levelPtr and writes numLevels.
+template <typename PermT>
 __simt_callee__ inline void SpsvBuildLevelHistogramParallel(
-    __gm__ int32_t *diagPtr,
+    __gm__ PermT *diagPtr,
     __gm__ int32_t *levelPtr,
     __gm__ SpsvTilingData *tilingOut,
     int64_t m)
@@ -631,7 +789,8 @@ __simt_callee__ inline void SpsvBuildLevelHistogramParallel(
     if (threadIdx.x == 0) {
         int32_t numLevels = 0;
         for (int64_t i = 0; i < m; i++) {
-            if (diagPtr[i] > numLevels) numLevels = diagPtr[i];
+            int32_t lvl = static_cast<int32_t>(diagPtr[i]);
+            if (lvl > numLevels) numLevels = lvl;
         }
         numLevels += 1;
         tilingOut->numLevels = numLevels;
@@ -646,7 +805,7 @@ __simt_callee__ inline void SpsvBuildLevelHistogramParallel(
     for (int64_t i = static_cast<int64_t>(threadIdx.x);
          i < m;
          i += static_cast<int64_t>(blockDim.x)) {
-        asc_atomic_add(&levelPtr[diagPtr[i] + 1], 1);
+        asc_atomic_add(&levelPtr[static_cast<int32_t>(diagPtr[i]) + 1], 1);
     }
     asc_syncthreads();
 
@@ -679,25 +838,25 @@ __simt_callee__ inline void SpsvFinalizeLevelPtr(
 // level structure on the resolved matrix. Encapsulates the declare-pointer,
 // call SpsvResolveEffectivePtrs, call SpsvComputeLevels pattern that
 // appeared identically in SpsvAnalysisCommon and SpsvAnalysisSerialPhase.
-template <typename IdxT>
+template <typename RowPtrT, typename ColIndT, typename PermT>
 __simt_callee__ inline void SpsvResolveAndComputeLevels(
-    __gm__ const IdxT *rowPtr, __gm__ const IdxT *colInd,
+    __gm__ const RowPtrT *rowPtr, __gm__ const ColIndT *colInd,
     __gm__ uint8_t *workspace,
-    __gm__ int32_t *diagPtr,
+    __gm__ PermT *diagPtr,
     int64_t m,
     int32_t fillMode, int32_t opA,
     int64_t csrRowPtrOffset, int64_t csrColIndOffset,
     int64_t transRowPtrOffset, int64_t transColIndOffset,
-    int32_t format)
+    int32_t format, int32_t idxBase)
 {
-    __gm__ const IdxT *useRowPtr = nullptr;
-    __gm__ const IdxT *useColInd = nullptr;
+    __gm__ const RowPtrT *useRowPtr = nullptr;
+    __gm__ const ColIndT *useColInd = nullptr;
     bool forward = false;
-    SpsvResolveEffectivePtrs<IdxT>(rowPtr, colInd, workspace,
+    SpsvResolveEffectivePtrs<RowPtrT, ColIndT>(rowPtr, colInd, workspace,
         fillMode, opA, csrRowPtrOffset, csrColIndOffset,
-        transRowPtrOffset, transColIndOffset, format,
+        transRowPtrOffset, transColIndOffset, format, idxBase,
         &useRowPtr, &useColInd, &forward);
-    SpsvComputeLevels<IdxT>(useRowPtr, useColInd, diagPtr, m, forward);
+    SpsvComputeLevels<RowPtrT, ColIndT, PermT>(useRowPtr, useColInd, diagPtr, m, forward);
 }
 
 // SPSV_ANALYSIS_PARAMS: shared parameter list for analysis VF functions.
@@ -705,8 +864,8 @@ __simt_callee__ inline void SpsvResolveAndComputeLevels(
 // explicitly spelled out for the VF compiler; a struct-based approach is
 // not supported by the asc_vf_call template instantiation mechanism.
 #define SPSV_ANALYSIS_PARAMS \
-    __gm__ const IdxT *rowPtr, \
-    __gm__ const IdxT *colInd, \
+    __gm__ const RowPtrT *rowPtr, \
+    __gm__ const ColIndT *colInd, \
     __gm__ const float *values, \
     __gm__ uint8_t *workspace, \
     int64_t m, int64_t nnz, \
@@ -716,15 +875,15 @@ __simt_callee__ inline void SpsvResolveAndComputeLevels(
     int64_t csrRowPtrOffset, int64_t csrColIndOffset, int64_t csrValuesOffset, int64_t permOffset, \
     int64_t transRowPtrOffset, int64_t transColIndOffset, int64_t transValuesOffset, \
     int64_t transPermOffset, \
-    int32_t format, int32_t numSlices, int32_t sliceWidth
+    int32_t format, int32_t numSlices, int32_t sliceWidth, int32_t permType, int32_t idxBase
 
-template <typename IdxT>
+template <typename RowPtrT, typename ColIndT, typename PermT>
 __simt_callee__ inline int32_t SpsvAnalysisCommon(
-    __gm__ const IdxT *rowPtr,
-    __gm__ const IdxT *colInd,
+    __gm__ const RowPtrT *rowPtr,
+    __gm__ const ColIndT *colInd,
     __gm__ const float *values,
     __gm__ uint8_t *workspace,
-    __gm__ int32_t *diagPtr,
+    __gm__ PermT *diagPtr,
     __gm__ int32_t *levelPtr,
     int64_t m, int64_t nnz,
     int32_t fillMode, int32_t opA,
@@ -732,40 +891,42 @@ __simt_callee__ inline int32_t SpsvAnalysisCommon(
     int64_t transRowPtrOffset, int64_t transColIndOffset, int64_t transValuesOffset,
     int64_t transPermOffset,
     int64_t diagPtrOffset,
-    int32_t format, int32_t numSlices, int32_t sliceWidth)
+    int32_t format, int32_t numSlices, int32_t sliceWidth,
+    int32_t permType, int32_t idxBase)
 {
-    SpsvBuildWorkspaceCsr<IdxT>(rowPtr, colInd, values, workspace,
+    SpsvBuildWorkspaceCsr<RowPtrT, ColIndT>(rowPtr, colInd, values, workspace,
         m, nnz, csrRowPtrOffset, csrColIndOffset, csrValuesOffset, permOffset,
         transRowPtrOffset, transColIndOffset, transValuesOffset, transPermOffset,
-        diagPtrOffset, format, opA, numSlices, sliceWidth);
+        diagPtrOffset, format, opA, numSlices, sliceWidth, permType, idxBase);
 
     // Resolve effective pointers and compute level structure in a single call.
-    SpsvResolveAndComputeLevels<IdxT>(rowPtr, colInd, workspace, diagPtr, m,
+    // Pass idxBase so it can redirect to workspace CSR for 1-based input.
+    SpsvResolveAndComputeLevels<RowPtrT, ColIndT, PermT>(rowPtr, colInd, workspace, diagPtr, m,
         fillMode, opA,
         csrRowPtrOffset, csrColIndOffset,
-        transRowPtrOffset, transColIndOffset, format);
+        transRowPtrOffset, transColIndOffset, format, idxBase);
 
-    return SpsvBuildLevelHistogram(diagPtr, levelPtr, m);
+    return SpsvBuildLevelHistogram<PermT>(diagPtr, levelPtr, m);
 }
 
-template <typename IdxT>
+template <typename RowPtrT, typename ColIndT, typename PermT>
 __simt_vf__ __aicore__ __launch_bounds__(kSimtMaxThreads) inline void SpsvAnalysisSimtCompute(
     SPSV_ANALYSIS_PARAMS)
 {
     __gm__ int32_t *levelPtr = (__gm__ int32_t *)(workspace + levelPtrOffset);
     __gm__ int32_t *levelRow = (__gm__ int32_t *)(workspace + levelRowOffset);
-    __gm__ int32_t *diagPtr = (__gm__ int32_t *)(workspace + diagPtrOffset);
+    __gm__ PermT *diagPtr = (__gm__ PermT *)(workspace + diagPtrOffset);
     __gm__ int32_t *validCount = (__gm__ int32_t *)(workspace + validCountOffset);
     __gm__ SpsvTilingData *tilingOut = (__gm__ SpsvTilingData *)workspace;
 
     int32_t numLevels = 0;
 
     if (threadIdx.x == 0) {
-        numLevels = SpsvAnalysisCommon<IdxT>(rowPtr, colInd, values, workspace,
+        numLevels = SpsvAnalysisCommon<RowPtrT, ColIndT, PermT>(rowPtr, colInd, values, workspace,
             diagPtr, levelPtr, m, nnz, fillMode, opA,
             csrRowPtrOffset, csrColIndOffset, csrValuesOffset, permOffset,
             transRowPtrOffset, transColIndOffset, transValuesOffset, transPermOffset,
-            diagPtrOffset, format, numSlices, sliceWidth);
+            diagPtrOffset, format, numSlices, sliceWidth, permType, idxBase);
     }
 
     // thread 0 wrote diagPtr/levelPtr to GM above. asc_threadfence_block
@@ -774,23 +935,22 @@ __simt_vf__ __aicore__ __launch_bounds__(kSimtMaxThreads) inline void SpsvAnalys
     asc_threadfence_block();
     asc_syncthreads();
 
-    __gm__ const IdxT *effRowPtr = nullptr;
-    __gm__ const IdxT *effColInd = nullptr;
+    __gm__ const RowPtrT *effRowPtr = nullptr;
+    __gm__ const ColIndT *effColInd = nullptr;
     bool effForward = false;
-    SpsvResolveEffectivePtrs<IdxT>(rowPtr, colInd, workspace,
+    SpsvResolveEffectivePtrs<RowPtrT, ColIndT>(rowPtr, colInd, workspace,
         fillMode, opA, csrRowPtrOffset, csrColIndOffset,
-        transRowPtrOffset, transColIndOffset, format,
+        transRowPtrOffset, transColIndOffset, format, idxBase,
         &effRowPtr, &effColInd, &effForward);
 
     // DEFENSIVE: host ValidateSpSVCommonParams guarantees m <= INT32_MAX.
-    // All levelRow/diagPtr/validCount arrays are int32_t; static_cast<int32_t>(i)
-    // is therefore safe (no silent truncation). The same guarantee covers
-    // SpsvAnalysisParallelPhase, SpsvComputeDiagAndValidCount, and
-    // SpsvComputeLevelForRow which all cast row indices to int32_t.
+    // All levelRow/validCount arrays are int32_t; diagPtr values are level
+    // numbers ≤ numLevels ≤ m, cast to int32_t is safe.
+    // The same guarantee covers SpsvAnalysisParallelPhase.
     for (int64_t i = static_cast<int64_t>(threadIdx.x);
          i < m;
          i += static_cast<int64_t>(blockDim.x)) {
-        int32_t lvl = diagPtr[i];
+        int32_t lvl = static_cast<int32_t>(diagPtr[i]);
         // Scatter rows into level buckets via atomic_add on the prefix-sum
         // array. levelPtr[lvl] starts at the bucket's base offset; each
         // atomic_add returns a unique slot and increments the counter.
@@ -806,7 +966,7 @@ __simt_vf__ __aicore__ __launch_bounds__(kSimtMaxThreads) inline void SpsvAnalys
     for (int64_t i = static_cast<int64_t>(threadIdx.x);
          i < m;
          i += static_cast<int64_t>(blockDim.x)) {
-        SpsvComputeDiagAndValidCount<IdxT>(effRowPtr, effColInd,
+        SpsvComputeDiagAndValidCount<RowPtrT, ColIndT, PermT>(effRowPtr, effColInd,
             diagPtr, validCount, i, effForward);
     }
 
@@ -822,43 +982,45 @@ __simt_vf__ __aicore__ __launch_bounds__(kSimtMaxThreads) inline void SpsvAnalys
 // in the block; LEVEL COMPUTATION runs on thread 0 only (sequential chain).
 // Splitting this into its own single-block launch avoids scheduling the
 // (numBlocks-1) idle blocks the old in-kernel SyncAll design required.
-template <typename IdxT>
+template <typename RowPtrT, typename ColIndT, typename PermT>
 __simt_vf__ __aicore__ __launch_bounds__(kSimtMaxThreads) inline void SpsvAnalysisSerialPhase(
     SPSV_ANALYSIS_PARAMS)
 {
     __gm__ int32_t *levelPtr = (__gm__ int32_t *)(workspace + levelPtrOffset);
-    __gm__ int32_t *diagPtr = (__gm__ int32_t *)(workspace + diagPtrOffset);
+    __gm__ PermT *diagPtr = (__gm__ PermT *)(workspace + diagPtrOffset);
     __gm__ SpsvTilingData *tilingOut = (__gm__ SpsvTilingData *)workspace;
 
-    // Phase 1: Parallel format conversion (all threads in block).
+    // Phase 1: Format conversion (all threads in block).
     // SpsvBuildWorkspaceCsrParallel ends with asc_syncthreads() internally
     // when it does any work; for CSR (format == 0) without transpose it is
     // a no-op, which is fine because no shared state needs synchronizing.
-    SpsvBuildWorkspaceCsrParallel<IdxT>(rowPtr, colInd, values, workspace,
+    // When permType==1 (nnz > INT32_MAX), the parallel function internally
+    // falls back to serial conversion (thread 0 only).
+    SpsvBuildWorkspaceCsrParallel<RowPtrT, ColIndT>(rowPtr, colInd, values, workspace,
         m, nnz, csrRowPtrOffset, csrColIndOffset, csrValuesOffset, permOffset,
         transRowPtrOffset, transColIndOffset, transValuesOffset, transPermOffset,
-        diagPtrOffset, format, opA, numSlices, sliceWidth);
+        diagPtrOffset, format, opA, numSlices, sliceWidth, permType, idxBase);
 
     // Phase 2: Resolve effective pointers and compute level structure
     // (thread 0 only — true sequential dependency: level[i] depends on
     // diagPtr[col] for col in row i's dependencies).
     if (threadIdx.x == 0) {
-        SpsvResolveAndComputeLevels<IdxT>(rowPtr, colInd, workspace, diagPtr, m,
+        SpsvResolveAndComputeLevels<RowPtrT, ColIndT, PermT>(rowPtr, colInd, workspace, diagPtr, m,
             fillMode, opA,
             csrRowPtrOffset, csrColIndOffset,
-            transRowPtrOffset, transColIndOffset, format);
+            transRowPtrOffset, transColIndOffset, format, idxBase);
     }
     asc_syncthreads();
 
     // Phase 3: Parallel histogram build (all threads in block).
     // Writes tilingOut->numLevels and the prefix-summed levelPtr array.
-    SpsvBuildLevelHistogramParallel(diagPtr, levelPtr, tilingOut, m);
+    SpsvBuildLevelHistogramParallel<PermT>(diagPtr, levelPtr, tilingOut, m);
 }
 
-template <typename IdxT>
+template <typename RowPtrT, typename ColIndT, typename PermT>
 __simt_vf__ __aicore__ __launch_bounds__(kSimtMaxThreads) inline void SpsvAnalysisParallelPhase(
-    __gm__ const IdxT *rowPtr,
-    __gm__ const IdxT *colInd,
+    __gm__ const RowPtrT *rowPtr,
+    __gm__ const ColIndT *colInd,
     __gm__ uint8_t *workspace,
     int64_t m,
     int32_t fillMode, int32_t opA,
@@ -866,19 +1028,19 @@ __simt_vf__ __aicore__ __launch_bounds__(kSimtMaxThreads) inline void SpsvAnalys
     int64_t validCountOffset,
     int64_t csrRowPtrOffset, int64_t csrColIndOffset,
     int64_t transRowPtrOffset, int64_t transColIndOffset,
-    int32_t format, int32_t numBlocks)
+    int32_t format, int32_t numBlocks, int32_t idxBase)
 {
     __gm__ int32_t *levelPtr = (__gm__ int32_t *)(workspace + levelPtrOffset);
     __gm__ int32_t *levelRow = (__gm__ int32_t *)(workspace + levelRowOffset);
-    __gm__ int32_t *diagPtr = (__gm__ int32_t *)(workspace + diagPtrOffset);
+    __gm__ PermT *diagPtr = (__gm__ PermT *)(workspace + diagPtrOffset);
     __gm__ int32_t *validCount = (__gm__ int32_t *)(workspace + validCountOffset);
 
-    __gm__ const IdxT *parRowPtr = nullptr;
-    __gm__ const IdxT *parColInd = nullptr;
+    __gm__ const RowPtrT *parRowPtr = nullptr;
+    __gm__ const ColIndT *parColInd = nullptr;
     bool parForward = false;
-    SpsvResolveEffectivePtrs<IdxT>(rowPtr, colInd, workspace,
+    SpsvResolveEffectivePtrs<RowPtrT, ColIndT>(rowPtr, colInd, workspace,
         fillMode, opA, csrRowPtrOffset, csrColIndOffset,
-        transRowPtrOffset, transColIndOffset, format,
+        transRowPtrOffset, transColIndOffset, format, idxBase,
         &parRowPtr, &parColInd, &parForward);
 
     int64_t globalTid = static_cast<int64_t>(blockIdx.x) * static_cast<int64_t>(blockDim.x) +
@@ -889,13 +1051,13 @@ __simt_vf__ __aicore__ __launch_bounds__(kSimtMaxThreads) inline void SpsvAnalys
     // casts in this parallel phase (levelRow scatter, diagPtr, validCount)
     // are safe from silent truncation.
     for (int64_t i = globalTid; i < m; i += globalStride) {
-        int32_t lvl = diagPtr[i];
+        int32_t lvl = static_cast<int32_t>(diagPtr[i]);
         int32_t pos = asc_atomic_add(&levelPtr[lvl], 1);
         levelRow[pos] = static_cast<int32_t>(i);
     }
 
     for (int64_t i = globalTid; i < m; i += globalStride) {
-        SpsvComputeDiagAndValidCount<IdxT>(parRowPtr, parColInd,
+        SpsvComputeDiagAndValidCount<RowPtrT, ColIndT, PermT>(parRowPtr, parColInd,
             diagPtr, validCount, i, parForward);
     }
 }
@@ -915,28 +1077,28 @@ __simt_vf__ __aicore__ __launch_bounds__(kSimtMaxThreads) inline void SpsvAnalys
     }
 }
 
-template <typename IdxT, bool FORWARD, bool NON_UNIT>
+template <typename RowPtrT, typename ColIndT, bool FORWARD, bool NON_UNIT, typename PermT>
 __simt_callee__ inline void SpsvSolveRow(
-    __gm__ const IdxT *rowPtr,
-    __gm__ const IdxT *colInd,
+    __gm__ const RowPtrT *rowPtr,
+    __gm__ const ColIndT *colInd,
     __gm__ const float *values,
     __gm__ const float *vecX,
     __gm__ float *vecY,
-    __gm__ const int32_t *diagPtr,
+    __gm__ const PermT *diagPtr,
     __gm__ const int32_t *validCount,
     float alpha, int32_t row)
 {
     float sum = alpha * vecX[row];
-    IdxT rs = rowPtr[row];
-    IdxT re = rowPtr[row + 1];
+    RowPtrT rs = rowPtr[row];
+    RowPtrT re = rowPtr[row + 1];
     int32_t vc = validCount[row];
 
     if constexpr (FORWARD) {
-        IdxT validEnd = rs + static_cast<IdxT>(vc);
+        RowPtrT validEnd = rs + static_cast<RowPtrT>(vc);
         // #pragma unroll: the VF compiler may ignore unrecognised pragmas;
         // when recognised it hints loop unrolling for the hot inner loop.
         #pragma unroll 4
-        for (IdxT p = rs; p < validEnd; p++) {
+        for (RowPtrT p = rs; p < validEnd; p++) {
             sum -= values[p] * vecY[static_cast<int32_t>(colInd[p])];
         }
         // Cleanup loop for unsorted column indices beyond validCount.
@@ -944,20 +1106,20 @@ __simt_callee__ inline void SpsvSolveRow(
         // a safety net for unsorted CSR where col < row entries may appear
         // after the sorted prefix. The if-branch is acceptable here because
         // this path is rarely taken for well-formed sorted CSR input.
-        for (IdxT p = validEnd; p < re; p++) {
+        for (RowPtrT p = validEnd; p < re; p++) {
             int32_t col = static_cast<int32_t>(colInd[p]);
             if (col < row) {
                 sum -= values[p] * vecY[col];
             }
         }
     } else {
-        IdxT validStart = re - static_cast<IdxT>(vc);
+        RowPtrT validStart = re - static_cast<RowPtrT>(vc);
         #pragma unroll 4
-        for (IdxT p = validStart; p < re; p++) {
+        for (RowPtrT p = validStart; p < re; p++) {
             sum -= values[p] * vecY[static_cast<int32_t>(colInd[p])];
         }
         // Cleanup loop for unsorted column indices (backward variant).
-        for (IdxT p = rs; p < validStart; p++) {
+        for (RowPtrT p = rs; p < validStart; p++) {
             int32_t col = static_cast<int32_t>(colInd[p]);
             if (col > row) {
                 sum -= values[p] * vecY[col];
@@ -974,16 +1136,16 @@ __simt_callee__ inline void SpsvSolveRow(
     vecY[row] = sum;
 }
 
-template <typename IdxT, bool FORWARD, bool NON_UNIT>
+template <typename RowPtrT, typename ColIndT, bool FORWARD, bool NON_UNIT, typename PermT>
 __simt_vf__ __aicore__ __launch_bounds__(kSimtMaxThreads) inline void SpsvSolveSimtCompute(
-    __gm__ const IdxT *rowPtr,
-    __gm__ const IdxT *colInd,
+    __gm__ const RowPtrT *rowPtr,
+    __gm__ const ColIndT *colInd,
     __gm__ const float *values,
     __gm__ const float *vecX,
     __gm__ float *vecY,
     __gm__ const int32_t *levelPtr,
     __gm__ const int32_t *levelRow,
-    __gm__ const int32_t *diagPtr,
+    __gm__ const PermT *diagPtr,
     __gm__ const int32_t *validCount,
     float alpha, int64_t m, int32_t numLevels)
 {
@@ -996,7 +1158,7 @@ __simt_vf__ __aicore__ __launch_bounds__(kSimtMaxThreads) inline void SpsvSolveS
              idx < levelWidth;
              idx += static_cast<int32_t>(blockDim.x)) {
             int32_t row = levelRow[levelStart + idx];
-            SpsvSolveRow<IdxT, FORWARD, NON_UNIT>(rowPtr, colInd, values,
+            SpsvSolveRow<RowPtrT, ColIndT, FORWARD, NON_UNIT, PermT>(rowPtr, colInd, values,
                 vecX, vecY, diagPtr, validCount, alpha, row);
         }
 
@@ -1004,16 +1166,16 @@ __simt_vf__ __aicore__ __launch_bounds__(kSimtMaxThreads) inline void SpsvSolveS
     }
 }
 
-template <typename IdxT, bool FORWARD, bool NON_UNIT>
+template <typename RowPtrT, typename ColIndT, bool FORWARD, bool NON_UNIT, typename PermT>
 __simt_vf__ __aicore__ __launch_bounds__(kSimtMaxThreads) inline void SpsvSolveLevelSimtCompute(
-    __gm__ const IdxT *rowPtr,
-    __gm__ const IdxT *colInd,
+    __gm__ const RowPtrT *rowPtr,
+    __gm__ const ColIndT *colInd,
     __gm__ const float *values,
     __gm__ const float *vecX,
     __gm__ float *vecY,
     __gm__ const int32_t *levelPtr,
     __gm__ const int32_t *levelRow,
-    __gm__ const int32_t *diagPtr,
+    __gm__ const PermT *diagPtr,
     __gm__ const int32_t *validCount,
     float alpha, int32_t level, int32_t numBlocks)
 {
@@ -1027,15 +1189,16 @@ __simt_vf__ __aicore__ __launch_bounds__(kSimtMaxThreads) inline void SpsvSolveL
 
     for (int32_t idx = globalTid; idx < levelWidth; idx += globalStride) {
         int32_t row = levelRow[levelStart + idx];
-        SpsvSolveRow<IdxT, FORWARD, NON_UNIT>(rowPtr, colInd, values,
+        SpsvSolveRow<RowPtrT, ColIndT, FORWARD, NON_UNIT, PermT>(rowPtr, colInd, values,
             vecX, vecY, diagPtr, validCount, alpha, row);
     }
 }
 
+template <typename PermT>
 __simt_vf__ __aicore__ __launch_bounds__(kSimtMaxThreads) inline void SpsvUpdateValuesSimtCompute(
     __gm__ const float *newValues,
     __gm__ float *csrValues,
-    __gm__ const int32_t *perm,
+    __gm__ const PermT *perm,
     int64_t nnz)
 {
     for (int64_t p = static_cast<int64_t>(threadIdx.x);
@@ -1045,16 +1208,17 @@ __simt_vf__ __aicore__ __launch_bounds__(kSimtMaxThreads) inline void SpsvUpdate
     }
 }
 
+template <typename PermT>
 __simt_vf__ __aicore__ __launch_bounds__(kSimtMaxThreads) inline void SpsvUpdateDiagSimtCompute(
     __gm__ const float *newDiagValues,
     __gm__ float *values,
-    __gm__ const int32_t *diagPtr,
+    __gm__ const PermT *diagPtr,
     int64_t m)
 {
     for (int64_t i = static_cast<int64_t>(threadIdx.x);
          i < m;
          i += static_cast<int64_t>(blockDim.x)) {
-        int32_t dp = diagPtr[i];
+        PermT dp = diagPtr[i];
         if (dp >= 0) {
             values[dp] = newDiagValues[i];
         }
@@ -1118,46 +1282,46 @@ __simt_vf__ __aicore__ __launch_bounds__(kSimtMaxThreads) inline void SpsvCopyVa
 // functions) because asc_vf_call requires the VF function template to be
 // spelled out as a non-type template argument, and the SIMT compiler does
 // not support forwarding this through an intermediate template wrapper.
-#define SPSV_CALL_ANALYSIS(IdxT, Func, rp, ci, val, ws, t) \
-    asc_vf_call<Func<IdxT>>(dim3{t.nthreads, 1, 1}, \
-        (__gm__ const IdxT *)rp, (__gm__ const IdxT *)ci, \
+#define SPSV_CALL_ANALYSIS(RowPtrT, ColIndT, PermT, Func, rp, ci, val, ws, t) \
+    asc_vf_call<Func<RowPtrT, ColIndT, PermT>>(dim3{t.nthreads, 1, 1}, \
+        (__gm__ const RowPtrT *)rp, (__gm__ const ColIndT *)ci, \
         (__gm__ const float *)val, (__gm__ uint8_t *)ws, \
         t.m, t.nnz, t.fillMode, t.opA, \
         t.levelPtrOffset, t.levelRowOffset, t.diagPtrOffset, t.validCountOffset, \
         t.csrRowPtrOffset, t.csrColIndOffset, t.csrValuesOffset, t.permOffset, \
         t.transRowPtrOffset, t.transColIndOffset, t.transValuesOffset, t.transPermOffset, \
-        t.format, t.numSlices, t.sliceWidth)
+        t.format, t.numSlices, t.sliceWidth, t.permType, t.idxBase)
 
-#define SPSV_CALL_ANALYSIS_PAR(IdxT, rp, ci, ws, t) \
-    asc_vf_call<SpsvAnalysisParallelPhase<IdxT>>(dim3{t.nthreads, 1, 1}, \
-        (__gm__ const IdxT *)rp, (__gm__ const IdxT *)ci, \
+#define SPSV_CALL_ANALYSIS_PAR(RowPtrT, ColIndT, PermT, rp, ci, ws, t) \
+    asc_vf_call<SpsvAnalysisParallelPhase<RowPtrT, ColIndT, PermT>>(dim3{t.nthreads, 1, 1}, \
+        (__gm__ const RowPtrT *)rp, (__gm__ const ColIndT *)ci, \
         (__gm__ uint8_t *)ws, t.m, t.fillMode, t.opA, \
         t.levelPtrOffset, t.levelRowOffset, t.diagPtrOffset, t.validCountOffset, \
         t.csrRowPtrOffset, t.csrColIndOffset, \
         t.transRowPtrOffset, t.transColIndOffset, \
-        t.format, static_cast<int32_t>(t.numBlocks))
+        t.format, static_cast<int32_t>(t.numBlocks), t.idxBase)
 
-#define SPSV_CALL_SOLVE(IdxT, FWD, NU, Func, rp, ci, val, vx, vy, \
+#define SPSV_CALL_SOLVE(RowPtrT, ColIndT, PermT, FWD, NU, Func, rp, ci, val, vx, vy, \
     lp, lr, dp, vc, a, e1, e2, nt) \
-    asc_vf_call<Func<IdxT, FWD, NU>>(dim3{nt, 1, 1}, \
-        (__gm__ const IdxT *)rp, (__gm__ const IdxT *)ci, \
+    asc_vf_call<Func<RowPtrT, ColIndT, FWD, NU, PermT>>(dim3{nt, 1, 1}, \
+        (__gm__ const RowPtrT *)rp, (__gm__ const ColIndT *)ci, \
         (__gm__ const float *)val, (__gm__ const float *)vx, (__gm__ float *)vy, \
         lp, lr, dp, vc, a, e1, e2)
 
-#define SPSV_DISPATCH_SOLVE(IdxT, Func, rp, ci, val, vx, vy, \
+#define SPSV_DISPATCH_SOLVE(RowPtrT, ColIndT, PermT, Func, rp, ci, val, vx, vy, \
     lp, lr, dp, vc, a, e1, e2, nt, fwd, nonUnit) \
     do { \
         if (fwd && nonUnit) { \
-            SPSV_CALL_SOLVE(IdxT, true, true, Func, rp, ci, val, vx, vy, \
+            SPSV_CALL_SOLVE(RowPtrT, ColIndT, PermT, true, true, Func, rp, ci, val, vx, vy, \
                 lp, lr, dp, vc, a, e1, e2, nt); \
         } else if (fwd) { \
-            SPSV_CALL_SOLVE(IdxT, true, false, Func, rp, ci, val, vx, vy, \
+            SPSV_CALL_SOLVE(RowPtrT, ColIndT, PermT, true, false, Func, rp, ci, val, vx, vy, \
                 lp, lr, dp, vc, a, e1, e2, nt); \
         } else if (nonUnit) { \
-            SPSV_CALL_SOLVE(IdxT, false, true, Func, rp, ci, val, vx, vy, \
+            SPSV_CALL_SOLVE(RowPtrT, ColIndT, PermT, false, true, Func, rp, ci, val, vx, vy, \
                 lp, lr, dp, vc, a, e1, e2, nt); \
         } else { \
-            SPSV_CALL_SOLVE(IdxT, false, false, Func, rp, ci, val, vx, vy, \
+            SPSV_CALL_SOLVE(RowPtrT, ColIndT, PermT, false, false, Func, rp, ci, val, vx, vy, \
                 lp, lr, dp, vc, a, e1, e2, nt); \
         } \
     } while (0)
@@ -1172,12 +1336,37 @@ extern "C" __global__ __aicore__ void spsv_analysis_kernel(
 {
     KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_AIV_ONLY);
 
+    // Dispatch on (indexType, colIndType, permType):
+    //   I32 ptr + I32 col + permType=0: PermT int32.
+    //   I32 ptr + I32 col + permType=1: PermT int64 (SPSV_FORCE_PERMT_64=1).
+    //   I64 ptr + I32 col + permType=0: PermT int32.
+    //   I64 ptr + I32 col + permType=1: PermT int64 (nnz > INT32_MAX).
+    //   I64 ptr + I64 col + permType=0: PermT int32.
+    //   I64 ptr + I64 col + permType=1: PermT int64.
     if (tiling.indexType == 0) {
-        SPSV_CALL_ANALYSIS(int32_t, SpsvAnalysisSimtCompute,
-            rowPtr, colInd, values, workspace, tiling);
+        if (tiling.permType == 0) {
+            SPSV_CALL_ANALYSIS(int32_t, int32_t, int32_t, SpsvAnalysisSimtCompute,
+                rowPtr, colInd, values, workspace, tiling);
+        } else {
+            SPSV_CALL_ANALYSIS(int32_t, int32_t, int64_t, SpsvAnalysisSimtCompute,
+                rowPtr, colInd, values, workspace, tiling);
+        }
+    } else if (tiling.colIndType == 0) {
+        if (tiling.permType == 0) {
+            SPSV_CALL_ANALYSIS(int64_t, int32_t, int32_t, SpsvAnalysisSimtCompute,
+                rowPtr, colInd, values, workspace, tiling);
+        } else {
+            SPSV_CALL_ANALYSIS(int64_t, int32_t, int64_t, SpsvAnalysisSimtCompute,
+                rowPtr, colInd, values, workspace, tiling);
+        }
     } else {
-        SPSV_CALL_ANALYSIS(int64_t, SpsvAnalysisSimtCompute,
-            rowPtr, colInd, values, workspace, tiling);
+        if (tiling.permType == 0) {
+            SPSV_CALL_ANALYSIS(int64_t, int64_t, int32_t, SpsvAnalysisSimtCompute,
+                rowPtr, colInd, values, workspace, tiling);
+        } else {
+            SPSV_CALL_ANALYSIS(int64_t, int64_t, int64_t, SpsvAnalysisSimtCompute,
+                rowPtr, colInd, values, workspace, tiling);
+        }
     }
 }
 
@@ -1192,11 +1381,29 @@ extern "C" __global__ __aicore__ void spsv_analysis_serial_kernel(
     KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_AIV_ONLY);
 
     if (tiling.indexType == 0) {
-        SPSV_CALL_ANALYSIS(int32_t, SpsvAnalysisSerialPhase,
-            rowPtr, colInd, values, workspace, tiling);
+        if (tiling.permType == 0) {
+            SPSV_CALL_ANALYSIS(int32_t, int32_t, int32_t, SpsvAnalysisSerialPhase,
+                rowPtr, colInd, values, workspace, tiling);
+        } else {
+            SPSV_CALL_ANALYSIS(int32_t, int32_t, int64_t, SpsvAnalysisSerialPhase,
+                rowPtr, colInd, values, workspace, tiling);
+        }
+    } else if (tiling.colIndType == 0) {
+        if (tiling.permType == 0) {
+            SPSV_CALL_ANALYSIS(int64_t, int32_t, int32_t, SpsvAnalysisSerialPhase,
+                rowPtr, colInd, values, workspace, tiling);
+        } else {
+            SPSV_CALL_ANALYSIS(int64_t, int32_t, int64_t, SpsvAnalysisSerialPhase,
+                rowPtr, colInd, values, workspace, tiling);
+        }
     } else {
-        SPSV_CALL_ANALYSIS(int64_t, SpsvAnalysisSerialPhase,
-            rowPtr, colInd, values, workspace, tiling);
+        if (tiling.permType == 0) {
+            SPSV_CALL_ANALYSIS(int64_t, int64_t, int32_t, SpsvAnalysisSerialPhase,
+                rowPtr, colInd, values, workspace, tiling);
+        } else {
+            SPSV_CALL_ANALYSIS(int64_t, int64_t, int64_t, SpsvAnalysisSerialPhase,
+                rowPtr, colInd, values, workspace, tiling);
+        }
     }
 }
 
@@ -1211,9 +1418,23 @@ extern "C" __global__ __aicore__ void spsv_analysis_parallel_kernel(
     KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_AIV_ONLY);
 
     if (tiling.indexType == 0) {
-        SPSV_CALL_ANALYSIS_PAR(int32_t, rowPtr, colInd, workspace, tiling);
+        if (tiling.permType == 0) {
+            SPSV_CALL_ANALYSIS_PAR(int32_t, int32_t, int32_t, rowPtr, colInd, workspace, tiling);
+        } else {
+            SPSV_CALL_ANALYSIS_PAR(int32_t, int32_t, int64_t, rowPtr, colInd, workspace, tiling);
+        }
+    } else if (tiling.colIndType == 0) {
+        if (tiling.permType == 0) {
+            SPSV_CALL_ANALYSIS_PAR(int64_t, int32_t, int32_t, rowPtr, colInd, workspace, tiling);
+        } else {
+            SPSV_CALL_ANALYSIS_PAR(int64_t, int32_t, int64_t, rowPtr, colInd, workspace, tiling);
+        }
     } else {
-        SPSV_CALL_ANALYSIS_PAR(int64_t, rowPtr, colInd, workspace, tiling);
+        if (tiling.permType == 0) {
+            SPSV_CALL_ANALYSIS_PAR(int64_t, int64_t, int32_t, rowPtr, colInd, workspace, tiling);
+        } else {
+            SPSV_CALL_ANALYSIS_PAR(int64_t, int64_t, int64_t, rowPtr, colInd, workspace, tiling);
+        }
     }
 }
 
@@ -1229,47 +1450,35 @@ extern "C" __global__ __aicore__ void spsv_analysis_final_kernel(
         tiling.levelPtrOffset);
 }
 
+template <typename RowPtrT, typename ColIndT, typename PermT>
 __aicore__ inline void SpsvSolveSingleCore(
     GM_ADDR rowPtr, GM_ADDR colInd, GM_ADDR values,
     GM_ADDR vecX, GM_ADDR vecY,
     __gm__ const int32_t *levelPtr, __gm__ const int32_t *levelRow,
-    __gm__ const int32_t *diagPtr, __gm__ const int32_t *validCount,
+    __gm__ const PermT *diagPtr, __gm__ const int32_t *validCount,
     float alpha, int64_t m, int32_t numLevels, uint32_t nthreads,
-    int32_t indexType, bool fwd, bool nonUnit)
+    bool fwd, bool nonUnit)
 {
-    if (indexType == 0) {
-        SPSV_DISPATCH_SOLVE(int32_t, SpsvSolveSimtCompute,
-            rowPtr, colInd, values, vecX, vecY,
-            levelPtr, levelRow, diagPtr, validCount,
-            alpha, m, numLevels, nthreads, fwd, nonUnit);
-    } else {
-        SPSV_DISPATCH_SOLVE(int64_t, SpsvSolveSimtCompute,
-            rowPtr, colInd, values, vecX, vecY,
-            levelPtr, levelRow, diagPtr, validCount,
-            alpha, m, numLevels, nthreads, fwd, nonUnit);
-    }
+    SPSV_DISPATCH_SOLVE(RowPtrT, ColIndT, PermT, SpsvSolveSimtCompute,
+        rowPtr, colInd, values, vecX, vecY,
+        levelPtr, levelRow, diagPtr, validCount,
+        alpha, m, numLevels, nthreads, fwd, nonUnit);
 }
 
+template <typename RowPtrT, typename ColIndT, typename PermT>
 __aicore__ inline void SpsvSolveMultiCore(
     GM_ADDR rowPtr, GM_ADDR colInd, GM_ADDR values,
     GM_ADDR vecX, GM_ADDR vecY,
     __gm__ const int32_t *levelPtr, __gm__ const int32_t *levelRow,
-    __gm__ const int32_t *diagPtr, __gm__ const int32_t *validCount,
+    __gm__ const PermT *diagPtr, __gm__ const int32_t *validCount,
     float alpha, int32_t numLevels, uint32_t nthreads,
-    int32_t indexType, int32_t numBlocks, bool fwd, bool nonUnit)
+    int32_t numBlocks, bool fwd, bool nonUnit)
 {
     for (int32_t level = 0; level < numLevels; level++) {
-        if (indexType == 0) {
-            SPSV_DISPATCH_SOLVE(int32_t, SpsvSolveLevelSimtCompute,
-                rowPtr, colInd, values, vecX, vecY,
-                levelPtr, levelRow, diagPtr, validCount,
-                alpha, level, numBlocks, nthreads, fwd, nonUnit);
-        } else {
-            SPSV_DISPATCH_SOLVE(int64_t, SpsvSolveLevelSimtCompute,
-                rowPtr, colInd, values, vecX, vecY,
-                levelPtr, levelRow, diagPtr, validCount,
-                alpha, level, numBlocks, nthreads, fwd, nonUnit);
-        }
+        SPSV_DISPATCH_SOLVE(RowPtrT, ColIndT, PermT, SpsvSolveLevelSimtCompute,
+            rowPtr, colInd, values, vecX, vecY,
+            levelPtr, levelRow, diagPtr, validCount,
+            alpha, level, numBlocks, nthreads, fwd, nonUnit);
 
         // SIMT VF writes go directly to GM. SyncAll on arch35 implements
         // cross-core synchronization via GM-based flag operations (SetFlag /
@@ -1281,6 +1490,65 @@ __aicore__ inline void SpsvSolveMultiCore(
     }
 }
 
+// Dispatch solve based on RowPtrT/ColIndT/PermT and numBlocks (single-core vs multi-core).
+#define SPSV_DISPATCH_SOLVE_BLOCKS(RowPtrT, ColIndT, PermT, rowPtr, colInd, values, \
+        vecX, vecY, levelPtr, levelRow, diagPtr, validCount, alpha, m, \
+        numLevels, nthreads, numBlocks, fwd, nonUnit) \
+    do { \
+        if ((numBlocks) <= 1) { \
+            SpsvSolveSingleCore<RowPtrT, ColIndT, PermT>( \
+                (rowPtr), (colInd), (values), (vecX), (vecY), \
+                (levelPtr), (levelRow), (diagPtr), (validCount), \
+                (alpha), (m), (numLevels), (nthreads), (fwd), (nonUnit)); \
+        } else { \
+            SpsvSolveMultiCore<RowPtrT, ColIndT, PermT>( \
+                (rowPtr), (colInd), (values), (vecX), (vecY), \
+                (levelPtr), (levelRow), (diagPtr), (validCount), \
+                (alpha), (numLevels), (nthreads), \
+                static_cast<int32_t>(numBlocks), (fwd), (nonUnit)); \
+        } \
+    } while (0)
+
+// Prepare solve kernel local variables from tiling data.
+// Reads levelPtr/levelRow/validCount pointers, numLevels from workspace,
+// computes fwd/nonUnit flags, and resolves alpha (host or device pointer).
+__aicore__ inline void PrepareSolveKernelArgs(
+    const SpsvTilingData &tiling,
+    __gm__ uint8_t *workspace,
+    __gm__ const int32_t *&levelPtr,
+    __gm__ const int32_t *&levelRow,
+    __gm__ const int32_t *&validCount,
+    int32_t &numLevels,
+    bool &fwd,
+    bool &nonUnit,
+    float &alpha)
+{
+    levelPtr = (__gm__ const int32_t *)(workspace + tiling.levelPtrOffset);
+    levelRow = (__gm__ const int32_t *)(workspace + tiling.levelRowOffset);
+    validCount = (__gm__ const int32_t *)(workspace + tiling.validCountOffset);
+
+    // numLevels is read from workspace (written by the analysis kernel),
+    // NOT from tiling.numLevels (which is 0 in the host-supplied params).
+    __gm__ SpsvTilingData *tilingWs = (__gm__ SpsvTilingData *)workspace;
+    numLevels = tilingWs->numLevels;
+
+    int32_t fm = tiling.fillMode;
+    if (tiling.opA != 0) {
+        fm = (fm == 0) ? 1 : 0;
+    }
+    fwd = (fm == 0);
+    // diagType == 0 corresponds to ACL_SPARSE_DIAG_TYPE_NON_UNIT (non-unit
+    // diagonal), meaning the solve must divide by the diagonal element.
+    nonUnit = (tiling.diagType == 0);
+
+    alpha = tiling.alpha;
+    if (tiling.alphaDevicePtr != 0) {
+        // alphaDevicePtr is a device pointer to a float. The caller must
+        // ensure at least 4-byte alignment (float requirement).
+        alpha = *(__gm__ const float *)(tiling.alphaDevicePtr);
+    }
+}
+
 extern "C" __global__ __aicore__ void spsv_solve_kernel(
     GM_ADDR rowPtr, GM_ADDR colInd, GM_ADDR values,
     GM_ADDR vecX, GM_ADDR vecY, GM_ADDR workspace,
@@ -1288,42 +1556,56 @@ extern "C" __global__ __aicore__ void spsv_solve_kernel(
 {
     KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_AIV_ONLY);
 
-    __gm__ const int32_t *levelPtr = (__gm__ const int32_t *)(workspace + tiling.levelPtrOffset);
-    __gm__ const int32_t *levelRow = (__gm__ const int32_t *)(workspace + tiling.levelRowOffset);
-    __gm__ const int32_t *diagPtr = (__gm__ const int32_t *)(workspace + tiling.diagPtrOffset);
-    __gm__ const int32_t *validCount = (__gm__ const int32_t *)(workspace + tiling.validCountOffset);
+    __gm__ const int32_t *levelPtr;
+    __gm__ const int32_t *levelRow;
+    __gm__ const int32_t *validCount;
+    int32_t numLevels;
+    bool fwd;
+    bool nonUnit;
+    float alpha;
+    PrepareSolveKernelArgs(tiling, (__gm__ uint8_t *)workspace,
+        levelPtr, levelRow, validCount, numLevels, fwd, nonUnit, alpha);
 
-    // numLevels is read from workspace (written by the analysis kernel),
-    // NOT from tiling.numLevels (which is 0 in the host-supplied params).
-    __gm__ SpsvTilingData *tilingWs = (__gm__ SpsvTilingData *)workspace;
-    int32_t numLevels = tilingWs->numLevels;
-
-    int32_t fm = tiling.fillMode;
-    if (tiling.opA != 0) {
-        fm = (fm == 0) ? 1 : 0;
-    }
-    bool fwd = (fm == 0);
-    // diagType == 0 corresponds to ACL_SPARSE_DIAG_TYPE_NON_UNIT (non-unit
-    // diagonal), meaning the solve must divide by the diagonal element.
-    bool nonUnit = (tiling.diagType == 0);
-
-    float alpha = tiling.alpha;
-    if (tiling.alphaDevicePtr != 0) {
-        // alphaDevicePtr is a device pointer to a float. The caller must
-        // ensure at least 4-byte alignment (float requirement).
-        alpha = *(__gm__ const float *)(tiling.alphaDevicePtr);
-    }
-
-    if (tiling.numBlocks <= 1) {
-        SpsvSolveSingleCore(rowPtr, colInd, values, vecX, vecY,
-            levelPtr, levelRow, diagPtr, validCount,
-            alpha, tiling.m, numLevels, tiling.nthreads,
-            tiling.indexType, fwd, nonUnit);
+    // Dispatch based on (indexType, colIndType, permType)
+    if (tiling.indexType == 0 && tiling.colIndType == 0) {
+        // (I32, I32)
+        if (tiling.permType == 0) {
+            SPSV_DISPATCH_SOLVE_BLOCKS(int32_t, int32_t, int32_t,
+                rowPtr, colInd, values, vecX, vecY, levelPtr, levelRow,
+                (__gm__ const int32_t *)(workspace + tiling.diagPtrOffset), validCount,
+                alpha, tiling.m, numLevels, tiling.nthreads, tiling.numBlocks, fwd, nonUnit);
+        } else {
+            SPSV_DISPATCH_SOLVE_BLOCKS(int32_t, int32_t, int64_t,
+                rowPtr, colInd, values, vecX, vecY, levelPtr, levelRow,
+                (__gm__ const int64_t *)(workspace + tiling.diagPtrOffset), validCount,
+                alpha, tiling.m, numLevels, tiling.nthreads, tiling.numBlocks, fwd, nonUnit);
+        }
+    } else if (tiling.indexType == 1 && tiling.colIndType == 0) {
+        // (I64, I32)
+        if (tiling.permType == 0) {
+            SPSV_DISPATCH_SOLVE_BLOCKS(int64_t, int32_t, int32_t,
+                rowPtr, colInd, values, vecX, vecY, levelPtr, levelRow,
+                (__gm__ const int32_t *)(workspace + tiling.diagPtrOffset), validCount,
+                alpha, tiling.m, numLevels, tiling.nthreads, tiling.numBlocks, fwd, nonUnit);
+        } else {
+            SPSV_DISPATCH_SOLVE_BLOCKS(int64_t, int32_t, int64_t,
+                rowPtr, colInd, values, vecX, vecY, levelPtr, levelRow,
+                (__gm__ const int64_t *)(workspace + tiling.diagPtrOffset), validCount,
+                alpha, tiling.m, numLevels, tiling.nthreads, tiling.numBlocks, fwd, nonUnit);
+        }
     } else {
-        SpsvSolveMultiCore(rowPtr, colInd, values, vecX, vecY,
-            levelPtr, levelRow, diagPtr, validCount,
-            alpha, numLevels, tiling.nthreads,
-            tiling.indexType, static_cast<int32_t>(tiling.numBlocks), fwd, nonUnit);
+        // (I64, I64)
+        if (tiling.permType == 0) {
+            SPSV_DISPATCH_SOLVE_BLOCKS(int64_t, int64_t, int32_t,
+                rowPtr, colInd, values, vecX, vecY, levelPtr, levelRow,
+                (__gm__ const int32_t *)(workspace + tiling.diagPtrOffset), validCount,
+                alpha, tiling.m, numLevels, tiling.nthreads, tiling.numBlocks, fwd, nonUnit);
+        } else {
+            SPSV_DISPATCH_SOLVE_BLOCKS(int64_t, int64_t, int64_t,
+                rowPtr, colInd, values, vecX, vecY, levelPtr, levelRow,
+                (__gm__ const int64_t *)(workspace + tiling.diagPtrOffset), validCount,
+                alpha, tiling.m, numLevels, tiling.nthreads, tiling.numBlocks, fwd, nonUnit);
+        }
     }
 }
 
@@ -1334,10 +1616,16 @@ extern "C" __global__ __aicore__ void spsv_update_values_kernel(
     KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_AIV_ONLY);
 
     __gm__ float *csrValues = (__gm__ float *)(workspace + tiling.csrValuesOffset);
-    __gm__ const int32_t *perm = (__gm__ const int32_t *)(workspace + tiling.permOffset);
 
-    asc_vf_call<SpsvUpdateValuesSimtCompute>(dim3{tiling.nthreads, 1, 1},
-        (__gm__ const float *)newValues, csrValues, perm, tiling.nnz);
+    if (tiling.permType == 0) {
+        __gm__ const int32_t *perm = (__gm__ const int32_t *)(workspace + tiling.permOffset);
+        asc_vf_call<SpsvUpdateValuesSimtCompute<int32_t>>(dim3{tiling.nthreads, 1, 1},
+            (__gm__ const float *)newValues, csrValues, perm, tiling.nnz);
+    } else {
+        __gm__ const int64_t *perm = (__gm__ const int64_t *)(workspace + tiling.permOffset);
+        asc_vf_call<SpsvUpdateValuesSimtCompute<int64_t>>(dim3{tiling.nthreads, 1, 1},
+            (__gm__ const float *)newValues, csrValues, perm, tiling.nnz);
+    }
 }
 
 extern "C" __global__ __aicore__ void spsv_update_diag_kernel(
@@ -1346,11 +1634,17 @@ extern "C" __global__ __aicore__ void spsv_update_diag_kernel(
 {
     KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_AIV_ONLY);
 
-    __gm__ const int32_t *diagPtr = (__gm__ const int32_t *)(workspace + tiling.diagPtrOffset);
     __gm__ float *csrValues = (__gm__ float *)(workspace + tiling.csrValuesOffset);
 
-    asc_vf_call<SpsvUpdateDiagSimtCompute>(dim3{tiling.nthreads, 1, 1},
-        (__gm__ const float *)newValues, csrValues, diagPtr, tiling.m);
+    if (tiling.permType == 0) {
+        __gm__ const int32_t *diagPtr = (__gm__ const int32_t *)(workspace + tiling.diagPtrOffset);
+        asc_vf_call<SpsvUpdateDiagSimtCompute<int32_t>>(dim3{tiling.nthreads, 1, 1},
+            (__gm__ const float *)newValues, csrValues, diagPtr, tiling.m);
+    } else {
+        __gm__ const int64_t *diagPtr = (__gm__ const int64_t *)(workspace + tiling.diagPtrOffset);
+        asc_vf_call<SpsvUpdateDiagSimtCompute<int64_t>>(dim3{tiling.nthreads, 1, 1},
+            (__gm__ const float *)newValues, csrValues, diagPtr, tiling.m);
+    }
 }
 
 extern "C" __global__ __aicore__ void spsv_update_diag_csr_kernel(
@@ -1359,10 +1653,15 @@ extern "C" __global__ __aicore__ void spsv_update_diag_csr_kernel(
 {
     KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_AIV_ONLY);
 
-    __gm__ const int32_t *diagPtr = (__gm__ const int32_t *)(workspace + tiling.diagPtrOffset);
-
-    asc_vf_call<SpsvUpdateDiagSimtCompute>(dim3{tiling.nthreads, 1, 1},
-        (__gm__ const float *)newValues, (__gm__ float *)values, diagPtr, tiling.m);
+    if (tiling.permType == 0) {
+        __gm__ const int32_t *diagPtr = (__gm__ const int32_t *)(workspace + tiling.diagPtrOffset);
+        asc_vf_call<SpsvUpdateDiagSimtCompute<int32_t>>(dim3{tiling.nthreads, 1, 1},
+            (__gm__ const float *)newValues, (__gm__ float *)values, diagPtr, tiling.m);
+    } else {
+        __gm__ const int64_t *diagPtr = (__gm__ const int64_t *)(workspace + tiling.diagPtrOffset);
+        asc_vf_call<SpsvUpdateDiagSimtCompute<int64_t>>(dim3{tiling.nthreads, 1, 1},
+            (__gm__ const float *)newValues, (__gm__ float *)values, diagPtr, tiling.m);
+    }
 }
 
 extern "C" __global__ __aicore__ void spsv_fill_zero_kernel(

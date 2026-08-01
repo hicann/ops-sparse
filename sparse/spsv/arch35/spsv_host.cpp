@@ -13,8 +13,8 @@
 #include <cinttypes>
 #include <climits>
 #include <cstdint>
+#include <cstdlib>
 #include <new>
-
 #include "log/log.h"
 #include "cann_ops_sparse.h"
 #include "spsv.h"
@@ -29,8 +29,9 @@ namespace {
 static aclsparseStatus_t ValidateSpSVIndexTypes(const char *tag,
     const aclsparseSpMatDescr *mat)
 {
-    if (mat->baseType != ACL_SPARSE_INDEX_BASE_ZERO) {
-        OP_LOGE(tag, "unsupported baseType=%d, only ACL_SPARSE_INDEX_BASE_ZERO supported", mat->baseType);
+    if (mat->baseType != ACL_SPARSE_INDEX_BASE_ZERO &&
+        mat->baseType != ACL_SPARSE_INDEX_BASE_ONE) {
+        OP_LOGE(tag, "unsupported baseType=%d, only ZERO or ONE supported", mat->baseType);
         return ACL_SPARSE_STATUS_NOT_SUPPORTED;
     }
     if (mat->format != ACL_SPARSE_FORMAT_CSR &&
@@ -40,16 +41,20 @@ static aclsparseStatus_t ValidateSpSVIndexTypes(const char *tag,
         OP_LOGE(tag, "unsupported format=%d", mat->format);
         return ACL_SPARSE_STATUS_NOT_SUPPORTED;
     }
-    // SpSV requires ptrType == IdxType. Note: aclsparseCreateCsr allows
-    // (I64, I32) via the Extended validation, but SpSV does not support
-    // mixed-width indices. Users creating CSR with (I64, I32) will get
-    // NOT_SUPPORTED here. See README for supported index type combinations.
-    if (mat->ptrType != mat->IdxType) {
-        OP_LOGE(tag, "ptrType and idxType must match");
+    // Validate individual index types (ptrType and IdxType independently).
+    if (mat->ptrType != ACL_SPARSE_INDEX_32I && mat->ptrType != ACL_SPARSE_INDEX_64I) {
+        OP_LOGE(tag, "unsupported ptrType=%d", mat->ptrType);
         return ACL_SPARSE_STATUS_NOT_SUPPORTED;
     }
-    if (mat->ptrType != ACL_SPARSE_INDEX_32I && mat->ptrType != ACL_SPARSE_INDEX_64I) {
-        OP_LOGE(tag, "unsupported index type=%d", mat->ptrType);
+    if (mat->IdxType != ACL_SPARSE_INDEX_32I && mat->IdxType != ACL_SPARSE_INDEX_64I) {
+        OP_LOGE(tag, "unsupported idxType=%d", mat->IdxType);
+        return ACL_SPARSE_STATUS_NOT_SUPPORTED;
+    }
+    // Reject (I32, I64): ptrType is I32 cannot address nnz > INT32_MAX;
+    // colInd being I64 in this combo is unsupported (no practical use case).
+    // Allowed combinations: (I32, I32), (I64, I32), (I64, I64).
+    if (mat->ptrType == ACL_SPARSE_INDEX_32I && mat->IdxType == ACL_SPARSE_INDEX_64I) {
+        OP_LOGE(tag, "unsupported index combination: ptrType=I32, idxType=I64");
         return ACL_SPARSE_STATUS_NOT_SUPPORTED;
     }
     return ACL_SPARSE_STATUS_SUCCESS;
@@ -87,8 +92,10 @@ static aclsparseStatus_t ValidateSpSVCommonParams(
         OP_LOGE(tag, "matrix rows=%" PRIu64 " exceeds INT32_MAX (kernel uses int32_t internally)", mat->rows);
         return ACL_SPARSE_STATUS_INVALID_VALUE;
     }
-    if (mat->nnz > static_cast<uint64_t>(INT32_MAX)) {
-        OP_LOGE(tag, "matrix nnz=%" PRIu64 " exceeds INT32_MAX (kernel uses int32_t internally)", mat->nnz);
+    // nnz > INT32_MAX requires I64 index type (ptrType=ACL_SPARSE_INDEX_64I).
+    // I32 + nnz > INT32_MAX is explicitly rejected below.
+    if (mat->ptrType == ACL_SPARSE_INDEX_32I && mat->nnz > static_cast<uint64_t>(INT32_MAX)) {
+        OP_LOGE(tag, "I32 index type cannot represent nnz=%" PRIu64 " > INT32_MAX", mat->nnz);
         return ACL_SPARSE_STATUS_INVALID_VALUE;
     }
     if (mat->rows != mat->cols) {
@@ -138,8 +145,11 @@ struct WorkspaceOffsets {
 // - Subsequent sub-allocations are 64B-aligned (kInternalAlign) to reduce
 //   workspace bloat for small matrices.
 // - When nnz==0 all offsets are -1 (uniform sentinel), totalSize is 0.
+// - permType controls the element size for nnz-scaled workspace arrays
+//   (perm, transPerm, diagPtr): 0=int32_t, 1=int64_t (nnz > INT32_MAX).
 static WorkspaceOffsets ComputeWorkspaceOffsets(
-    int64_t m, int64_t nnz, int32_t format, size_t idxSize, bool needsTrans)
+    int64_t m, int64_t nnz, int32_t format, size_t rowPtrSize, size_t colIndSize,
+    bool needsTrans, int32_t permType, int32_t idxBase)
 {
     using spsv::AlignUp;
     using spsv::AlignUpInternal;
@@ -150,22 +160,30 @@ static WorkspaceOffsets ComputeWorkspaceOffsets(
         return out;
     }
 
+    // permSize: element size for nnz-scaled arrays (perm, transPerm, diagPtr).
+    // When permType==1 (nnz > INT32_MAX with I64 index), use 8-byte elements.
+    size_t permSize = (permType == 1) ? sizeof(int64_t) : sizeof(int32_t);
+
     // First sub-allocation uses 512B alignment (GM base).
     size_t offset = AlignUp(sizeof(SpsvTilingData));
 
-    if (format == 2 || format == 3) {
+    // Build workspace CSR copy for: COO(2), SELL(3), or 1-based CSR(0)/CSC(1).
+    // For 1-based inputs, workspace CSR holds 0-based indices for downstream ops.
+    // rowPtrSize: element width for row-offset arrays (csrRowPtr, transRowPtr)
+    // colIndSize: element width for column-index arrays (csrColInd, transColInd)
+    if (format == 2 || format == 3 || idxBase == 1) {
         out.csrRowPtrOffset = static_cast<int64_t>(offset);
-        offset += AlignUpInternal(static_cast<size_t>(m + 1) * idxSize);
+        offset += AlignUpInternal(static_cast<size_t>(m + 1) * rowPtrSize);
         out.csrColIndOffset = static_cast<int64_t>(offset);
-        offset += AlignUpInternal(static_cast<size_t>(nnz) * idxSize);
+        offset += AlignUpInternal(static_cast<size_t>(nnz) * colIndSize);
         out.csrValuesOffset = static_cast<int64_t>(offset);
         offset += AlignUpInternal(static_cast<size_t>(nnz) * sizeof(float));
         out.permOffset = static_cast<int64_t>(offset);
-        offset += AlignUpInternal(static_cast<size_t>(nnz) * sizeof(int32_t));
+        offset += AlignUpInternal(static_cast<size_t>(nnz) * permSize);
     }
 
     out.diagPtrOffset = static_cast<int64_t>(offset);
-    offset += AlignUpInternal(static_cast<size_t>(m) * sizeof(int32_t));
+    offset += AlignUpInternal(static_cast<size_t>(m) * permSize);
     out.levelPtrOffset = static_cast<int64_t>(offset);
     offset += AlignUpInternal(static_cast<size_t>(m + 1) * sizeof(int32_t));
     out.levelRowOffset = static_cast<int64_t>(offset);
@@ -175,29 +193,40 @@ static WorkspaceOffsets ComputeWorkspaceOffsets(
 
     if (needsTrans) {
         out.transRowPtrOffset = static_cast<int64_t>(offset);
-        offset += AlignUpInternal(static_cast<size_t>(m + 1) * idxSize);
+        offset += AlignUpInternal(static_cast<size_t>(m + 1) * rowPtrSize);
         out.transColIndOffset = static_cast<int64_t>(offset);
-        offset += AlignUpInternal(static_cast<size_t>(nnz) * idxSize);
+        offset += AlignUpInternal(static_cast<size_t>(nnz) * colIndSize);
         out.transValuesOffset = static_cast<int64_t>(offset);
         offset += AlignUpInternal(static_cast<size_t>(nnz) * sizeof(float));
         out.transPermOffset = static_cast<int64_t>(offset);
-        offset += AlignUpInternal(static_cast<size_t>(nnz) * sizeof(int32_t));
+        offset += AlignUpInternal(static_cast<size_t>(nnz) * permSize);
     }
 
     out.totalSize = offset;
     return out;
 }
 
-static size_t ComputeWorkspaceSize(int64_t m, int64_t nnz, int32_t format, size_t idxSize,
-    bool needsTrans)
+static size_t ComputeWorkspaceSize(int64_t m, int64_t nnz, int32_t format,
+    size_t rowPtrSize, size_t colIndSize,
+    bool needsTrans, int32_t permType, int32_t idxBase)
 {
-    return ComputeWorkspaceOffsets(m, nnz, format, idxSize, needsTrans).totalSize;
+    return ComputeWorkspaceOffsets(m, nnz, format, rowPtrSize, colIndSize,
+        needsTrans, permType, idxBase).totalSize;
 }
 
 static float ReadHostScalar(const void *p)
 {
     if (p == nullptr) { return 0.0f; }
     return *static_cast<const float *>(p);
+}
+
+// Debug override: when SPSV_FORCE_PERMT_64=1 is set, force int64 workspace
+// arrays (perm/transPerm/diagPtr) regardless of nnz. Used for validating
+// the <IdxT, int64_t> kernel template instantiation on small matrices.
+static bool ShouldForcePermType64()
+{
+    const char *env = std::getenv("SPSV_FORCE_PERMT_64");
+    return env && env[0] == '1' && env[1] == '\0';
 }
 
 // Select SIMT thread count based on matrix dimension. The if-else chain
@@ -265,10 +294,14 @@ static SpsvTilingData BuildTilingData(
 
     int64_t m = spsvDescr->cachedM;
     int64_t nnz = spsvDescr->cachedNnz;
-    size_t idxSize = spsvDescr->cachedIdxSize;
+    size_t rowPtrSize = spsvDescr->cachedIdxSize;
+    size_t colIndSize = spsvDescr->cachedColIndSize;
     bool needsTrans = (op != 0);
 
-    WorkspaceOffsets offsets = ComputeWorkspaceOffsets(m, nnz, format, idxSize, needsTrans);
+    int32_t permType = spsvDescr->cachedPermType;
+
+    WorkspaceOffsets offsets = ComputeWorkspaceOffsets(
+        m, nnz, format, rowPtrSize, colIndSize, needsTrans, permType, spsvDescr->cachedIdxBase);
 
     uint32_t nthreads = ComputeNthreads(m);
 
@@ -281,9 +314,12 @@ static SpsvTilingData BuildTilingData(
     tiling.opA = op;
     tiling.format = format;
     tiling.indexType = spsvDescr->cachedIndexType;
+    tiling.colIndType = spsvDescr->cachedColIndType;
+    tiling.idxBase = spsvDescr->cachedIdxBase;
     tiling.numSlices = spsvDescr->cachedNumSlices;
     tiling.sliceWidth = spsvDescr->cachedSliceWidth;
     tiling.nthreads = nthreads;
+    tiling.permType = permType;
     // numBlocks is computed and overwritten by ComputeNumBlocks in
     // LaunchSpSVAnalysisKernel / LaunchSpSVSolveKernel before launch.
     tiling.numBlocks = 0;
@@ -383,6 +419,34 @@ static aclsparseStatus_t PrepareSpSVContext(
     return ACL_SPARSE_STATUS_SUCCESS;
 }
 
+// Cache all matA attributes into descriptor BEFORE BuildTilingData so that
+// solve/updateMatrix can rely on cached values (cuSPARSE convention).
+static void CacheMatrixAttributes(
+    aclsparseConstSpMatDescr_t matA, aclsparseOperation_t opA,
+    aclsparseSpSVDescr_t spsvDescr)
+{
+    auto *mat = spsv::ToMatInner(matA);
+    spsvDescr->cachedM = static_cast<int64_t>(mat->rows);
+    spsvDescr->cachedNnz = static_cast<int64_t>(mat->nnz);
+    spsvDescr->cachedFormat = spsv::FormatToInt(mat->format);
+    spsvDescr->cachedDiagType = static_cast<int32_t>(mat->diagType);
+    spsvDescr->cachedIdxBase = (mat->baseType == ACL_SPARSE_INDEX_BASE_ONE) ? 1 : 0;
+    spsvDescr->cachedOpA = static_cast<int32_t>(opA);
+    spsvDescr->cachedFillMode = static_cast<int32_t>(mat->fillMode);
+    spsvDescr->cachedNumSlices = static_cast<int32_t>(mat->numSlices);
+    spsvDescr->cachedSliceWidth = static_cast<int32_t>(mat->sliceNnz);
+    // ptrType -> rowPtr (indexType/indexSize); IdxType -> colInd (colIndType/colIndSize)
+    spsvDescr->cachedIdxSize = (mat->ptrType == ACL_SPARSE_INDEX_64I) ? 8u : 4u;
+    spsvDescr->cachedIndexType = (mat->ptrType == ACL_SPARSE_INDEX_64I) ? 1 : 0;
+    spsvDescr->cachedColIndSize = (mat->IdxType == ACL_SPARSE_INDEX_64I) ? 8u : 4u;
+    spsvDescr->cachedColIndType = (mat->IdxType == ACL_SPARSE_INDEX_64I) ? 1 : 0;
+    spsvDescr->cachedPermType = (mat->nnz > static_cast<int64_t>(INT32_MAX)) ? 1 : 0;
+    if (spsvDescr->cachedPermType == 0 && ShouldForcePermType64()) {
+        spsvDescr->cachedPermType = 1;
+    }
+    spsvDescr->currentValues = mat->values;
+}
+
 static aclsparseStatus_t LaunchSpSVAnalysisKernel(
     aclsparseHandle_t handle,
     aclsparseOperation_t opA,
@@ -391,21 +455,6 @@ static aclsparseStatus_t LaunchSpSVAnalysisKernel(
     aclsparseSpSVDescr_t spsvDescr,
     void *externalBuffer)
 {
-    // Cache all matA attributes BEFORE BuildTilingData so that solve/updateMatrix
-    // can rely on these cached values (cuSPARSE convention).
-    auto *mat = spsv::ToMatInner(matA);
-    spsvDescr->cachedM = static_cast<int64_t>(mat->rows);
-    spsvDescr->cachedNnz = static_cast<int64_t>(mat->nnz);
-    spsvDescr->cachedFormat = spsv::FormatToInt(mat->format);
-    spsvDescr->cachedDiagType = static_cast<int32_t>(mat->diagType);
-    spsvDescr->cachedOpA = static_cast<int32_t>(opA);
-    spsvDescr->cachedFillMode = static_cast<int32_t>(mat->fillMode);
-    spsvDescr->cachedNumSlices = static_cast<int32_t>(mat->numSlices);
-    spsvDescr->cachedSliceWidth = static_cast<int32_t>(mat->sliceNnz);
-    spsvDescr->cachedIdxSize = (mat->ptrType == ACL_SPARSE_INDEX_64I) ? 8u : 4u;
-    spsvDescr->cachedIndexType = (mat->ptrType == ACL_SPARSE_INDEX_64I) ? 1 : 0;
-    spsvDescr->currentValues = mat->values;
-
     SpSVLaunchContext ctx{};
     aclsparseStatus_t st = PrepareSpSVContext(handle, opA, alpha, matA, spsvDescr, ctx);
     if (st != ACL_SPARSE_STATUS_SUCCESS) return st;
@@ -633,6 +682,18 @@ static aclsparseStatus_t ValidateSpSVSolveConsistency(
     return ACL_SPARSE_STATUS_SUCCESS;
 }
 
+static void InitUpdateTilingData(aclsparseSpSVDescr_t spsvDescr, SpsvTilingData &tiling)
+{
+    tiling = SpsvTilingData{};
+    tiling.m = spsvDescr->cachedM;
+    tiling.nnz = spsvDescr->cachedNnz;
+    tiling.diagPtrOffset = spsvDescr->diagPtrOffset;
+    tiling.csrValuesOffset = spsvDescr->csrValuesOffset;
+    tiling.permOffset = spsvDescr->permOffset;
+    tiling.permType = spsvDescr->cachedPermType;
+    tiling.nthreads = spsv::kSimtMaxThreads;
+}
+
 } // namespace
 
 extern "C" {
@@ -694,9 +755,17 @@ aclsparseStatus_t aclsparseSpSV_bufferSize(
         format = 0;
         needsTrans = !needsTrans;
     }
-    size_t idxSize = (mat->ptrType == ACL_SPARSE_INDEX_64I) ? 8u : 4u;
+    // rowPtrSize corresponds to ptrType; colIndSize corresponds to IdxType.
+    size_t rowPtrSize = (mat->ptrType == ACL_SPARSE_INDEX_64I) ? 8u : 4u;
+    size_t colIndSize = (mat->IdxType == ACL_SPARSE_INDEX_64I) ? 8u : 4u;
+    int32_t permType = (nnz > static_cast<int64_t>(INT32_MAX)) ? 1 : 0;
+    if (permType == 0 && ShouldForcePermType64()) {
+        permType = 1;
+    }
+    int32_t idxBase = (mat->baseType == ACL_SPARSE_INDEX_BASE_ONE) ? 1 : 0;
 
-    *bufferSize = ComputeWorkspaceSize(m, nnz, format, idxSize, needsTrans);
+    *bufferSize = ComputeWorkspaceSize(m, nnz, format, rowPtrSize, colIndSize,
+        needsTrans, permType, idxBase);
     return ACL_SPARSE_STATUS_SUCCESS;
 }
 
@@ -723,20 +792,10 @@ aclsparseStatus_t aclsparseSpSV_analysis(
     if (st != ACL_SPARSE_STATUS_SUCCESS) return st;
 
     auto *mat = spsv::ToMatInner(matA);
+    CacheMatrixAttributes(matA, opA, spsvDescr);
     if (mat->nnz == 0) {
         spsvDescr->analysisLaunched = true;
         spsvDescr->workspaceBuffer = nullptr;
-        spsvDescr->cachedM = static_cast<int64_t>(mat->rows);
-        spsvDescr->cachedNnz = 0;
-        spsvDescr->cachedFormat = spsv::FormatToInt(mat->format);
-        spsvDescr->cachedDiagType = static_cast<int32_t>(mat->diagType);
-        spsvDescr->cachedOpA = static_cast<int32_t>(opA);
-        spsvDescr->cachedFillMode = static_cast<int32_t>(mat->fillMode);
-        spsvDescr->cachedNumSlices = static_cast<int32_t>(mat->numSlices);
-        spsvDescr->cachedSliceWidth = static_cast<int32_t>(mat->sliceNnz);
-        spsvDescr->cachedIdxSize = (mat->ptrType == ACL_SPARSE_INDEX_64I) ? 8u : 4u;
-        spsvDescr->cachedIndexType = (mat->ptrType == ACL_SPARSE_INDEX_64I) ? 1 : 0;
-        spsvDescr->currentValues = mat->values;
         return ACL_SPARSE_STATUS_SUCCESS;
     }
 
@@ -826,13 +885,8 @@ aclsparseStatus_t aclsparseSpSV_updateMatrix(
     auto *h = spsv::ToInternalHandle(handle);
     aclrtStream useStream = h->stream;
 
-    SpsvTilingData tiling{};
-    tiling.m = spsvDescr->cachedM;
-    tiling.nnz = spsvDescr->cachedNnz;
-    tiling.diagPtrOffset = spsvDescr->diagPtrOffset;
-    tiling.csrValuesOffset = spsvDescr->csrValuesOffset;
-    tiling.permOffset = spsvDescr->permOffset;
-    tiling.nthreads = spsv::kSimtMaxThreads;
+    SpsvTilingData tiling;
+    InitUpdateTilingData(spsvDescr, tiling);
 
     uint8_t *ws = reinterpret_cast<uint8_t *>(spsvDescr->workspaceBuffer);
     uint8_t *newVals = reinterpret_cast<uint8_t *>(newValues);

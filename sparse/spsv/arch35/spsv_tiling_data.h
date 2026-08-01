@@ -30,7 +30,9 @@ struct SpsvTilingData {
     int32_t diagType;
     int32_t opA;
     int32_t format;
-    int32_t indexType;
+    int32_t indexType;     // 0=I32, 1=I64 for rowPtr (ptrType)
+    int32_t colIndType;    // 0=I32, 1=I64 for colInd (idxType); may differ from indexType
+    int32_t idxBase;       // 0=0-based, 1=1-based (Fortran indexing)
 
     int64_t levelPtrOffset;
     int64_t levelRowOffset;
@@ -41,6 +43,10 @@ struct SpsvTilingData {
     // at workspace offset 0). The solve kernel reads numLevels from workspace,
     // NOT from this tiling field.
     int32_t numLevels;
+
+    // permType: 0 = int32_t workspace arrays (perm, transPerm, diagPtr);
+    //           1 = int64_t workspace arrays (used when nnz > INT32_MAX with I64 index).
+    int32_t permType;
 
     int64_t csrRowPtrOffset;
     int64_t csrColIndOffset;
