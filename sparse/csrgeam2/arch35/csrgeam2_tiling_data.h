@@ -47,6 +47,12 @@ struct Csrgeam2PrefixSumTilingData {
     int32_t baseC;   ///< C 的 indexBase (0 或 1)
 };
 
+/// Fill 阶段 TilingData（Kernel 4: 常量填充）
+struct Csrgeam2FillTilingData {
+    int32_t count;   ///< 待填充元素个数
+    int32_t value;   ///< 填充值
+};
+
 /// 主计算阶段 TilingData（Kernel 2: 逐行合并）
 /// pointerMode 区分 alpha/beta 来源：
 ///   HOST mode (alphaPtr==nullptr): kernel 从 tiling.alpha/beta 读值

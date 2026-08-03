@@ -476,3 +476,71 @@ extern "C" void csrgeam2_prefixsum_kernel_do(
     csrgeam2_prefixsum_kernel<<<1, nullptr, stream>>>(
         buffer, rowPtrC, nnzCDev, tiling);
 }
+
+// ===========================================================================
+// Kernel 4: Fill（device 侧常量填充，单 block）
+// ===========================================================================
+
+__simt_vf__ __aicore__ __launch_bounds__(kCsrgeam2MaxThreadsPerBlock) inline void
+Csrgeam2FillSimtCompute(
+    __gm__ int32_t *dst,
+    int32_t count,
+    int32_t value,
+    int32_t threadsPerCore)
+{
+    for (int32_t i = static_cast<int32_t>(threadIdx.x);
+         i < count;
+         i += threadsPerCore) {
+        dst[i] = value;
+    }
+}
+
+class Csrgeam2FillDispatcher {
+public:
+    __aicore__ inline void Init(GM_ADDR gmDst, const Csrgeam2FillTilingData *tiling)
+    {
+        dst_ = (__gm__ int32_t *)gmDst;
+        count_ = tiling->count;
+        value_ = tiling->value;
+    }
+
+    __aicore__ inline void Process()
+    {
+        uint32_t threadNum = kCsrgeam2MaxThreadsPerBlock;
+        if (static_cast<uint32_t>(count_) < threadNum) {
+            threadNum = static_cast<uint32_t>(count_);
+        }
+        if (threadNum == 0) {
+            threadNum = 1;
+        }
+        threadNum = (threadNum + kCsrgeam2WarpSize - 1u) & ~(kCsrgeam2WarpSize - 1u);
+
+        asc_vf_call<Csrgeam2FillSimtCompute>(
+            dim3{threadNum},
+            dst_, count_, value_,
+            static_cast<int32_t>(threadNum));
+    }
+
+private:
+    __gm__ int32_t *dst_{nullptr};
+    int32_t count_{0};
+    int32_t value_{0};
+};
+
+extern "C" __global__ __aicore__ void csrgeam2_fill_kernel(
+    GM_ADDR gmDst,
+    const Csrgeam2FillTilingData tiling)
+{
+    KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_AIV_ONLY);
+    Csrgeam2FillDispatcher dispatcher;
+    dispatcher.Init(gmDst, &tiling);
+    dispatcher.Process();
+}
+
+extern "C" void csrgeam2_fill_kernel_do(
+    GM_ADDR dst,
+    const Csrgeam2FillTilingData &tiling,
+    void *stream)
+{
+    csrgeam2_fill_kernel<<<1, nullptr, stream>>>(dst, tiling);
+}

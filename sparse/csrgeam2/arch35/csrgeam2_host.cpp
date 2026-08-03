@@ -48,7 +48,7 @@ namespace {
 // params indicated this function was a no-op shell.
 
 /// 当 C 为空矩阵时填充 csrRowPtrC 和 nnzC（用于 m=0/n=0 或 nnzA=nnzB=0 提前返回）。
-/// 使用 aclrtMemsetD32Async 按 uint32_t 粒度填充 device 内存。
+/// 使用 csrgeam2_fill_kernel 在 device 侧填充 baseC 值（全异步）。
 /// HOST 模式下 *nnzTotalDevHostPtr = 0 是同步写入：这是 aclsparseXcsrgeam2Nnz
 /// 的语义要求（cuSPARSE 规范），HOST 指针必须立即反映结果。
 static aclsparseStatus_t FillEmptyCRowPtrC(
@@ -57,23 +57,13 @@ static aclsparseStatus_t FillEmptyCRowPtrC(
     int32_t m, int32_t baseC)
 {
     // Callers guarantee m >= 0 (ValidateCommonCsrgeam2Args rejects m < 0)
-    size_t sizeBytes = (static_cast<size_t>(m) + 1) * sizeof(int32_t);
     size_t countElems = static_cast<size_t>(m) + 1;
-    // aclrtMemsetD32Async not available in CANN 9.0.0-beta.2; use memset for
-    // baseC==0 (byte-level zero fill is equivalent) or H2D copy for baseC!=0.
-    if (baseC == 0) {
-        aclError aclRet = aclrtMemsetAsync(csrSortedRowPtrC, sizeBytes, 0, countElems * sizeof(int32_t), stream);
-        CHECK_RET(aclRet == ACL_ERROR_NONE,
-                  OP_LOGE("aclsparseXcsrgeam2Nnz", "memset empty csrRowPtrC failed, ret=%d", aclRet);
-                  return ACL_SPARSE_STATUS_EXECUTION_FAILED);
-    } else {
-        std::vector<int32_t> hostRowPtr(countElems, baseC);
-        aclError aclRet = aclrtMemcpy(csrSortedRowPtrC, sizeBytes, hostRowPtr.data(),
-                                      sizeBytes, ACL_MEMCPY_HOST_TO_DEVICE);
-        CHECK_RET(aclRet == ACL_ERROR_NONE,
-                  OP_LOGE("aclsparseXcsrgeam2Nnz", "memcpy empty csrRowPtrC failed, ret=%d", aclRet);
-                  return ACL_SPARSE_STATUS_EXECUTION_FAILED);
-    }
+
+    Csrgeam2FillTilingData fillTiling{};
+    fillTiling.count = static_cast<int32_t>(countElems);
+    fillTiling.value = baseC;
+    auto *gmDst = reinterpret_cast<GM_ADDR>(csrSortedRowPtrC);
+    csrgeam2_fill_kernel_do(gmDst, fillTiling, stream);
 
     if (h->pointerMode == ACL_SPARSE_POINTER_MODE_HOST) {
         // Synchronous: matches cuSPARSE semantic (this API blocks until result is ready)

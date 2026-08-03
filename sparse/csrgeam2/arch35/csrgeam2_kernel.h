@@ -56,6 +56,12 @@ void csrgeam2_prefixsum_kernel_do(
     const Csrgeam2PrefixSumTilingData &tiling,
     void *stream);
 
+/// Kernel 4 (Fill): device 侧常量填充
+void csrgeam2_fill_kernel_do(
+    GM_ADDR dst,
+    const Csrgeam2FillTilingData &tiling,
+    void *stream);
+
 }  // extern "C"
 
 #endif  // CSRGEAM2_KERNEL_H_
