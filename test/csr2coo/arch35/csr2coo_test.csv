@@ -1,0 +1,72 @@
+case_name,m,n,sparsity,empty_row_prob,seed,idx_base,pattern,mere_threshold,mare_multiplier,abs_threshold,expect_result
+L0_4x4_z,4,4,0.5,0.0,42,0,random,0,0,0,SUCCESS
+L0_4x4_o,4,4,0.5,0.0,42,1,random,0,0,0,SUCCESS
+L0_3x5_wide,3,5,0.5,0.0,44,0,random,0,0,0,SUCCESS
+L0_5x3_tall,5,3,0.5,0.0,46,0,random,0,0,0,SUCCESS
+L0_1x1,1,1,0.0,0.0,1,0,random,0,0,0,SUCCESS
+L0_1x1_o,1,1,0.0,0.0,1,1,random,0,0,0,SUCCESS
+L0_16x16,16,16,0.5,0.0,54,0,random,0,0,0,SUCCESS
+L0_16x16_o,16,16,0.5,0.0,56,1,random,0,0,0,SUCCESS
+L0_8x8_sparse,8,8,0.9,0.0,50,0,random,0,0,0,SUCCESS
+L0_8x8_dense,8,8,0.1,0.0,52,0,random,0,0,0,SUCCESS
+L0_16x16_diag,16,16,0.0,0.0,0,0,diag,0,0,0,SUCCESS
+L0_16x16_diag_o,16,16,0.0,0.0,0,1,diag,0,0,0,SUCCESS
+L0_4x4_emptyrow,4,4,0.5,0.5,64,0,random,0,0,0,SUCCESS
+L0_4x4_nnz0,4,4,1.0,0.0,1,0,random,0,0,0,SUCCESS
+L0_128x128,128,128,0.5,0.0,70,0,random,0,0,0,SUCCESS
+L1_1024x1024,1024,1024,0.7,0.0,100,0,random,0,0,0,SUCCESS
+L1_2048x2048,2048,2048,0.7,0.0,110,0,random,0,0,0,SUCCESS
+L1_4096x4096,4096,4096,0.8,0.0,120,0,random,0,0,0,SUCCESS
+L1_2048x2048_o,2048,2048,0.7,0.0,112,1,random,0,0,0,SUCCESS
+L1_4096x4096_o,4096,4096,0.8,0.0,122,1,random,0,0,0,SUCCESS
+L1_4096x1024_wide,4096,1024,0.7,0.0,130,0,random,0,0,0,SUCCESS
+L1_1024x4096_tall,1024,4096,0.7,0.0,140,0,random,0,0,0,SUCCESS
+L1_2048_sparse,2048,2048,0.95,0.0,160,0,random,0,0,0,SUCCESS
+L1_2048_dense,2048,2048,0.05,0.0,162,0,random,0,0,0,SUCCESS
+L1_4096_sparse,4096,4096,0.95,0.0,240,0,random,0,0,0,SUCCESS
+L1_2048_emptyrow,2048,2048,0.7,0.3,170,0,random,0,0,0,SUCCESS
+L1_2048_emptyrow_o,2048,2048,0.7,0.5,172,1,random,0,0,0,SUCCESS
+L1_256_emptyrow_high,256,256,0.5,1.0,0,0,random,0,0,0,SUCCESS
+L1_1024_emptyrow_o,1024,1024,0.7,0.5,220,1,random,0,0,0,SUCCESS
+L1_2048_diag,2048,2048,0.0,0.0,0,0,diag,0,0,0,SUCCESS
+L1_4096_diag_o,4096,4096,0.0,0.0,0,1,diag,0,0,0,SUCCESS
+L1_1x10000_row,1,10000,0.5,0.0,180,0,random,0,0,0,SUCCESS
+L1_1x100000_row,1,100000,0.9,0.0,200,0,random,0,0,0,SUCCESS
+L1_10000x1_col,10000,1,0.5,0.0,190,0,random,0,0,0,SUCCESS
+L1_100000x1_col,100000,1,0.9,0.0,205,0,random,0,0,0,SUCCESS
+L1_CSC_4x4_z,4,4,0.5,0.0,42,0,csc,0,0,0,SUCCESS
+L1_CSC_4x4_o,4,4,0.5,0.0,42,1,csc,0,0,0,SUCCESS
+L1_CSC_16x16,16,16,0.5,0.0,54,0,csc,0,0,0,SUCCESS
+L1_CSC_128x128,128,128,0.5,0.0,70,0,csc,0,0,0,SUCCESS
+L1_CSC_1024x1024,1024,1024,0.7,0.0,100,0,csc,0,0,0,SUCCESS
+L1_m0_nnz0,0,0,0.0,0.0,0,0,random,0,0,0,SUCCESS
+L1_100_nnz0,100,100,1.0,0.0,0,0,random,0,0,0,SUCCESS
+L1_100_nnz0_o,100,100,1.0,0.0,0,1,random,0,0,0,SUCCESS
+L1_1x1_nnz0,1,1,1.0,0.0,0,0,random,0,0,0,SUCCESS
+L1_4x4_nnz0_o,4,4,1.0,0.0,0,1,random,0,0,0,SUCCESS
+# Multi-core split boundary: m around core count (GetAivCoreCount returns device-specific value).
+# m = 39 (< cores, one core idle), 40 (== cores, one row each), 41 (> cores, tail core gets 2 rows).
+L1_m39_core,39,8,0.5,0.0,301,0,random,0,0,0,SUCCESS
+L1_m40_core,40,8,0.5,0.0,302,0,random,0,0,0,SUCCESS
+L1_m41_core,41,8,0.5,0.0,303,0,random,0,0,0,SUCCESS
+L1_m39_core_o,39,8,0.5,0.0,304,1,random,0,0,0,SUCCESS
+L1_m40_core_o,40,8,0.5,0.0,305,1,random,0,0,0,SUCCESS
+L1_m41_core_o,41,8,0.5,0.0,306,1,random,0,0,0,SUCCESS
+# CSC mode with idxBase=1 (non-trivial size).
+L1_CSC_128x128_o,128,128,0.5,0.0,71,1,csc,0,0,0,SUCCESS
+# Ultra-long single row with idxBase=1.
+L1_1x100000_row_o,1,100000,0.9,0.0,201,1,random,0,0,0,SUCCESS
+# SIMT/SIMD path switch boundary: nnz/m threshold = 128 (host.cpp kSimtAvgNnzThreshold).
+# nnz/m=127 -> SIMT (<=128); nnz/m=128 -> boundary SIMT (<=128); nnz/m=129 -> SIMD (>128).
+# m=10, n=200; sparsity tuned so Binomial(200,1-sp) sum yields target nnz/m=127/128/129
+# (verified via standalone C++ mt19937+binomial_distribution simulation matching fill.h).
+# NOTE: binomial_distribution is implementation-defined; cross-STL seed may shift nnz
+# and flip the path. Output correctness is unaffected (both paths produce identical
+# results for valid input), but the path-coverage intent could be silently defeated.
+L2_simt_boundary_127,10,200,0.365,0.0,400,0,random,0,0,0,SUCCESS
+L2_switch_boundary_128,10,200,0.36,0.0,404,0,random,0,0,0,SUCCESS
+L2_simd_boundary_129,10,200,0.355,0.0,401,0,random,0,0,0,SUCCESS
+# m=2: SIMT 最小多行场景（m>1 触发 SIMT 路径，仅 2 行验证线程分配边界）。
+L2_m2_min_simt,2,10,0.5,0.0,410,0,random,0,0,0,SUCCESS
+# nnz=1: 极端稀疏最小工作量（5×5×0.04=1，sparsity=0.96 使期望 nnz≈1）。
+L2_nnz1_min,5,5,0.96,0.0,411,0,random,0,0,0,SUCCESS

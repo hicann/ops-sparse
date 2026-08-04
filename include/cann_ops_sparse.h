@@ -1685,6 +1685,32 @@ aclsparseStatus_t aclsparseXcscsort(
     const aclsparseMatDescr_t descrA,
     const int *cscColPtr, int *cscRowInd, int *P, void *pBuffer);
 
+// ============================================================================
+// Legacy API: aclsparseXcsr2coo — CSR row-pointer to COO row-index conversion
+// ============================================================================
+
+/**
+ * @brief Convert CSR compressed row offset array to COO row index array.
+ *
+ * Expands csrRowPtr[m+1] into cooRowInd[nnz] where each element maps to its
+ * originating row. The same function can perform CSC→COO conversion by passing
+ * colPtr as csrRowPtr and column count as m. INT32 index only, no workspace.
+ *
+ * @param handle     IN,  HOST,    aclsparse handle.
+ * @param csrRowPtr  IN,  DEVICE, CSR row offset array (length m+1), ascending.
+ * @param nnz        IN,  HOST,    number of nonzero elements (>= 0).
+ * @param m          IN,  HOST,    number of rows (>= 0). When m==0, nnz must be 0.
+ * @param cooRowInd  OUT, DEVICE, COO row index array (length nnz).
+ * @param idxBase    IN,  HOST,    index base: ACL_SPARSE_INDEX_BASE_ZERO or ONE.
+ * @return aclsparseStatus_t
+ */
+aclsparseStatus_t aclsparseXcsr2coo(aclsparseHandle_t handle,
+                                   const int32_t *csrRowPtr,
+                                   int64_t nnz,
+                                   int64_t m,
+                                   int32_t *cooRowInd,
+                                   aclsparseIndexBase_t idxBase);
+
 #ifdef __cplusplus
 }
 #endif
