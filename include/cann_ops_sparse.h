@@ -1643,6 +1643,35 @@ aclsparseStatus_t aclsparseCreateConstSlicedEll(aclsparseConstSpMatDescr_t *spMa
     aclDataType valueType);
 
 // ============================================================================
+// Legacy API: aclsparseXcoo2csr — COO row indices to CSR row pointers
+// ============================================================================
+
+/**
+ * @brief Convert COO row indices to CSR row pointers.
+ *
+ * Given a sorted COO row index array cooRowInd[0..nnz-1], compute the CSR
+ * row pointer array csrRowPtr[0..m] via counting + prefix sum.
+ *
+ * This is a type-agnostic (X-prefix) format conversion helper that operates
+ * only on int32 index arrays. No floating-point data is involved.
+ *
+ * @param handle     IN, HOST, aclsparse handle.
+ * @param cooRowInd  IN, DEVICE, COO row index array (length nnz, sorted non-decreasing).
+ * @param nnz        IN, HOST, number of nonzero elements (>= 0).
+ * @param m          IN, HOST, number of rows (>= 0).
+ * @param csrRowPtr  OUT, DEVICE, CSR row pointer array (length m+1).
+ * @param idxBase    IN, HOST, index base (ZERO or ONE).
+ * @return aclsparseStatus_t
+ */
+aclsparseStatus_t aclsparseXcoo2csr(
+    aclsparseHandle_t handle,
+    const int *cooRowInd,
+    int nnz,
+    int m,
+    int *csrRowPtr,
+    aclsparseIndexBase_t idxBase);
+
+// ============================================================================
 // Legacy API: aclsparseXcscsort — CSC format in-place stable sort (single-key)
 // ============================================================================
 
@@ -1709,7 +1738,7 @@ aclsparseStatus_t aclsparseXcsr2coo(aclsparseHandle_t handle,
                                    int64_t nnz,
                                    int64_t m,
                                    int32_t *cooRowInd,
-                                   aclsparseIndexBase_t idxBase);
+                                    aclsparseIndexBase_t idxBase);
 
 #ifdef __cplusplus
 }
