@@ -167,6 +167,18 @@ typedef enum aclsparseSpMVAlg_t {
     // (bit-wise) results for each run.
 } aclsparseSpMVAlg_t;
 
+// Complex types (aligned with cuComplex / cuDoubleComplex).
+// Layout: { real, imag }, binary-compatible with float2 / double2.
+typedef struct aclsparseComplex {
+    float x;
+    float y;
+} aclsparseComplex;
+
+typedef struct aclsparseDoubleComplex {
+    double x;
+    double y;
+} aclsparseDoubleComplex;
+
 // Computation direction (used by Legacy API, e.g. aclsparseSnnz).
 typedef enum aclsparseDirection_t {
     ACL_SPARSE_DIRECTION_ROW = 0,
@@ -612,6 +624,56 @@ aclsparseStatus_t aclsparseDenseToSparseAnalysis(
 aclsparseStatus_t aclsparseDenseToSparseConvert(
     aclsparseHandle_t handle, aclsparseConstDnMatDescr_t matA,
     aclsparseSpMatDescr_t matB, aclsparseDenseToSparseAlg_t alg,
+    void *buffer);
+
+// ============================================================================
+// SparseToDense Generic API
+// ============================================================================
+//  B = A，将稀疏矩阵 matA（CSR/CSC/COO）转换为稠密矩阵 matB。
+//  matA 与 matB 的行列数、值类型必须一致；matB 需在调用前分配好 device 内存。
+//  非零元位置写入值，其余位置由库内部清零。
+//  对标 cuSPARSE cusparseSparseToDense / cusparseSparseToDense_bufferSize。
+
+typedef enum aclsparseSparseToDenseAlg_t {
+    ACL_SPARSE_SPARSETODENSE_ALG_DEFAULT = 0,
+} aclsparseSparseToDenseAlg_t;
+
+/**
+ * @brief 查询 SparseToDense 转换所需的 workspace 字节数。
+ *
+ * @param handle     IN, HOST, aclsparse 句柄，不可为空。
+ * @param matA       IN, HOST 描述符；数据在 Device，稀疏矩阵 A（CSR/CSC/COO 格式），不可为空。
+ * @param matB       IN, HOST 描述符；数据在 Device，输出稠密矩阵 B，不可为空。
+ * @param alg        IN, HOST, 算法选择，仅支持 ACL_SPARSE_SPARSETODENSE_ALG_DEFAULT。
+ * @param bufferSize OUT, HOST, workspace 字节数，当前恒返回 0。
+ * @return aclsparseStatus_t 返回执行状态，成功返回 ACL_SPARSE_STATUS_SUCCESS。
+ */
+aclsparseStatus_t aclsparseSparseToDense_bufferSize(
+    aclsparseHandle_t handle,
+    aclsparseConstSpMatDescr_t matA,
+    aclsparseDnMatDescr_t matB,
+    aclsparseSparseToDenseAlg_t alg,
+    size_t *bufferSize);
+
+/**
+ * @brief 执行 SparseToDense 转换，将稀疏矩阵 matA 写入稠密矩阵 matB。
+ *
+ * 按 handle 绑定的 stream 异步执行；调用方需在读取结果前同步该 stream。
+ * matB 的 Device 内存由算子内部通过 aclrtMemset 清零后，非零元位置写入对应值。
+ * CSR/CSC/COO 三格式的描述符字段含义参见 README。
+ *
+ * @param handle IN, HOST, aclsparse 句柄，不可为空。
+ * @param matA   IN, HOST 描述符；数据在 Device，稀疏矩阵 A（CSR/CSC/COO 格式），不可为空。
+ * @param matB   IN, HOST 描述符；数据在 Device，输出稠密矩阵 B，不可为空。
+ * @param alg    IN, HOST, 算法选择，仅支持 ACL_SPARSE_SPARSETODENSE_ALG_DEFAULT。
+ * @param buffer IN, DEVICE, workspace；bufferSize == 0 时可传 nullptr。
+ * @return aclsparseStatus_t 返回执行状态，成功返回 ACL_SPARSE_STATUS_SUCCESS。
+ */
+aclsparseStatus_t aclsparseSparseToDense(
+    aclsparseHandle_t handle,
+    aclsparseConstSpMatDescr_t matA,
+    aclsparseDnMatDescr_t matB,
+    aclsparseSparseToDenseAlg_t alg,
     void *buffer);
 
 /**
@@ -1361,6 +1423,113 @@ aclsparseStatus_t aclsparseCsr2cscEx2(
     aclDataType valType, aclsparseAction_t copyValues,
     aclsparseIndexBase_t idxBase, aclsparseCsr2CscAlg_t alg,
     void *buffer);
+
+// ============================================================================
+// Legacy API: aclsparse{S/D/C/Z}gebsr2gebsc — GEBSR to GEBSC format conversion
+// ============================================================================
+// Converts General Block Sparse Row (GEBSR) format to General Block Sparse
+// Column (GEBSC) format. Equivalent to csr2csc when each block is regarded
+// as a scalar: the block sparsity pattern is transposed (block (i,j) -> (j,i)).
+//
+// Block value copy modes (determined by rowBlockDimC/colBlockDimC vs
+// rowBlockDimA/colBlockDimA):
+//   - Direct copy:  rC==rA && cC==cA — block elements copied verbatim
+//   - Block transpose: rC==cA && cC==rA — block elements transposed
+//
+// dirA specifies the in-block memory layout (ROW=row-major, COLUMN=column-major)
+// for both input and output blocks (layout does not change).
+
+/**
+ * @brief Query workspace size for aclsparseSgebsr2gebsc (float).
+ */
+aclsparseStatus_t aclsparseSgebsr2gebsc_bufferSize(
+    aclsparseHandle_t handle, int mb, int nb, int nnzb,
+    const float *bsrValA, const int *bsrRowPtrA, const int *bsrColIndA,
+    int rowBlockDimA, int colBlockDimA,
+    aclsparseDirection_t dirA,
+    size_t *pBufferSizeInBytes);
+
+/**
+ * @brief Convert GEBSR to GEBSC (float).
+ */
+aclsparseStatus_t aclsparseSgebsr2gebsc(
+    aclsparseHandle_t handle, int mb, int nb, int nnzb,
+    const float *bsrValA, const int *bsrRowPtrA, const int *bsrColIndA,
+    int rowBlockDimA, int colBlockDimA,
+    float *bscVal, int *bscColPtr, int *bscRowInd,
+    int rowBlockDimC, int colBlockDimC,
+    aclsparseAction_t copyValues, aclsparseIndexBase_t idxBase,
+    aclsparseDirection_t dirA,
+    void *pBuffer);
+
+/**
+ * @brief Query workspace size for aclsparseDgebsr2gebsc (double).
+ */
+aclsparseStatus_t aclsparseDgebsr2gebsc_bufferSize(
+    aclsparseHandle_t handle, int mb, int nb, int nnzb,
+    const double *bsrValA, const int *bsrRowPtrA, const int *bsrColIndA,
+    int rowBlockDimA, int colBlockDimA,
+    aclsparseDirection_t dirA,
+    size_t *pBufferSizeInBytes);
+
+/**
+ * @brief Convert GEBSR to GEBSC (double).
+ */
+aclsparseStatus_t aclsparseDgebsr2gebsc(
+    aclsparseHandle_t handle, int mb, int nb, int nnzb,
+    const double *bsrValA, const int *bsrRowPtrA, const int *bsrColIndA,
+    int rowBlockDimA, int colBlockDimA,
+    double *bscVal, int *bscColPtr, int *bscRowInd,
+    int rowBlockDimC, int colBlockDimC,
+    aclsparseAction_t copyValues, aclsparseIndexBase_t idxBase,
+    aclsparseDirection_t dirA,
+    void *pBuffer);
+
+/**
+ * @brief Query workspace size for aclsparseCgebsr2gebsc (complex float).
+ */
+aclsparseStatus_t aclsparseCgebsr2gebsc_bufferSize(
+    aclsparseHandle_t handle, int mb, int nb, int nnzb,
+    const aclsparseComplex *bsrValA, const int *bsrRowPtrA, const int *bsrColIndA,
+    int rowBlockDimA, int colBlockDimA,
+    aclsparseDirection_t dirA,
+    size_t *pBufferSizeInBytes);
+
+/**
+ * @brief Convert GEBSR to GEBSC (complex float).
+ */
+aclsparseStatus_t aclsparseCgebsr2gebsc(
+    aclsparseHandle_t handle, int mb, int nb, int nnzb,
+    const aclsparseComplex *bsrValA, const int *bsrRowPtrA, const int *bsrColIndA,
+    int rowBlockDimA, int colBlockDimA,
+    aclsparseComplex *bscVal, int *bscColPtr, int *bscRowInd,
+    int rowBlockDimC, int colBlockDimC,
+    aclsparseAction_t copyValues, aclsparseIndexBase_t idxBase,
+    aclsparseDirection_t dirA,
+    void *pBuffer);
+
+/**
+ * @brief Query workspace size for aclsparseZgebsr2gebsc (complex double).
+ */
+aclsparseStatus_t aclsparseZgebsr2gebsc_bufferSize(
+    aclsparseHandle_t handle, int mb, int nb, int nnzb,
+    const aclsparseDoubleComplex *bsrValA, const int *bsrRowPtrA, const int *bsrColIndA,
+    int rowBlockDimA, int colBlockDimA,
+    aclsparseDirection_t dirA,
+    size_t *pBufferSizeInBytes);
+
+/**
+ * @brief Convert GEBSR to GEBSC (complex double).
+ */
+aclsparseStatus_t aclsparseZgebsr2gebsc(
+    aclsparseHandle_t handle, int mb, int nb, int nnzb,
+    const aclsparseDoubleComplex *bsrValA, const int *bsrRowPtrA, const int *bsrColIndA,
+    int rowBlockDimA, int colBlockDimA,
+    aclsparseDoubleComplex *bscVal, int *bscColPtr, int *bscRowInd,
+    int rowBlockDimC, int colBlockDimC,
+    aclsparseAction_t copyValues, aclsparseIndexBase_t idxBase,
+    aclsparseDirection_t dirA,
+    void *pBuffer);
 
 // ============================================================================
 // Legacy API: aclsparseXcoosort — COO format in-place stable sort (dual-key)
