@@ -34,8 +34,8 @@ Y[X.indices[i]] = X.values[i],  i ∈ [0, X.nnz)
 #### 产品支持情况
 
 - Ascend 950PR / Ascend 950DT：支持
-- Atlas A3 训练系列产品 / Atlas A3 推理系列产品：不支持
-- Atlas A2 训练系列产品 / Atlas A2 推理系列产品：不支持
+- Atlas A3 训练系列产品 / Atlas A3 推理系列产品：支持
+- Atlas A2 训练系列产品 / Atlas A2 推理系列产品：支持
 
 #### 函数原型
 
@@ -53,7 +53,15 @@ aclsparseStatus_t aclsparseScatter(aclsparseHandle_t handle, aclsparseConstSpVec
 
 > vecX 的 `indices` 与 `values` 为 Device 内存指针，由描述符创建时（`aclsparseCreateConstSpVec` / `aclsparseCreateSpVec`）传入；vecY 的 `values` 同理由 `aclsparseCreateDnVec` 传入。
 
-#### 支持数据类型
+#### A2/A3参数说明
+ 	 
+ 	 | 参数名 | 输入/输出 | 参数类型 | 说明 |
+ 	 |--------|----------|---------|------|
+ 	 | handle | 输入 | aclsparseHandle_t | ops-sparse 库上下文句柄，携带执行 stream，Host 内存 |
+ 	 | vecX | 输入 | aclsparseSpVecDescr_t | 输入稀疏向量描述符（由 `aclsparseCreateSpVec` 创建），其 indices/values 为 Device 指针，Host 内存 |
+ 	 | vecY | 输入/输出 | aclsparseDnVecDescr_t | 输入/输出稠密向量描述符（由 `aclsparseCreateDnVec` 创建），其 values 为 Device 指针，作为写入目标，Host 内存 |
+
+#### A5支持数据类型
 
 | 数据类型 | aclDataType | 说明 |
 |----------|-------------|------|
@@ -73,7 +81,23 @@ aclsparseStatus_t aclsparseScatter(aclsparseHandle_t handle, aclsparseConstSpVec
 
 > `vecX.valueType` 必须与 `vecY.valueType` 一致，否则返回 `ACL_SPARSE_STATUS_NOT_SUPPORTED`。
 
-#### 约束说明
+#### A2/A3 约束说明
+ 	 
+ 	 - handle、vecX、vecY 不可为 nullptr，否则返回 `ACL_SPARSE_STATUS_HANDLE_IS_NULLPTR`
+ 	 - handle 须先调用 `aclsparseSetStream` 设置 stream
+ 	 - nnz == 0 时直接返回 `ACL_SPARSE_STATUS_SUCCESS`，vecY 保持不变；nnz > 0 时 vecX 的 indices/values 与 vecY 的 values 不可为 nullptr
+ 	 - 当前实现的支持范围（以 kernel 实际行为为准）：
+ 	   - vecX 的索引类型（idxType）仅支持 `ACL_SPARSE_INDEX_32I`（kernel 按 int32 读取 indices）；`ACL_SPARSE_INDEX_64I` 暂未支持
+ 	   - vecX 的值类型（valueType）与 vecY 的值类型（valueType）均仅支持 `ACL_FLOAT`（kernel 按 float 读写 values/y）
+ 	   - 索引基址（idxBase）仅支持 `ACL_SPARSE_INDEX_BASE_ZERO`（kernel 直接将索引用作 vecY 偏移，不扣除基址）
+ 	 - 索引取值范围：indices[i] 须在 `[0, vecY.size)` 范围内。kernel 直接以索引作为 vecY 的 GM 偏移写入，越界访问行为未定义，调用方须自行保证
+ 	 - vecX.size 须 >= nnz（由 `aclsparseCreateSpVec` 校验）
+ 	 - **输入索引约束（去重有序）**：vecX 的 indices 须去重（元素互异）且按升序有序。
+ 	   - 本算子为非计算类，要求 bit-exact。kernel 采用多核并发，各核独立对自身分片做 run-length 检测后写入 GM。当 indices 去重且有序时，各核写入的 GM 地址互不重叠，结果确定且逐位一致。
+ 	   - 若 indices 含重复元素，多核并发写同一 GM 地址，last-write-wins 顺序由核间调度决定，无法保证与全局 nnz 顺序一致，结果非确定（cuSPARSE 语义下重复索引本就未定义）。因此调用方须在调用前完成去重与排序，否则结果不保证。
+ 	   - 此外，升序的连续索引段会命中 kernel 内部的 run-length 快速拷贝路径，获得更优性能；去重有序既是正确性前置条件，也有利于性能。
+
+#### A5 约束说明
 
 **shape 约束**：
 

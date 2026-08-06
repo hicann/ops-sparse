@@ -8,7 +8,12 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # ----------------------------------------------------------------------------------------------------------
 
-# aclsparseScatter GTest tests (SpVec-DnVec scatter, Generic API)
-# Uses WARN_ON_MISSING_SRC because the operator source (sparse/scatter/arch35/)
-# may not exist yet when tests are developed in parallel with the operator.
-ops_sparse_add_gtest_tests(scatter ${OPS_SPARSE} WARN_ON_MISSING_SRC)
+# aclsparseScatter 测试：按 SOC 分流。
+#   - arch22 (ascend910b): scatter_test.cpp 自带 main，用 add_test（不链 test_main）
+#   - arch35 (ascend950): scatter_test.cpp 为 GTest 风格无 main，用 add_gtest_tests（链 test_main）
+# 两个 arch 测试源 main 风格相反，须按 SOC 分流，否则会 main 多重定义或缺 main。
+if("arch22" IN_LIST SOC_ARCH_DIRS)
+    ops_sparse_add_test(scatter ${OPS_SPARSE})
+else()
+    ops_sparse_add_gtest_tests(scatter ${OPS_SPARSE} WARN_ON_MISSING_SRC)
+endif()
