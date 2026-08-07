@@ -1046,6 +1046,21 @@ aclsparseStatus_t aclsparseScsrgeam2(
     const aclsparseMatDescr_t descrB, int nnzB, const float *csrSortedValB, const int *csrSortedRowPtrB,
     const int *csrSortedColIndB, const aclsparseMatDescr_t descrC, float *csrSortedValC,
     int *csrSortedRowPtrC, int *csrSortedColIndC, void *pBuffer);
+/**
+ * @brief 稀疏向量-稠密向量点积：result = sum(x_values[i] * y[x_indices[i]])
+ *
+ * @param handle IN, HOST, 稀疏计算句柄。
+ * @param op IN, HOST, 操作类型（仅支持 ACL_SPARSE_OP_NON_TRANSPOSE）。
+ * @param x IN, HOST, 稀疏向量描述符（索引必须按升序排列）。
+ * @param y IN, HOST, 稠密向量描述符。
+ * @param result IN/OUT, DEVICE, 指向设备端float结果的指针（1个float元素）。
+ * @param computeType IN, HOST, 累加/输出类型，仅支持 ACL_FLOAT（与 valueType 相互独立）。
+ *                    valueType（x/y 元素类型）可为 ACL_FLOAT 或 ACL_FLOAT16，核函数按 valueType 分发。
+ * @return aclsparseStatus_t 返回执行状态。
+ */
+aclsparseStatus_t aclsparseSpvv(aclsparseHandle_t handle, aclsparseOperation_t op,
+    aclsparseConstSpVecDescr_t x, aclsparseConstDnVecDescr_t y,
+    void *result, aclDataType computeType);
 
 // ============================================================================
 // Legacy API: aclsparseSgtsvInterleavedBatch

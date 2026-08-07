@@ -1,0 +1,534 @@
+/**
+ * ----------------------------------------------------------------------------------------------------------
+ * Copyright (c) 2026 Huawei Technologies Co., Ltd.
+ * This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+ * CANN Open Software License Agreement Version 2.0 (the "License").
+ * Please refer to the License for details. You may not use this file except in compliance with the License.
+ * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+ * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+ * See LICENSE in the root of the software repository for the full text of the License.
+ * ----------------------------------------------------------------------------------------------------------
+ */
+
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <cmath>
+#include <numeric>
+#include <vector>
+#include <algorithm>
+#include <random>
+#include <string>
+#include <sstream>
+#include "acl/acl.h"
+#include "securec.h"
+#include "cann_ops_sparse.h"
+
+#define CHECK_ACL(x)                                                \
+    do {                                                            \
+        aclError _ret = (x);                                        \
+        if (_ret != ACL_SUCCESS) {                                  \
+            fprintf(stderr, "ACL error %d at %s:%d\n", _ret,       \
+                    __FILE__, __LINE__);                            \
+            return false;                                           \
+        }                                                           \
+    } while (0)
+
+#define CHECK_ACL_SPARSE(x)                                         \
+    do {                                                            \
+        aclsparseStatus_t _ret = (x);                               \
+        if (_ret != ACL_SPARSE_STATUS_SUCCESS) {                    \
+            fprintf(stderr, "aclsparse error %d at %s:%d\n", _ret, \
+                    __FILE__, __LINE__);                            \
+            return false;                                           \
+        }                                                           \
+    } while (0)
+
+// ---------------------------------------------------------------------------
+// Data generation helpers
+// ---------------------------------------------------------------------------
+
+static void generate_random_spvv_data(
+    std::vector<int32_t> &indices, std::vector<float> &xValues,
+    std::vector<float> &yValues, uint32_t nnz, uint32_t yLen)
+{
+    std::mt19937 rng(42);
+    std::uniform_real_distribution<float> valDist(-1.0f, 1.0f);
+
+    // Generate unique sorted indices via Fisher-Yates shuffle + take first nnz
+    indices.resize(nnz);
+    if (nnz < yLen) {
+        std::vector<int32_t> pool(yLen);
+        std::iota(pool.begin(), pool.end(), 0);
+        for (uint32_t i = 0; i < nnz; i++) {
+            std::uniform_int_distribution<int32_t> swapDist(i, static_cast<int32_t>(yLen) - 1);
+            std::swap(pool[i], pool[swapDist(rng)]);
+            indices[i] = pool[i];
+        }
+        std::sort(indices.begin(), indices.end());
+    } else {
+        // nnz >= yLen: use all indices, sorted
+        std::iota(indices.begin(), indices.end(), 0);
+    }
+
+    xValues.resize(nnz);
+    for (uint32_t i = 0; i < nnz; i++) {
+        xValues[i] = valDist(rng);
+    }
+
+    yValues.resize(yLen);
+    for (uint32_t i = 0; i < yLen; i++) {
+        yValues[i] = valDist(rng);
+    }
+}
+
+static float compute_golden_fp32(const std::vector<int32_t> &indices,
+    const std::vector<float> &xValues, const std::vector<float> &yValues)
+{
+    double sum = 0.0;
+    for (size_t i = 0; i < indices.size(); i++) {
+        sum += (double)xValues[i] * (double)yValues[indices[i]];
+    }
+    return (float)sum;
+}
+
+// Software FP16 <-> FP32 conversion (no dependency on AscendC half type)
+
+static uint16_t fp32_to_fp16_bits(float f)
+{
+    uint32_t x;
+    memcpy_s(&x, sizeof(x), &f, sizeof(x));
+    uint32_t sign = (x >> 16) & 0x8000;
+    int32_t exp = ((x >> 23) & 0xFF) - 127 + 15;
+    uint32_t mant = (x >> 13) & 0x3FF;
+    if (exp <= 0) {
+        return static_cast<uint16_t>(sign);
+    }
+    if (exp >= 31) {
+        return static_cast<uint16_t>(sign | 0x7C00);
+    }
+    return static_cast<uint16_t>(sign | (exp << 10) | mant);
+}
+
+static float fp16_bits_to_fp32(uint16_t h)
+{
+    uint32_t sign = (h & 0x8000) << 16;
+    uint32_t exp = (h >> 10) & 0x1F;
+    uint32_t mant = h & 0x3FF;
+    uint32_t f;
+    if (exp == 0) {
+        f = sign;
+    } else if (exp == 31) {
+        f = sign | 0x7F800000 | (mant << 13);
+    } else {
+        f = sign | ((exp + 127 - 15) << 23) | (mant << 13);
+    }
+    float result;
+    memcpy_s(&result, sizeof(result), &f, sizeof(result));
+    return result;
+}
+
+static float compute_golden_fp16(const std::vector<int32_t> &indices,
+    const std::vector<uint16_t> &xValuesFp16, const std::vector<uint16_t> &yValuesFp16)
+{
+    double sum = 0.0;
+    for (size_t i = 0; i < indices.size(); i++) {
+        double xv = fp16_bits_to_fp32(xValuesFp16[i]);
+        double yv = fp16_bits_to_fp32(yValuesFp16[indices[i]]);
+        sum += xv * yv;
+    }
+    return (float)sum;
+}
+
+static void float_to_fp16(const std::vector<float> &src, std::vector<uint16_t> &dst)
+{
+    dst.resize(src.size());
+    for (size_t i = 0; i < src.size(); i++) {
+        dst[i] = fp32_to_fp16_bits(src[i]);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Helper: run SpVV and sync
+// ---------------------------------------------------------------------------
+
+static aclsparseStatus_t run_spvv(aclsparseHandle_t handle,
+    aclsparseOperation_t op, aclsparseConstSpVecDescr_t x,
+    aclsparseConstDnVecDescr_t y, void *dResult,
+    aclDataType computeType)
+{
+    aclsparseStatus_t st = aclsparseSpvv(handle, op, x, y, dResult, computeType);
+    if (st != ACL_SPARSE_STATUS_SUCCESS) {
+        return st;
+    }
+
+    // Synchronize to ensure kernel completes before reading result
+    aclrtStream stream = nullptr;
+    aclsparseGetStream(handle, &stream);
+    aclError aclRet = aclrtSynchronizeStream(stream);
+    if (aclRet != ACL_SUCCESS) {
+        fprintf(stderr, "ACL error %d at %s:%d\n", aclRet, __FILE__, __LINE__);
+        return ACL_SPARSE_STATUS_EXECUTION_FAILED;
+    }
+
+    return ACL_SPARSE_STATUS_SUCCESS;
+}
+
+// ---------------------------------------------------------------------------
+// Dtype filter: selectable via argv[1] = "fp32" | "fp16" | "all"(default).
+// Lets FP32 and FP16 paths be exercised independently to isolate dtype-
+// specific issues (e.g. SyncAll deadlocks that only manifest on one path).
+// ---------------------------------------------------------------------------
+
+enum DtypeFilter { DT_ALL = 0, DT_FP32 = 1, DT_FP16 = 2 };
+static DtypeFilter g_dtypeFilter = DT_ALL;
+
+static bool dtype_enabled(aclDataType dtype)
+{
+    if (g_dtypeFilter == DT_ALL) return true;
+    if (g_dtypeFilter == DT_FP32) return (dtype == ACL_FLOAT);
+    return (dtype == ACL_FLOAT16);
+}
+
+// ---------------------------------------------------------------------------
+// Test case table — shared between FP32 and FP16, covering scale & sparsity.
+// ---------------------------------------------------------------------------
+
+struct SpvvCase {
+    uint32_t nnz;
+    uint32_t yLen;
+    const char *tag;
+};
+
+// Correctness cases: edge, sparse, small, medium, large.
+static const SpvvCase kCorrectnessCases[] = {
+    {1,     256,      "tiny"        },
+    {0,     256,      "zero-nnz"    },
+    {100,   1000000,  "sparse-1M"   },  // density 1e-4, scalar fallback
+    {100,   10000000, "sparse-10M"  },  // density 1e-5, heavy scalar fallback
+    {256,   10240,    "small"       },
+    {1024,  10240,    "small-1K"    },
+    {4096,  10240,    "small-4K"    },
+    {10000, 102400,   "medium"      },
+    {100000,1000000,  "large-1M"    },
+    {100000,10000000, "large-10M"   },
+};
+
+// ---------------------------------------------------------------------------
+// Unified correctness runner (FP32 / FP16)
+// ---------------------------------------------------------------------------
+
+// Run one SpVV correctness case. Assumes aclrtSetDevice already done; does not
+// call aclInit/aclFinalize (caller manages runtime lifecycle).
+static bool run_spvv_once(aclDataType dtype, uint32_t nnz, uint32_t yLen, const char *tag)
+{
+    bool isFp16 = (dtype == ACL_FLOAT16);
+    const char *dtName = isFp16 ? "FP16" : "FP32";
+
+    std::vector<int32_t> indices;
+    std::vector<float> xValuesFp32, yValuesFp32;
+    generate_random_spvv_data(indices, xValuesFp32, yValuesFp32, nnz, yLen);
+
+    std::vector<uint16_t> xValuesFp16, yValuesFp16;
+    float golden;
+    if (isFp16) {
+        float_to_fp16(xValuesFp32, xValuesFp16);
+        float_to_fp16(yValuesFp32, yValuesFp16);
+        golden = compute_golden_fp16(indices, xValuesFp16, yValuesFp16);
+    } else {
+        golden = compute_golden_fp32(indices, xValuesFp32, yValuesFp32);
+    }
+
+    size_t elemSz = isFp16 ? sizeof(uint16_t) : sizeof(float);
+    void *dIndices = nullptr, *dXValues = nullptr, *dYValues = nullptr, *dResult = nullptr;
+    CHECK_ACL(aclrtMalloc(&dIndices, std::max<size_t>(nnz * sizeof(int32_t), 4), ACL_MEM_MALLOC_HUGE_FIRST));
+    CHECK_ACL(aclrtMalloc(&dXValues, std::max<size_t>(nnz * elemSz, 4), ACL_MEM_MALLOC_HUGE_FIRST));
+    CHECK_ACL(aclrtMalloc(&dYValues, yLen * elemSz, ACL_MEM_MALLOC_HUGE_FIRST));
+    CHECK_ACL(aclrtMalloc(&dResult, sizeof(float), ACL_MEM_MALLOC_HUGE_FIRST));
+
+    if (nnz > 0) {
+        CHECK_ACL(aclrtMemcpy(dIndices, nnz * sizeof(int32_t), indices.data(),
+            nnz * sizeof(int32_t), ACL_MEMCPY_HOST_TO_DEVICE));
+        const void *xv = isFp16 ? (const void *)xValuesFp16.data() : (const void *)xValuesFp32.data();
+        CHECK_ACL(aclrtMemcpy(dXValues, nnz * elemSz, xv, nnz * elemSz, ACL_MEMCPY_HOST_TO_DEVICE));
+    }
+    const void *yv = isFp16 ? (const void *)yValuesFp16.data() : (const void *)yValuesFp32.data();
+    CHECK_ACL(aclrtMemcpy(dYValues, yLen * elemSz, yv, yLen * elemSz, ACL_MEMCPY_HOST_TO_DEVICE));
+
+    aclsparseHandle_t handle = nullptr;
+    aclsparseSpVecDescr_t spVecX = nullptr;
+    aclsparseDnVecDescr_t dnVecY = nullptr;
+    CHECK_ACL_SPARSE(aclsparseCreate(&handle));
+    CHECK_ACL_SPARSE(aclsparseCreateSpVec(&spVecX, yLen, nnz, dIndices, dXValues,
+        ACL_SPARSE_INDEX_32I, ACL_SPARSE_INDEX_BASE_ZERO, dtype));
+    CHECK_ACL_SPARSE(aclsparseCreateDnVec(&dnVecY, yLen, dYValues, dtype));
+
+    aclsparseStatus_t st = run_spvv(handle, ACL_SPARSE_OP_NON_TRANSPOSE,
+        spVecX, dnVecY, dResult, ACL_FLOAT);
+    bool pass = true;
+    if (st != ACL_SPARSE_STATUS_SUCCESS) {
+        fprintf(stderr, "aclsparseSpvv %s [%s] failed: %d\n", dtName, tag, st);
+        pass = false;
+    } else {
+        float hResult = 0.0f;
+        CHECK_ACL(aclrtMemcpy(&hResult, sizeof(float), dResult, sizeof(float),
+            ACL_MEMCPY_DEVICE_TO_HOST));
+        float tol = (isFp16 ? 1e-2f : 1e-3f) * std::max(1.0f, std::abs(golden));
+        pass = std::abs(hResult - golden) < tol;
+        printf("  %s [%s] nnz=%u yLen=%u: golden=%.6f npu=%.6f diff=%.2e → %s\n",
+               dtName, tag, nnz, yLen, golden, hResult, std::abs(hResult - golden),
+               pass ? "PASS" : "FAIL");
+    }
+
+    CHECK_ACL_SPARSE(aclsparseDestroySpVec(spVecX));
+    CHECK_ACL_SPARSE(aclsparseDestroyDnVec(dnVecY));
+    CHECK_ACL_SPARSE(aclsparseDestroy(handle));
+    CHECK_ACL(aclrtFree(dIndices));
+    CHECK_ACL(aclrtFree(dXValues));
+    CHECK_ACL(aclrtFree(dYValues));
+    CHECK_ACL(aclrtFree(dResult));
+
+    return pass;
+}
+
+static bool test_spvv_case(aclDataType dtype, uint32_t nnz, uint32_t yLen, const char *tag)
+{
+    bool isFp16 = (dtype == ACL_FLOAT16);
+    const char *dtName = isFp16 ? "FP16" : "FP32";
+    printf("=== %s SpVV [%s]: nnz=%u, yLen=%u ===\n", dtName, tag, nnz, yLen);
+
+    CHECK_ACL(aclInit(nullptr));
+    int32_t deviceId = 0;
+    CHECK_ACL(aclrtSetDevice(deviceId));
+    bool pass = run_spvv_once(dtype, nnz, yLen, tag);
+    CHECK_ACL(aclrtResetDevice(deviceId));
+    CHECK_ACL(aclFinalize());
+    return pass;
+}
+
+// ---------------------------------------------------------------------------
+// Randomized fuzz test: 100 iterations, random nnz/yLen, FP32 + FP16.
+// ---------------------------------------------------------------------------
+
+static bool test_spvv_random()
+{
+    const int N_ITERS = 100;
+    printf("=== Random fuzz: %d iters × {FP32, FP16} ===\n", N_ITERS);
+
+    CHECK_ACL(aclInit(nullptr));
+    int32_t deviceId = 0;
+    CHECK_ACL(aclrtSetDevice(deviceId));
+
+    std::mt19937 rng(20260626);
+    int passed = 0, failed = 0;
+
+    for (int it = 0; it < N_ITERS; it++) {
+        // yLen in [256, 2M]; nnz in [0, yLen] (nnz <= yLen required).
+        std::uniform_int_distribution<uint32_t> yLenDist(256, 2000000);
+        uint32_t yLen = yLenDist(rng);
+        std::uniform_int_distribution<uint32_t> nnzDist(0, yLen);
+        uint32_t nnz = nnzDist(rng);
+
+        std::ostringstream tagStream;
+        tagStream << "rand#" << it;
+        std::string tag = tagStream.str();
+
+        if (dtype_enabled(ACL_FLOAT)) {
+            run_spvv_once(ACL_FLOAT, nnz, yLen, tag.c_str()) ? passed++ : failed++;
+        }
+        if (dtype_enabled(ACL_FLOAT16)) {
+            run_spvv_once(ACL_FLOAT16, nnz, yLen, tag.c_str()) ? passed++ : failed++;
+        }
+    }
+
+    CHECK_ACL(aclrtResetDevice(deviceId));
+    CHECK_ACL(aclFinalize());
+
+    printf("  Random fuzz: %d passed, %d failed\n", passed, failed);
+    return failed == 0;
+}
+
+// ---------------------------------------------------------------------------
+// Benchmark: FP32 & FP16 across scales / sparsities (warmup=5, iters=20)
+// ---------------------------------------------------------------------------
+
+static const SpvvCase kBenchCases[] = {
+    // Scalar-fallback path (very sparse: < ALIGN_ELEM indices per y segment)
+    {100,   1000000,  "scalar-1M"    },  // density 1e-4
+    {100,   10000000, "scalar-10M"   },  // density 1e-5, heavy
+    {1000,  10000000, "scalar-1K10M" },  // density 1e-4
+    // Small nnz
+    {1,     256,      "tiny"         },
+    {256,   10240,    "small-256"    },
+    {1024,  10240,    "small-1K"     },
+    {4096,  10240,    "small-4K"     },
+    // Medium / large
+    {10000, 102400,   "medium"       },
+    {100000,1000000,  "large-1M"     },
+    {100000,10000000, "large-10M"    },
+};
+
+static bool test_spvv_benchmark()
+{
+    static const aclDataType kDtypes[] = {ACL_FLOAT, ACL_FLOAT16};
+    bool allPass = true;
+
+    CHECK_ACL(aclInit(nullptr));
+    int32_t deviceId = 0;
+    CHECK_ACL(aclrtSetDevice(deviceId));
+
+    int64_t coreNum = 0;
+    aclrtGetDeviceInfo(deviceId, ACL_DEV_ATTR_VECTOR_CORE_NUM, &coreNum);
+    printf("=== Benchmark: FP32 & FP16 (warmup=5, iters=20), cores=%ld ===\n", coreNum);
+
+    int nCases = sizeof(kBenchCases) / sizeof(kBenchCases[0]);
+    for (size_t d = 0; d < sizeof(kDtypes) / sizeof(kDtypes[0]); d++) {
+        aclDataType dtype = kDtypes[d];
+        if (!dtype_enabled(dtype)) continue;
+        bool isFp16 = (dtype == ACL_FLOAT16);
+        const char *dtName = isFp16 ? "FP16" : "FP32";
+        size_t elemSz = isFp16 ? sizeof(uint16_t) : sizeof(float);
+
+        for (int ci = 0; ci < nCases; ci++) {
+            uint32_t nnz = kBenchCases[ci].nnz;
+            uint32_t yLen = kBenchCases[ci].yLen;
+            printf("\n--- %s [%s] nnz=%u yLen=%u ---\n", dtName, kBenchCases[ci].tag, nnz, yLen);
+
+            std::vector<int32_t> indices;
+            std::vector<float> xValuesFp32, yValuesFp32;
+            generate_random_spvv_data(indices, xValuesFp32, yValuesFp32, nnz, yLen);
+            std::vector<uint16_t> xValuesFp16, yValuesFp16;
+            float golden;
+            if (isFp16) {
+                float_to_fp16(xValuesFp32, xValuesFp16);
+                float_to_fp16(yValuesFp32, yValuesFp16);
+                golden = compute_golden_fp16(indices, xValuesFp16, yValuesFp16);
+            } else {
+                golden = compute_golden_fp32(indices, xValuesFp32, yValuesFp32);
+            }
+
+            void *dIndices = nullptr, *dXValues = nullptr, *dYValues = nullptr, *dResult = nullptr;
+            CHECK_ACL(aclrtMalloc(&dIndices, std::max<size_t>(nnz * sizeof(int32_t), 4), ACL_MEM_MALLOC_HUGE_FIRST));
+            CHECK_ACL(aclrtMalloc(&dXValues, std::max<size_t>(nnz * elemSz, 4), ACL_MEM_MALLOC_HUGE_FIRST));
+            CHECK_ACL(aclrtMalloc(&dYValues, yLen * elemSz, ACL_MEM_MALLOC_HUGE_FIRST));
+            CHECK_ACL(aclrtMalloc(&dResult, sizeof(float), ACL_MEM_MALLOC_HUGE_FIRST));
+
+            if (nnz > 0) {
+                CHECK_ACL(aclrtMemcpy(dIndices, nnz * sizeof(int32_t), indices.data(),
+                    nnz * sizeof(int32_t), ACL_MEMCPY_HOST_TO_DEVICE));
+                const void *xv = isFp16 ? (const void *)xValuesFp16.data() : (const void *)xValuesFp32.data();
+                CHECK_ACL(aclrtMemcpy(dXValues, nnz * elemSz, xv, nnz * elemSz, ACL_MEMCPY_HOST_TO_DEVICE));
+            }
+            const void *yv = isFp16 ? (const void *)yValuesFp16.data() : (const void *)yValuesFp32.data();
+            CHECK_ACL(aclrtMemcpy(dYValues, yLen * elemSz, yv, yLen * elemSz, ACL_MEMCPY_HOST_TO_DEVICE));
+
+            aclsparseHandle_t handle = nullptr;
+            aclsparseSpVecDescr_t spVecX = nullptr;
+            aclsparseDnVecDescr_t dnVecY = nullptr;
+            CHECK_ACL_SPARSE(aclsparseCreate(&handle));
+            CHECK_ACL_SPARSE(aclsparseCreateSpVec(&spVecX, yLen, nnz, dIndices, dXValues,
+                ACL_SPARSE_INDEX_32I, ACL_SPARSE_INDEX_BASE_ZERO, dtype));
+            CHECK_ACL_SPARSE(aclsparseCreateDnVec(&dnVecY, yLen, dYValues, dtype));
+
+            for (int w = 0; w < 5; w++) {
+                aclsparseSpvv(handle, ACL_SPARSE_OP_NON_TRANSPOSE, spVecX, dnVecY, dResult, ACL_FLOAT);
+            }
+            CHECK_ACL(aclrtSynchronizeDevice());
+
+            const int N_ITERS = 20;
+            double sumMs = 0.0, sumSq = 0.0;
+            float minMs = 1e30f, maxMs = 0.0f;
+            aclrtEvent startEvt, stopEvt;
+            aclrtCreateEvent(&startEvt);
+            aclrtCreateEvent(&stopEvt);
+            for (int iter = 0; iter < N_ITERS; iter++) {
+                aclrtRecordEvent(startEvt, nullptr);
+                aclsparseSpvv(handle, ACL_SPARSE_OP_NON_TRANSPOSE, spVecX, dnVecY, dResult, ACL_FLOAT);
+                aclrtRecordEvent(stopEvt, nullptr);
+                aclrtSynchronizeEvent(stopEvt);
+                float ms = 0.0f;
+                aclrtEventElapsedTime(&ms, startEvt, stopEvt);
+                sumMs += ms;
+                sumSq += (double)ms * ms;
+                if (ms < minMs) minMs = ms;
+                if (ms > maxMs) maxMs = ms;
+            }
+            aclrtDestroyEvent(startEvt);
+            aclrtDestroyEvent(stopEvt);
+
+            double avgMs = sumMs / N_ITERS;
+            double stdMs = sqrt(sumSq / N_ITERS - avgMs * avgMs);
+            double throughput = (nnz / avgMs) / 1000.0;  // Mnnz/s
+
+            CHECK_ACL(aclrtSynchronizeDevice());
+            float hResult = 0.0f;
+            CHECK_ACL(aclrtMemcpy(&hResult, sizeof(float), dResult, sizeof(float),
+                ACL_MEMCPY_DEVICE_TO_HOST));
+            float tol = (isFp16 ? 1e-2f : 1e-3f) * std::max(1.0f, std::abs(golden));
+            bool pass = std::abs(hResult - golden) < tol;
+
+            printf("  avg=%.4f ms, min=%.4f ms, max=%.4f ms, %.1f Mnnz/s | diff=%.2e → %s\n",
+                   avgMs, minMs, maxMs, throughput, std::abs(hResult - golden), pass ? "PASS" : "FAIL");
+            if (!pass) allPass = false;
+
+            CHECK_ACL_SPARSE(aclsparseDestroySpVec(spVecX));
+            CHECK_ACL_SPARSE(aclsparseDestroyDnVec(dnVecY));
+            CHECK_ACL_SPARSE(aclsparseDestroy(handle));
+            CHECK_ACL(aclrtFree(dIndices));
+            CHECK_ACL(aclrtFree(dXValues));
+            CHECK_ACL(aclrtFree(dYValues));
+            CHECK_ACL(aclrtFree(dResult));
+        }
+    }
+
+    CHECK_ACL(aclrtResetDevice(deviceId));
+    CHECK_ACL(aclFinalize());
+    return allPass;
+}
+
+// ---------------------------------------------------------------------------
+// Main
+// ---------------------------------------------------------------------------
+
+int main(int argc, char *argv[])
+{
+    // Optional argv[1]: "fp32" | "fp16" | "all" (default). Selects which dtype
+    // paths to exercise so FP32/FP16 can be validated independently.
+    if (argc > 1) {
+        std::string sel = argv[1];
+        if (sel == "fp32") g_dtypeFilter = DT_FP32;
+        else if (sel == "fp16") g_dtypeFilter = DT_FP16;
+        else if (sel == "all") g_dtypeFilter = DT_ALL;
+        else {
+            fprintf(stderr, "Usage: %s [fp32|fp16|all]\n", argv[0]);
+            return 1;
+        }
+    }
+    printf("Dtype filter: %s\n",
+        g_dtypeFilter == DT_FP32 ? "FP32" : g_dtypeFilter == DT_FP16 ? "FP16" : "ALL");
+
+    int passed = 0, failed = 0;
+
+    // Correctness: each case × {FP32, FP16}
+    for (size_t i = 0; i < sizeof(kCorrectnessCases) / sizeof(kCorrectnessCases[0]); i++) {
+        const SpvvCase &c = kCorrectnessCases[i];
+        if (dtype_enabled(ACL_FLOAT)) {
+            test_spvv_case(ACL_FLOAT, c.nnz, c.yLen, c.tag) ? passed++ : failed++;
+        }
+        if (dtype_enabled(ACL_FLOAT16)) {
+            test_spvv_case(ACL_FLOAT16, c.nnz, c.yLen, c.tag) ? passed++ : failed++;
+        }
+    }
+
+    // Benchmark: FP32 & FP16 across scales / sparsities
+    test_spvv_benchmark() ? passed++ : failed++;
+
+    // Randomized fuzz: 100 iters × {FP32, FP16}
+    test_spvv_random() ? passed++ : failed++;
+
+    printf("\n========================================\n");
+    printf("Total: %d passed, %d failed\n", passed, failed);
+    printf("========================================\n");
+
+    return failed > 0 ? 1 : 0;
+}
