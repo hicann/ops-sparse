@@ -100,6 +100,7 @@ inline aclsparseStatus_t AclsparseValidateSupportedCsrIndexTypesExtended(aclspar
 
 // 稠密向量描述符内部结构（SpMV 的 x / y）。
 struct aclsparseDnVecDescr {
+    uint32_t signature = 0;
     uint64_t nums = 0;
     void *values = nullptr;
     aclDataType valueType{};
