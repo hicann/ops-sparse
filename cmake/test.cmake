@@ -80,13 +80,16 @@ endfunction()
 #                                          # - CSV copied as <variant>_test.csv
 #       [WARN_ON_MISSING_SRC]              # emit warning instead of FATAL_ERROR when sparse/<op>/<arch>/ is missing
 #       [EIGEN]                            # link Eigen3 (unconditionally, regardless of TEST_USE_EIGEN cache var)
+#       [NO_SRC_DIR]                       # Host-only interface (no sparse/<op>/<arch>/ kernel dir);
+#                                          # - skip sparse source dir existence check
+#                                          # - test sources searched at test/<op>/ (no arch subdir)
 #       [EXTRA_INCLUDES <dir1> <dir2> ...] # additional include directories
 #   )
 #
 # Always links test/frame/test_main.cpp (shared main); test cpp files MUST NOT define main().
 function(ops_sparse_add_gtest_tests operator link_lib)
     cmake_parse_arguments(ARG
-        "WARN_ON_MISSING_SRC;EIGEN"
+        "WARN_ON_MISSING_SRC;EIGEN;NO_SRC_DIR"
         "VARIANT"
         "EXTRA_INCLUDES"
         ${ARGN})
@@ -106,14 +109,34 @@ function(ops_sparse_add_gtest_tests operator link_lib)
     set(_test_src "")
     set(_src_arch "")
 
-    foreach(arch_dir ${SOC_ARCH_DIRS})
-        set(_candidate "${CMAKE_CURRENT_SOURCE_DIR}/${_subdir}/${arch_dir}/${_source_prefix}_test.cpp")
+    # Base directory: test/<op>/ (no VARIANT) or test/<op>/<variant>/ (VARIANT)
+    # Avoids double-slash when _subdir is empty.
+    if(_subdir)
+        set(_base_dir "${CMAKE_CURRENT_SOURCE_DIR}/${_subdir}")
+    else()
+        set(_base_dir "${CMAKE_CURRENT_SOURCE_DIR}")
+    endif()
+
+    # Host-only interface (NO_SRC_DIR): arch-agnostic, test sources at test/<op>/ (no arch subdir)
+    if(ARG_NO_SRC_DIR)
+        set(_candidate "${_base_dir}/${_source_prefix}_test.cpp")
         if(EXISTS ${_candidate})
             set(_test_src ${_candidate})
-            set(_src_arch ${arch_dir})
-            break()
+            set(_src_arch "")
         endif()
-    endforeach()
+    endif()
+
+    # Normal arch-dir search (for non-NO_SRC_DIR, or NO_SRC_DIR fallback if upper not found)
+    if(NOT _test_src)
+        foreach(arch_dir ${SOC_ARCH_DIRS})
+            set(_candidate "${_base_dir}/${arch_dir}/${_source_prefix}_test.cpp")
+            if(EXISTS ${_candidate})
+                set(_test_src ${_candidate})
+                set(_src_arch ${arch_dir})
+                break()
+            endif()
+        endforeach()
+    endif()
 
     if(NOT _test_src)
         message(STATUS "[test/${operator}] no test sources for SOC=${SOC_VERSION} (SOC_ARCH_DIRS=${SOC_ARCH_DIRS}), skipping ${target}")
@@ -122,14 +145,16 @@ function(ops_sparse_add_gtest_tests operator link_lib)
         return()
     endif()
 
-    if(NOT IS_DIRECTORY "${CMAKE_SOURCE_DIR}/sparse/${operator}/${_src_arch}")
-        if(ARG_WARN_ON_MISSING_SRC)
-            message(WARNING "[test/${operator}] sparse/${operator}/${_src_arch} not found, skipping ${target}")
-            file(APPEND ${CMAKE_BINARY_DIR}/test/skipped_tests.list
-                "${operator}|sparse/${operator}/${_src_arch} not found for SOC=${SOC_VERSION}\n")
-            return()
-        else()
-            message(FATAL_ERROR "[test/${operator}] test arch '${_src_arch}' has no matching src at sparse/${operator}/${_src_arch}")
+    if(NOT ARG_NO_SRC_DIR)
+        if(NOT IS_DIRECTORY "${CMAKE_SOURCE_DIR}/sparse/${operator}/${_src_arch}")
+            if(ARG_WARN_ON_MISSING_SRC)
+                message(WARNING "[test/${operator}] sparse/${operator}/${_src_arch} not found, skipping ${target}")
+                file(APPEND ${CMAKE_BINARY_DIR}/test/skipped_tests.list
+                    "${operator}|sparse/${operator}/${_src_arch} not found for SOC=${SOC_VERSION}\n")
+                return()
+            else()
+                message(FATAL_ERROR "[test/${operator}] test arch '${_src_arch}' has no matching src at sparse/${operator}/${_src_arch}")
+            endif()
         endif()
     endif()
 
@@ -155,16 +180,22 @@ function(ops_sparse_add_gtest_tests operator link_lib)
 
     target_include_directories(${target} PRIVATE
         ${CMAKE_SOURCE_DIR}/include
-        ${CMAKE_SOURCE_DIR}/sparse/${operator}/${_src_arch}
         ${CMAKE_SOURCE_DIR}/sparse/common
         ${CMAKE_SOURCE_DIR}/test/frame
         ${CMAKE_CURRENT_SOURCE_DIR}
-        ${CMAKE_CURRENT_SOURCE_DIR}/${_subdir}
-        ${CMAKE_CURRENT_SOURCE_DIR}/${_subdir}/${_src_arch}
+        ${_base_dir}
         $ENV{LINUX_INCLUDE_PATH}
         ${GTEST_INCLUDE_DIRS}
         ${ARG_EXTRA_INCLUDES}
     )
+
+    # Arch-specific include dirs (only when an arch dir was resolved)
+    if(_src_arch)
+        target_include_directories(${target} PRIVATE
+            ${CMAKE_SOURCE_DIR}/sparse/${operator}/${_src_arch}
+            ${_base_dir}/${_src_arch}
+        )
+    endif()
 
     target_link_libraries(${target} PRIVATE
         ${link_lib}
@@ -183,7 +214,11 @@ function(ops_sparse_add_gtest_tests operator link_lib)
     endif()
 
     # Copy CSV to build dir so binary can find it via relative path.
-    set(_csv_file "${CMAKE_CURRENT_SOURCE_DIR}/${_subdir}/${_src_arch}/${_source_prefix}_test.csv")
+    if(_src_arch)
+        set(_csv_file "${_base_dir}/${_src_arch}/${_source_prefix}_test.csv")
+    else()
+        set(_csv_file "${_base_dir}/${_source_prefix}_test.csv")
+    endif()
     if(EXISTS ${_csv_file})
         add_custom_command(TARGET ${target} POST_BUILD
             COMMAND ${CMAKE_COMMAND} -E copy ${_csv_file} $<TARGET_FILE_DIR:${target}>/${_source_prefix}_test.csv

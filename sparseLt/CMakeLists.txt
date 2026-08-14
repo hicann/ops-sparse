@@ -8,8 +8,7 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # ----------------------------------------------------------------------------------------------------------
 
-# sparseLt 源文件收集（占位）
-# 当前 sparseLt 仅有框架，无源文件，导出空列表
+# sparseLt 源文件收集（Host 侧 C++）
 
 file(GLOB_RECURSE SPARSELT_HOST_SRCS ${CMAKE_CURRENT_SOURCE_DIR}/*.cpp)
 file(GLOB_RECURSE SPARSELT_KERNEL_SRCS "")
