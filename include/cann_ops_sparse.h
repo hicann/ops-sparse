@@ -1440,7 +1440,7 @@ aclsparseStatus_t aclsparseCsr2cscEx2(
     void *buffer);
 
 // ============================================================================
-// Legacy API: aclsparse{S/D/C/Z}gebsr2gebsc — GEBSR to GEBSC format conversion
+// Legacy API: aclsparseGebsr2gebsc — GEBSR to GEBSC format conversion
 // ============================================================================
 // Converts General Block Sparse Row (GEBSR) format to General Block Sparse
 // Column (GEBSC) format. Equivalent to csr2csc when each block is regarded
@@ -1455,95 +1455,61 @@ aclsparseStatus_t aclsparseCsr2cscEx2(
 // for both input and output blocks (layout does not change).
 
 /**
- * @brief Query workspace size for aclsparseSgebsr2gebsc (float).
+ * @brief Query workspace size for aclsparseGebsr2gebsc.
+ * @param handle           IN, HOST, aclsparse handle.
+ * @param mb               IN, HOST, number of block rows.
+ * @param nb               IN, HOST, number of block columns.
+ * @param nnzb             IN, HOST, number of nonzero blocks.
+ * @param bsrValA          IN, DEVICE, GEBSR nonzero block values (may be NULL for query).
+ * @param bsrRowPtrA       IN, DEVICE, GEBSR block row pointers (length mb+1).
+ * @param bsrColIndA       IN, DEVICE, GEBSR block column indices (length nnzb).
+ * @param rowBlockDimA     IN, HOST, row dimension of input blocks.
+ * @param colBlockDimA     IN, HOST, column dimension of input blocks.
+ * @param dirA             IN, HOST, in-block memory layout (ROW or COLUMN).
+ * @param valType          IN, HOST, data type of nonzero block values.
+ * @param pBufferSizeInBytes OUT, HOST, required workspace size in bytes.
+ * @return aclsparseStatus_t
  */
-aclsparseStatus_t aclsparseSgebsr2gebsc_bufferSize(
+aclsparseStatus_t aclsparseGebsr2gebsc_bufferSize(
     aclsparseHandle_t handle, int mb, int nb, int nnzb,
-    const float *bsrValA, const int *bsrRowPtrA, const int *bsrColIndA,
+    const void *bsrValA, const int *bsrRowPtrA, const int *bsrColIndA,
     int rowBlockDimA, int colBlockDimA,
     aclsparseDirection_t dirA,
+    aclDataType valType,
     size_t *pBufferSizeInBytes);
 
 /**
- * @brief Convert GEBSR to GEBSC (float).
+ * @brief Convert GEBSR to GEBSC.
+ * @param handle           IN, HOST, aclsparse handle.
+ * @param mb               IN, HOST, number of block rows.
+ * @param nb               IN, HOST, number of block columns.
+ * @param nnzb             IN, HOST, number of nonzero blocks.
+ * @param bsrValA          IN, DEVICE, GEBSR nonzero block values.
+ * @param bsrRowPtrA       IN, DEVICE, GEBSR block row pointers (length mb+1).
+ * @param bsrColIndA       IN, DEVICE, GEBSR block column indices (length nnzb).
+ * @param rowBlockDimA     IN, HOST, row dimension of input blocks.
+ * @param colBlockDimA     IN, HOST, column dimension of input blocks.
+ * @param bscVal           OUT, DEVICE, GEBSC nonzero block values.
+ * @param bscColPtr        OUT, DEVICE, GEBSC block column pointers (length nb+1).
+ * @param bscRowInd        OUT, DEVICE, GEBSC block row indices (length nnzb).
+ * @param rowBlockDimC     IN, HOST, row dimension of output blocks.
+ * @param colBlockDimC     IN, HOST, column dimension of output blocks.
+ * @param copyValues       IN, HOST, SYMBOLIC (structure only) or NUMERIC (structure + values).
+ * @param idxBase          IN, HOST, index base (0-based or 1-based).
+ * @param dirA             IN, HOST, in-block memory layout (ROW or COLUMN).
+ * @param valType          IN, HOST, data type of nonzero block values.
+ * @param pBuffer          IN, DEVICE, workspace (size from bufferSize query).
+ * @return aclsparseStatus_t
  */
-aclsparseStatus_t aclsparseSgebsr2gebsc(
+aclsparseStatus_t aclsparseGebsr2gebsc(
     aclsparseHandle_t handle, int mb, int nb, int nnzb,
-    const float *bsrValA, const int *bsrRowPtrA, const int *bsrColIndA,
+    const void *bsrValA, const int *bsrRowPtrA, const int *bsrColIndA,
     int rowBlockDimA, int colBlockDimA,
-    float *bscVal, int *bscColPtr, int *bscRowInd,
+    void *bscVal, int *bscColPtr, int *bscRowInd,
     int rowBlockDimC, int colBlockDimC,
     aclsparseAction_t copyValues, aclsparseIndexBase_t idxBase,
     aclsparseDirection_t dirA,
-    void *pBuffer);
-
-/**
- * @brief Query workspace size for aclsparseDgebsr2gebsc (double).
- */
-aclsparseStatus_t aclsparseDgebsr2gebsc_bufferSize(
-    aclsparseHandle_t handle, int mb, int nb, int nnzb,
-    const double *bsrValA, const int *bsrRowPtrA, const int *bsrColIndA,
-    int rowBlockDimA, int colBlockDimA,
-    aclsparseDirection_t dirA,
-    size_t *pBufferSizeInBytes);
-
-/**
- * @brief Convert GEBSR to GEBSC (double).
- */
-aclsparseStatus_t aclsparseDgebsr2gebsc(
-    aclsparseHandle_t handle, int mb, int nb, int nnzb,
-    const double *bsrValA, const int *bsrRowPtrA, const int *bsrColIndA,
-    int rowBlockDimA, int colBlockDimA,
-    double *bscVal, int *bscColPtr, int *bscRowInd,
-    int rowBlockDimC, int colBlockDimC,
-    aclsparseAction_t copyValues, aclsparseIndexBase_t idxBase,
-    aclsparseDirection_t dirA,
-    void *pBuffer);
-
-/**
- * @brief Query workspace size for aclsparseCgebsr2gebsc (complex float).
- */
-aclsparseStatus_t aclsparseCgebsr2gebsc_bufferSize(
-    aclsparseHandle_t handle, int mb, int nb, int nnzb,
-    const aclsparseComplex *bsrValA, const int *bsrRowPtrA, const int *bsrColIndA,
-    int rowBlockDimA, int colBlockDimA,
-    aclsparseDirection_t dirA,
-    size_t *pBufferSizeInBytes);
-
-/**
- * @brief Convert GEBSR to GEBSC (complex float).
- */
-aclsparseStatus_t aclsparseCgebsr2gebsc(
-    aclsparseHandle_t handle, int mb, int nb, int nnzb,
-    const aclsparseComplex *bsrValA, const int *bsrRowPtrA, const int *bsrColIndA,
-    int rowBlockDimA, int colBlockDimA,
-    aclsparseComplex *bscVal, int *bscColPtr, int *bscRowInd,
-    int rowBlockDimC, int colBlockDimC,
-    aclsparseAction_t copyValues, aclsparseIndexBase_t idxBase,
-    aclsparseDirection_t dirA,
-    void *pBuffer);
-
-/**
- * @brief Query workspace size for aclsparseZgebsr2gebsc (complex double).
- */
-aclsparseStatus_t aclsparseZgebsr2gebsc_bufferSize(
-    aclsparseHandle_t handle, int mb, int nb, int nnzb,
-    const aclsparseDoubleComplex *bsrValA, const int *bsrRowPtrA, const int *bsrColIndA,
-    int rowBlockDimA, int colBlockDimA,
-    aclsparseDirection_t dirA,
-    size_t *pBufferSizeInBytes);
-
-/**
- * @brief Convert GEBSR to GEBSC (complex double).
- */
-aclsparseStatus_t aclsparseZgebsr2gebsc(
-    aclsparseHandle_t handle, int mb, int nb, int nnzb,
-    const aclsparseDoubleComplex *bsrValA, const int *bsrRowPtrA, const int *bsrColIndA,
-    int rowBlockDimA, int colBlockDimA,
-    aclsparseDoubleComplex *bscVal, int *bscColPtr, int *bscRowInd,
-    int rowBlockDimC, int colBlockDimC,
-    aclsparseAction_t copyValues, aclsparseIndexBase_t idxBase,
-    aclsparseDirection_t dirA,
+    aclDataType valType,
     void *pBuffer);
 
 // ============================================================================
