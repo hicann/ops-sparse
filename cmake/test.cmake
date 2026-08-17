@@ -10,11 +10,11 @@
 
 if(DEFINED ENV{EAGER_LIBRARY_PATH} AND NOT "$ENV{EAGER_LIBRARY_PATH}" STREQUAL "")
     set(_ops_sparse_ascendcl_lib "$ENV{EAGER_LIBRARY_PATH}/libascendcl.so")
-    set(_ops_sparse_secc_lib "$ENV{EAGER_LIBRARY_PATH}/libc_sec.so")
+    set(_ops_sparse_libc_sec "$ENV{EAGER_LIBRARY_PATH}/libc_sec.so")
 else()
     set(ASCENDCL_PATH "${ASCEND_CANN_PACKAGE_PATH}/lib64" CACHE PATH "Directory containing libascendcl.so")
     set(_ops_sparse_ascendcl_lib "${ASCENDCL_PATH}/libascendcl.so")
-    set(_ops_sparse_secc_lib "${ASCENDCL_PATH}/libc_sec.so")
+    set(_ops_sparse_libc_sec "${ASCENDCL_PATH}/libc_sec.so")
 endif()
 
 # Register operator test from test/${operator}/${arch_dir}/${operator}_test.cpp.
@@ -58,7 +58,7 @@ function(ops_sparse_add_test operator link_lib)
     target_link_libraries(${target} PRIVATE
         ${link_lib}
         ${_ops_sparse_ascendcl_lib}
-        ${_ops_sparse_secc_lib}
+        ${_ops_sparse_libc_sec}
     )
 
     if(TEST_USE_EIGEN)
@@ -200,6 +200,7 @@ function(ops_sparse_add_gtest_tests operator link_lib)
     target_link_libraries(${target} PRIVATE
         ${link_lib}
         ${_ops_sparse_ascendcl_lib}
+        ${_ops_sparse_libc_sec}
         ${GTEST_LIBRARIES}
         pthread
     )

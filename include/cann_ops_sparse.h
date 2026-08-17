@@ -1890,6 +1890,180 @@ aclsparseStatus_t aclsparseXcsr2coo(aclsparseHandle_t handle,
                                    int32_t *cooRowInd,
                                     aclsparseIndexBase_t idxBase);
 
+// ============================================================================
+// Legacy API: aclsparseCsr2gebsr — CSR → GEBSR 格式转换
+// ============================================================================
+
+// --- Step 1: bufferSize (4 精度版本) ---
+
+/**
+ * @brief Query workspace size for CSR→GEBSR conversion (float32).
+ *
+ * @param handle            IN,  HOST,    aclsparse handle.
+ * @param dir               IN,  HOST,    block-internal layout (ROW or COLUMN).
+ * @param m                 IN,  HOST,    number of rows (>= 0).
+ * @param n                 IN,  HOST,    number of columns (>= 0).
+ * @param descrA            IN,  HOST,    matrix descriptor (type=GENERAL, indexBase=ZERO/ONE).
+ * @param csrValA           IN,  DEVICE,  CSR values (not read by bufferSize, may be nullptr).
+ * @param csrRowPtrA        IN,  DEVICE,  CSR row offsets (length m+1).
+ * @param csrColIndA        IN,  DEVICE,  CSR column indices (not read by bufferSize).
+ * @param rowBlockDim       IN,  HOST,    block row dimension (> 0).
+ * @param colBlockDim       IN,  HOST,    block column dimension (> 0).
+ * @param pBufferSizeInBytes OUT, HOST,   required workspace size in bytes.
+ * @return aclsparseStatus_t
+ */
+aclsparseStatus_t aclsparseScsr2gebsr_bufferSize(
+    aclsparseHandle_t handle, aclsparseDirection_t dir,
+    int m, int n, const aclsparseMatDescr_t descrA,
+    const float *csrValA, const int *csrRowPtrA, const int *csrColIndA,
+    int rowBlockDim, int colBlockDim, size_t *pBufferSizeInBytes);
+
+/**
+ * @brief Query workspace size for CSR→GEBSR conversion (float16).
+ *        Parameters identical to aclsparseScsr2gebsr_bufferSize except csrValA type.
+ * @return aclsparseStatus_t
+ */
+aclsparseStatus_t aclsparseHcsr2gebsr_bufferSize(
+    aclsparseHandle_t handle, aclsparseDirection_t dir,
+    int m, int n, const aclsparseMatDescr_t descrA,
+    const void *csrValA, const int *csrRowPtrA, const int *csrColIndA,
+    int rowBlockDim, int colBlockDim, size_t *pBufferSizeInBytes);
+
+/**
+ * @brief Query workspace size for CSR→GEBSR conversion (bfloat16).
+ *        Parameters identical to aclsparseScsr2gebsr_bufferSize except csrValA type.
+ * @return aclsparseStatus_t
+ */
+aclsparseStatus_t aclsparseBhcsr2gebsr_bufferSize(
+    aclsparseHandle_t handle, aclsparseDirection_t dir,
+    int m, int n, const aclsparseMatDescr_t descrA,
+    const void *csrValA, const int *csrRowPtrA, const int *csrColIndA,
+    int rowBlockDim, int colBlockDim, size_t *pBufferSizeInBytes);
+
+/**
+ * @brief Query workspace size for CSR→GEBSR conversion (int32).
+ *        Parameters identical to aclsparseScsr2gebsr_bufferSize except csrValA type.
+ * @return aclsparseStatus_t
+ */
+aclsparseStatus_t aclsparseIcsr2gebsr_bufferSize(
+    aclsparseHandle_t handle, aclsparseDirection_t dir,
+    int m, int n, const aclsparseMatDescr_t descrA,
+    const int *csrValA, const int *csrRowPtrA, const int *csrColIndA,
+    int rowBlockDim, int colBlockDim, size_t *pBufferSizeInBytes);
+
+// --- Step 2: Nnz (类型无关) ---
+
+/**
+ * @brief Compute bsrRowPtrC and nonzero block count (nnzb) for CSR→GEBSR.
+ *
+ * Asynchronous (on stream). Caller must sync before calling Convert.
+ * nnzTotalDevHostPtr is host pointer (HOST mode) or device pointer (DEVICE mode).
+ *
+ * @param handle             IN,  HOST,    aclsparse handle.
+ * @param dir                IN,  HOST,    block-internal layout (ROW or COLUMN).
+ * @param m                  IN,  HOST,    number of rows (>= 0).
+ * @param n                  IN,  HOST,    number of columns (>= 0).
+ * @param descrA             IN,  HOST,    input matrix descriptor.
+ * @param csrRowPtrA         IN,  DEVICE,  CSR row offsets (length m+1).
+ * @param csrColIndA         IN,  DEVICE,  CSR column indices (may be nullptr if nnz=0).
+ * @param descrC             IN,  HOST,    output matrix descriptor.
+ * @param bsrRowPtrC         OUT, DEVICE,  block row offsets (length mb+1).
+ * @param rowBlockDim        IN,  HOST,    block row dimension (> 0).
+ * @param colBlockDim        IN,  HOST,    block column dimension (> 0).
+ * @param nnzTotalDevHostPtr OUT, HOST/DEVICE, nonzero block count.
+ * @param pBuffer            IN,  DEVICE,  workspace (from bufferSize).
+ * @return aclsparseStatus_t
+ */
+aclsparseStatus_t aclsparseXcsr2gebsrNnz(
+    aclsparseHandle_t handle, aclsparseDirection_t dir,
+    int m, int n,
+    const aclsparseMatDescr_t descrA,
+    const int *csrRowPtrA, const int *csrColIndA,
+    const aclsparseMatDescr_t descrC,
+    int *bsrRowPtrC,
+    int rowBlockDim, int colBlockDim,
+    int *nnzTotalDevHostPtr,
+    void *pBuffer);
+
+// --- Step 3: Convert (4 精度版本) ---
+
+/**
+ * @brief Execute CSR→GEBSR conversion, filling bsrColIndC and bsrValC (float32).
+ *
+ * Depends on prior Nnz completion on stream. Caller must sync before calling.
+ *
+ * @param handle       IN,  HOST,    aclsparse handle.
+ * @param dir          IN,  HOST,    block-internal layout (ROW or COLUMN).
+ * @param m            IN,  HOST,    number of rows (>= 0).
+ * @param n            IN,  HOST,    number of columns (>= 0).
+ * @param descrA       IN,  HOST,    input matrix descriptor.
+ * @param csrValA      IN,  DEVICE,  CSR values (length nnz).
+ * @param csrRowPtrA   IN,  DEVICE,  CSR row offsets (length m+1).
+ * @param csrColIndA   IN,  DEVICE,  CSR column indices (length nnz).
+ * @param descrC       IN,  HOST,    output matrix descriptor.
+ * @param bsrValC      OUT, DEVICE,  GEBSR block values (length nnzb*rbd*cbd).
+ * @param bsrRowPtrC   IN/OUT, DEVICE, block row offsets (length mb+1, from Nnz).
+ * @param bsrColIndC   OUT, DEVICE,  block column indices (length nnzb).
+ * @param rowBlockDim  IN,  HOST,    block row dimension (> 0).
+ * @param colBlockDim  IN,  HOST,    block column dimension (> 0).
+ * @param pBuffer      IN,  DEVICE,  workspace (from bufferSize).
+ * @return aclsparseStatus_t
+ */
+aclsparseStatus_t aclsparseScsr2gebsr(
+    aclsparseHandle_t handle, aclsparseDirection_t dir,
+    int m, int n,
+    const aclsparseMatDescr_t descrA,
+    const float *csrValA, const int *csrRowPtrA, const int *csrColIndA,
+    const aclsparseMatDescr_t descrC,
+    float *bsrValC, int *bsrRowPtrC, int *bsrColIndC,
+    int rowBlockDim, int colBlockDim,
+    void *pBuffer);
+
+/**
+ * @brief Execute CSR→GEBSR conversion (float16).
+ *        Parameters identical to aclsparseScsr2gebsr except csrValA/bsrValC types.
+ * @return aclsparseStatus_t
+ */
+aclsparseStatus_t aclsparseHcsr2gebsr(
+    aclsparseHandle_t handle, aclsparseDirection_t dir,
+    int m, int n,
+    const aclsparseMatDescr_t descrA,
+    const void *csrValA, const int *csrRowPtrA, const int *csrColIndA,
+    const aclsparseMatDescr_t descrC,
+    void *bsrValC, int *bsrRowPtrC, int *bsrColIndC,
+    int rowBlockDim, int colBlockDim,
+    void *pBuffer);
+
+/**
+ * @brief Execute CSR→GEBSR conversion (bfloat16).
+ *        Parameters identical to aclsparseScsr2gebsr except csrValA/bsrValC types.
+ * @return aclsparseStatus_t
+ */
+aclsparseStatus_t aclsparseBhcsr2gebsr(
+    aclsparseHandle_t handle, aclsparseDirection_t dir,
+    int m, int n,
+    const aclsparseMatDescr_t descrA,
+    const void *csrValA, const int *csrRowPtrA, const int *csrColIndA,
+    const aclsparseMatDescr_t descrC,
+    void *bsrValC, int *bsrRowPtrC, int *bsrColIndC,
+    int rowBlockDim, int colBlockDim,
+    void *pBuffer);
+
+/**
+ * @brief Execute CSR→GEBSR conversion (int32).
+ *        Parameters identical to aclsparseScsr2gebsr except csrValA/bsrValC types.
+ * @return aclsparseStatus_t
+ */
+aclsparseStatus_t aclsparseIcsr2gebsr(
+    aclsparseHandle_t handle, aclsparseDirection_t dir,
+    int m, int n,
+    const aclsparseMatDescr_t descrA,
+    const int *csrValA, const int *csrRowPtrA, const int *csrColIndA,
+    const aclsparseMatDescr_t descrC,
+    int *bsrValC, int *bsrRowPtrC, int *bsrColIndC,
+    int rowBlockDim, int colBlockDim,
+    void *pBuffer);
+
 #ifdef __cplusplus
 }
 #endif
