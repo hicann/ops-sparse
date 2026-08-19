@@ -38,7 +38,7 @@
 │       ├── aclsparselt_mat_descriptor.cpp             # 矩阵描述符初始化/销毁实现
 │       ├── aclsparselt_matmul_descriptor_internal.h   # matmul 描述符内部定义
 │       ├── aclsparselt_matmul_descriptor.cpp          # matmul 描述符初始化/销毁实现
-│       └── README.md                                  # 接口规格文档（接口原型/参数/约束/调用示例）
+│       └── sparseLtDescriptor_README.md               # 接口规格文档（接口原型/参数/约束/调用示例）
 ├── include                                            # 对外头文件
 │   ├── cann_ops_sparse.h                              # aclsparse API 声明（纯 C，含公共类型定义）
 │   └── cann_ops_sparseLt.h                            # aclsparseLt API 声明（含库管理与描述符接口，include cann_ops_sparse.h）
