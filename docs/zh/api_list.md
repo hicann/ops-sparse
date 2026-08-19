@@ -1268,6 +1268,76 @@ aclsparseStatus_t aclsparseXcscsort(
 
 ---
 
+### aclsparseLtSpMMAPrune
+
+```cpp
+aclsparseStatus_t aclsparseLtSpMMAPrune(
+    aclsparseLtConstHandle_t handle,
+    aclsparseLtConstMatmulDescriptor_t* matmulDescr,
+    const void* d_in,
+    void* d_out,
+    aclsparseLtPruneAlg_t pruneAlg,
+    aclrtStream stream);
+```
+
+**功能**：对稠密矩阵 A 执行 2:4 结构化稀疏剪枝，将每 4 个元素（FP16/BF16/INT8）或每 2 个元素（FP32）中绝对值较小的元素置零，保留绝对值最大的元素，输出与 A 同型的稠密存储矩阵 A_pruned（被置零元素以 0 表示）。直接接收 Matmul 描述符，从中读取矩阵 A 的维度（m、k）、数据类型、order 与 opA 派生剪枝参数。算子异步启动，内部不执行 stream 同步，调用方如需读取结果须自行同步。对标 cuSPARSELt 的 `cusparseLtSpMMAPrune`。
+
+> 说明：本算子为软件实现的 2:4 结构化稀疏剪枝，不依赖 Ascend 950 硬件的 2:4 稀疏加速单元，仅通过 Vector API 完成剪枝计算。FP32 统一采用 1:2 模式（分组为 2、保留 1，即每 2 个元素中保留绝对值最大的 1 个），并非"4 选 2"；FP16/BF16/INT8 采用标准 2:4 模式（分组为 4、保留 2）。所有数据类型稀疏度均为 50%。
+
+**剪枝规则**：
+
+| 数据类型 | 分组大小 | 每组保留元素数 | 稀疏度 |
+|----------|---------|---------------|--------|
+| FP16（ACL_FLOAT16） | 4 | 2（保留绝对值最大的 2 个） | 50%（2:4） |
+| BF16（ACL_BF16） | 4 | 2（保留绝对值最大的 2 个） | 50%（2:4） |
+| INT8（ACL_INT8） | 4 | 2（保留绝对值最大的 2 个） | 50%（2:4） |
+| FP32（ACL_FLOAT） | 2 | 1（保留绝对值最大的 1 个） | 50%（1:2，等价 2:4 密度） |
+
+**产品支持情况**：
+
+| 产品 | 是否支持 |
+| :----------------------------------------- | :------:|
+| <term>Ascend 950PR/Ascend 950DT</term> | √ |
+| <term>Atlas A3 训练系列产品/Atlas A3 推理系列产品</term> | × |
+| <term>Atlas A2 训练系列产品/Atlas A2 推理系列产品</term> | × |
+
+> 依赖 CANN asc-devkit >= 9.1.0（`ASC_DEVKIT_MAJOR >= 9 && ASC_DEVKIT_MINOR >= 1`），低于该版本时编译与运行将跳过此算子。
+
+**参数说明**：
+
+- `handle`（IN）：HOST，aclsparseLt 库句柄的 const 指针。
+- `matmulDescr`（IN）：HOST，Matmul 操作描述符，算子从中读取矩阵 A 的维度（m、k）、数据类型、order 与 opA。
+- `d_in`（IN）：DEVICE，待剪枝的稠密矩阵 A 的指针，须 16 字节对齐，不可为 nullptr。
+- `d_out`（OUT）：DEVICE，剪枝结果 A_pruned 的指针，须 16 字节对齐，不可为 nullptr。支持 in-place（d_in == d_out）。
+- `pruneAlg`（IN）：HOST，剪枝算法，支持 `ACLSPARSELT_PRUNE_SPMMA_STRIP` 与 `ACLSPARSELT_PRUNE_SPMMA_TILE`。
+- `stream`（IN）：HOST，ACL 流，算子在此流上异步执行，可为 nullptr（表示使用默认流）。
+
+**约束说明**：
+
+- handle 不可为 nullptr，否则返回 `ACL_SPARSE_STATUS_HANDLE_IS_NULLPTR`。
+- matmulDescr 不可为 nullptr，且其绑定的矩阵 A 描述符（matA）不可为 nullptr，否则返回 `ACL_SPARSE_STATUS_INVALID_VALUE`。
+- stream 可为 nullptr（表示使用默认流）。
+- pruneAlg 支持 `ACLSPARSELT_PRUNE_SPMMA_STRIP` 与 `ACLSPARSELT_PRUNE_SPMMA_TILE`，其他值返回 `ACL_SPARSE_STATUS_NOT_SUPPORTED`。
+- 矩阵 A 的数据类型支持 `ACL_FLOAT`（FP32）/ `ACL_FLOAT16`（FP16）/ `ACL_BF16`（BF16）/ `ACL_INT8`（INT8），其他类型返回 `ACL_SPARSE_STATUS_NOT_SUPPORTED`。
+- d_in 与 d_out 须 16 字节对齐，否则返回 `ACL_SPARSE_STATUS_INVALID_VALUE`。
+- d_in 不可为 nullptr，否则返回 `ACL_SPARSE_STATUS_INVALID_VALUE`。
+- d_out 不可为 nullptr（无 workspace 回退路径），否则返回 `ACL_SPARSE_STATUS_INVALID_VALUE`。
+- 支持 in-place 操作：d_in 与 d_out 可指向同一 Device 内存。**例外**：转置路径（opA=TRANSPOSE 且 order=ROW，即沿列剪枝的转置场景）不支持 in-place，因为输出布局 (m,k) 与输入布局 (k,m) 不同，多核并行写入会覆盖后续 block 的读取区域；此时若 d_in == d_out 将返回 `ACL_SPARSE_STATUS_NOT_SUPPORTED`。
+- **K 维度对齐约束**：K 须满足结构化描述符初始化（`aclsparseLtStructuredDescriptorInit`）的对齐要求——FP32 为 8 的倍数、FP16/BF16 为 16 的倍数、INT8 为 32 的倍数。描述符初始化会强制校验并向上对齐 rows/cols，因此经 API 调用时 K 必然为对应分组大小的倍数。
+- **UB 容量约束**：沿行剪枝时，STRIP 需单行数据（k × elemSize）不超过单核 UB 容量，TILE 需 TS 行数据（TS × k × elemSize，TS=4 for FP16 / 2 for FP32，每行按 32 字节对齐）不超过单核 UB 容量；沿列剪枝时行块数据（k × elemSize × 16，每行按 32 字节对齐）须不超过单核 UB 容量。超限时返回 `ACL_SPARSE_STATUS_NOT_SUPPORTED`。
+- **异步执行**：算子异步启动，内部不执行 `aclrtSynchronizeStream`；调用方如需读取 d_out 结果，须自行同步 stream。
+- **内存布局**：矩阵 A 须以行主序存储（当前实现中 order 仅影响剪枝方向，不改变内存访问模式；不支持真实列主序存储的矩阵）。
+
+**返回值**：
+
+- `ACL_SPARSE_STATUS_SUCCESS`：成功
+- `ACL_SPARSE_STATUS_HANDLE_IS_NULLPTR`：handle 为 nullptr
+- `ACL_SPARSE_STATUS_INVALID_VALUE`：matmulDescr/matA/d_in/d_out 为 nullptr、数据指针未 16 字节对齐
+- `ACL_SPARSE_STATUS_NOT_SUPPORTED`：pruneAlg 非 STRIP/TILE、数据类型非 FP32/FP16/BF16/INT8、K 维度超过 UB 容量、转置路径 in-place（d_in == d_out）
+- 其他值：失败
+
+---
+
 ## 枚举说明
 
 ### aclsparseOperation_t

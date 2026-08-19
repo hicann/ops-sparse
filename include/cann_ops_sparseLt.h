@@ -19,6 +19,10 @@
 struct aclsparseLtContext;
 typedef struct aclsparseLtContext* aclsparseLtHandle_t;
 
+// aclsparseLtConstHandle_t: const pointer to handle (NVIDIA cusparseLtHandle_t*).
+// All public APIs accept the handle as this type per cuSPARSELt convention.
+typedef const aclsparseLtHandle_t* aclsparseLtConstHandle_t;
+
 /* ========== Descriptor Types ========== */
 
 // aclsparseLtMatDescriptor_t: opaque pointer for a matrix descriptor (dense / structured).
@@ -28,6 +32,9 @@ typedef struct aclsparseLtMatDescriptor* aclsparseLtMatDescriptor_t;
 // aclsparseLtMatmulDescriptor_t: opaque pointer for a matmul descriptor.
 struct aclsparseLtMatmulDescriptor;
 typedef struct aclsparseLtMatmulDescriptor* aclsparseLtMatmulDescriptor_t;
+
+typedef const struct aclsparseLtMatDescriptor* aclsparseLtConstMatDescriptor_t;
+typedef const struct aclsparseLtMatmulDescriptor* aclsparseLtConstMatmulDescriptor_t;
 
 // Structured sparsity mode.
 typedef enum aclsparseLtSparsity_t {
@@ -40,6 +47,14 @@ typedef enum aclsparseComputeType_t {
     ACL_SPARSE_COMPUTE_32F,
     ACL_SPARSE_COMPUTE_32I
 } aclsparseComputeType_t;
+
+/* ========== Prune algorithm (cuSPARSELt PruneAlg_t) ==========
+ * TILE and STRIP modes both implemented; see prune_host.cpp for details.
+ */
+typedef enum aclsparseLtPruneAlg_t {
+    ACLSPARSELT_PRUNE_SPMMA_TILE = 0,
+    ACLSPARSELT_PRUNE_SPMMA_STRIP = 1,
+} aclsparseLtPruneAlg_t;
 
 #ifdef __cplusplus
 extern "C" {
@@ -226,6 +241,34 @@ aclsparseStatus_t aclsparseLtMatmulDescriptorInit(
  *         ACL_SPARSE_STATUS_HANDLE_IS_NULLPTR matmulDescr 指针为空
  */
 aclsparseStatus_t aclsparseLtMatmulDescriptorDestroy(aclsparseLtMatmulDescriptor_t* matmulDescr);
+
+/* ========== 2:4 structured sparsity prune ==========
+ */
+
+/**
+ * @brief 对稠密矩阵执行 2:4 结构化稀疏剪枝（对齐 cuSPARSELt cusparseLtSpMMAPrune）。
+ *
+ * 直接接收 Matmul 描述符，从中读取矩阵 A 的维度（m、k）、数据类型、order 与 opA
+ * 派生剪枝参数。算子异步启动，内部不执行 stream 同步，调用方如需读取结果须自行同步。
+ *
+ * @param handle       IN,  HOST, aclsparseLt 库句柄的 const 指针，不可为 nullptr。
+ * @param matmulDescr  IN,  HOST, Matmul 操作描述符，算子从中读取矩阵 A 的维度/数据类型/order/opA。
+ * @param d_in         IN,  DEVICE, 待剪枝的稠密矩阵 A 的指针，须 16 字节对齐，不可为 nullptr。
+ * @param d_out        OUT, DEVICE, 剪枝结果 A_pruned 的指针，须 16 字节对齐，不可为 nullptr。支持 in-place（d_in == d_out）。
+ * @param pruneAlg     IN,  HOST, 剪枝算法（ACLSPARSELT_PRUNE_SPMMA_STRIP / ACLSPARSELT_PRUNE_SPMMA_TILE）。
+ * @param stream       IN,  HOST, ACL 流，算子在此流上异步执行，可为 nullptr（表示使用默认流）。
+ * @return ACL_SPARSE_STATUS_SUCCESS 成功
+ *         ACL_SPARSE_STATUS_HANDLE_IS_NULLPTR handle 为 nullptr
+ *         ACL_SPARSE_STATUS_INVALID_VALUE matmulDescr/matA/d_in/d_out 为 nullptr 或未 16 字节对齐
+ *         ACL_SPARSE_STATUS_NOT_SUPPORTED pruneAlg 非 STRIP/TILE、数据类型非 FP32/FP16/BF16/INT8、K 维度超过 UB 容量
+ */
+aclsparseStatus_t aclsparseLtSpMMAPrune(
+    aclsparseLtConstHandle_t handle,
+    aclsparseLtConstMatmulDescriptor_t* matmulDescr,
+    const void* d_in,
+    void* d_out,
+    aclsparseLtPruneAlg_t pruneAlg,
+    aclrtStream stream);
 
 #ifdef __cplusplus
 }
