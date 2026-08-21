@@ -33,6 +33,14 @@ typedef struct aclsparseLtMatDescriptor* aclsparseLtMatDescriptor_t;
 struct aclsparseLtMatmulDescriptor;
 typedef struct aclsparseLtMatmulDescriptor* aclsparseLtMatmulDescriptor_t;
 
+// aclsparseLtMatmulAlgSelection_t: opaque pointer for a matmul algorithm selection descriptor.
+struct aclsparseLtMatmulAlgSelection;
+typedef struct aclsparseLtMatmulAlgSelection* aclsparseLtMatmulAlgSelection_t;
+
+// aclsparseLtMatmulPlan_t: opaque pointer for a matmul execution plan.
+struct aclsparseLtMatmulPlan;
+typedef struct aclsparseLtMatmulPlan* aclsparseLtMatmulPlan_t;
+
 typedef const struct aclsparseLtMatDescriptor* aclsparseLtConstMatDescriptor_t;
 typedef const struct aclsparseLtMatmulDescriptor* aclsparseLtConstMatmulDescriptor_t;
 
@@ -47,6 +55,11 @@ typedef enum aclsparseComputeType_t {
     ACL_SPARSE_COMPUTE_32F,
     ACL_SPARSE_COMPUTE_32I
 } aclsparseComputeType_t;
+
+// Matmul algorithm mode (aligned with cusparseLtMatmulAlg_t).
+typedef enum aclsparseLtMatmulAlg_t {
+    ACL_SPARSE_LT_MATMUL_ALG_DEFAULT = 0   // default algorithm
+} aclsparseLtMatmulAlg_t;
 
 /* ========== Prune algorithm (cuSPARSELt PruneAlg_t) ==========
  * TILE and STRIP modes both implemented; see prune_host.cpp for details.
@@ -242,6 +255,79 @@ aclsparseStatus_t aclsparseLtMatmulDescriptorInit(
  */
 aclsparseStatus_t aclsparseLtMatmulDescriptorDestroy(aclsparseLtMatmulDescriptor_t* matmulDescr);
 
+/* ========== Matmul Algorithm Selection & Plan Management ========== */
+
+/**
+ * @brief 初始化 matmul 算法选择描述符。
+ *
+ * 在主机端分配并填充算法选择描述符结构体，记录算法模式及其关联的 matmul 描述符引用。
+ * matmulDescr 为非所有权引用，Destroy 时不会销毁它，用户须自行释放。
+ *
+ * @param handle        IN,  HOST, aclsparseLt 库句柄，不可为 nullptr。
+ * @param algSelection  OUT, HOST, 算法选择描述符输出。调用前 *algSelection 须为 nullptr。
+ * @param matmulDescr   IN,  HOST, matmul 描述符引用，不可为 nullptr 且须已初始化（*matmulDescr 非 nullptr）。
+ * @param alg           IN,  HOST, 算法模式（当前仅支持 ACL_SPARSE_LT_MATMUL_ALG_DEFAULT）。
+ * @return ACL_SPARSE_STATUS_SUCCESS 成功
+ *         ACL_SPARSE_STATUS_HANDLE_IS_NULLPTR handle 指针为空
+ *         ACL_SPARSE_STATUS_INVALID_VALUE algSelection 为空、*algSelection 非空、matmulDescr 为空或未初始化、alg 非法
+ *         ACL_SPARSE_STATUS_ALLOC_FAILED 内存分配失败
+ */
+aclsparseStatus_t aclsparseLtMatmulAlgSelectionInit(
+    const aclsparseLtHandle_t*             handle,
+    aclsparseLtMatmulAlgSelection_t*       algSelection,
+    const aclsparseLtMatmulDescriptor_t*   matmulDescr,
+    aclsparseLtMatmulAlg_t                 alg);
+
+/**
+ * @brief 销毁 matmul 算法选择描述符，释放其占用的主机内存。
+ *
+ * 注意：本接口不销毁 matmulDescr（非所有权引用），用户须自行调用 aclsparseLtMatmulDescriptorDestroy 释放。
+ *
+ * @param algSelection INOUT, HOST, 指向要销毁的算法选择描述符的指针。
+ *                     若指针本身为 nullptr 则返回 HANDLE_IS_NULLPTR；
+ *                     若 *algSelection 为 nullptr 则视为空操作，返回 SUCCESS。
+ *                     销毁成功后 *algSelection 被置为 nullptr。
+ * @return ACL_SPARSE_STATUS_SUCCESS 成功
+ *         ACL_SPARSE_STATUS_HANDLE_IS_NULLPTR algSelection 指针为空
+ */
+aclsparseStatus_t aclsparseLtMatmulAlgSelectionDestroy(aclsparseLtMatmulAlgSelection_t* algSelection);
+
+/**
+ * @brief 初始化 matmul 执行计划。
+ *
+ * 在主机端分配并填充 plan 结构体，绑定 matmul 描述符与算法选择描述符，作为后续 matmul 执行的规划对象。
+ * matmulDescr 与 algSelection 均为非所有权引用，Destroy 时不会销毁它们，用户须自行释放。
+ *
+ * @param handle        IN,  HOST, aclsparseLt 库句柄，不可为 nullptr。
+ * @param plan          OUT, HOST, 执行计划输出。调用前 *plan 须为 nullptr。
+ * @param matmulDescr   IN,  HOST, matmul 描述符引用，不可为 nullptr 且须已初始化（*matmulDescr 非 nullptr）。
+ * @param algSelection  IN,  HOST, 算法选择描述符引用，不可为 nullptr 且须已初始化（*algSelection 非 nullptr）。
+ * @return ACL_SPARSE_STATUS_SUCCESS 成功
+ *         ACL_SPARSE_STATUS_HANDLE_IS_NULLPTR handle 指针为空
+ *         ACL_SPARSE_STATUS_INVALID_VALUE plan 为空、*plan 非空、matmulDescr 或 algSelection 为空或未初始化
+ *         ACL_SPARSE_STATUS_ALLOC_FAILED 内存分配失败
+ */
+aclsparseStatus_t aclsparseLtMatmulPlanInit(
+    const aclsparseLtHandle_t*             handle,
+    aclsparseLtMatmulPlan_t*               plan,
+    const aclsparseLtMatmulDescriptor_t*   matmulDescr,
+    const aclsparseLtMatmulAlgSelection_t* algSelection);
+
+/**
+ * @brief 销毁 matmul 执行计划，释放其占用的主机内存。
+ *
+ * 注意：本接口不销毁 matmulDescr 和 algSelection（非所有权引用），用户须自行调用对应 Destroy 释放。
+ * 生命周期约束：plan 须在 algSelection 与 matmul 描述符之前销毁。
+ *
+ * @param plan INOUT, HOST, 指向要销毁的执行计划的指针。
+ *             若指针本身为 nullptr 则返回 HANDLE_IS_NULLPTR；
+ *             若 *plan 为 nullptr 则视为空操作，返回 SUCCESS。
+ *             销毁成功后 *plan 被置为 nullptr。
+ * @return ACL_SPARSE_STATUS_SUCCESS 成功
+ *         ACL_SPARSE_STATUS_HANDLE_IS_NULLPTR plan 指针为空
+ */
+aclsparseStatus_t aclsparseLtMatmulPlanDestroy(aclsparseLtMatmulPlan_t* plan);
+
 /* ========== 2:4 structured sparsity prune ==========
  */
 
@@ -274,4 +360,4 @@ aclsparseStatus_t aclsparseLtSpMMAPrune(
 }
 #endif
 
-#endif
+#endif // CANN_OPS_SPARSELT_H_
