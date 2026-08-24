@@ -14,6 +14,7 @@
 #include <cstdint>
 #include <cstring>
 #include <iostream>
+#include <limits>
 #include <stdexcept>
 #include <vector>
 
@@ -21,6 +22,19 @@
 #include "sparse_test.h"
 
 namespace sparse_test {
+
+// Shared overflow-safe element count for interleaved-batch buffers (issue #146).
+inline size_t CheckedInterleavedBatchTotal(int m, int batchCount, const char *tag)
+{
+    if (m <= 0 || batchCount <= 0) {
+        return 0;
+    }
+    const int64_t total64 = static_cast<int64_t>(m) * static_cast<int64_t>(batchCount);
+    if (total64 > static_cast<int64_t>(std::numeric_limits<size_t>::max() / sizeof(float))) {
+        throw std::overflow_error(std::string(tag) + ": m * batchCount overflows");
+    }
+    return static_cast<size_t>(total64);
+}
 
 /**
  * NPU wrapper for aclsparseSgtsvInterleavedBatch (Legacy API, no descriptors).
@@ -46,18 +60,17 @@ inline std::vector<float> GtsvInterleavedBatchNpu(
     const std::vector<float>& xIn,   // b (right-hand side)
     int batchCount)
 {
-    int total = m * batchCount;
+    const size_t total = CheckedInterleavedBatchTotal(m, batchCount, "GtsvInterleavedBatchNpu");
+    if (total == 0) {
+        return {};
+    }
     std::vector<float> xOut(total, 0.0f);
-    if (m <= 0 || batchCount <= 0) return xOut;
 
-    // 1. Host-to-Device copies (RAII manages device memory)
-    auto dDl = DeviceBuffer::copyFrom(dl.data(),  total * sizeof(float));
-    auto dD  = DeviceBuffer::copyFrom(d.data(),   total * sizeof(float));
-    auto dDu = DeviceBuffer::copyFrom(du.data(),  total * sizeof(float));
-    // Copy xIn (b) as initial right-hand side; will be overwritten with solution
-    auto dX  = DeviceBuffer::copyFrom(xIn.data(), total * sizeof(float));
+    auto dDl = DeviceBuffer::copyFrom(dl.data(), total * sizeof(float));
+    auto dD = DeviceBuffer::copyFrom(d.data(), total * sizeof(float));
+    auto dDu = DeviceBuffer::copyFrom(du.data(), total * sizeof(float));
+    auto dX = DeviceBuffer::copyFrom(xIn.data(), total * sizeof(float));
 
-    // 2. Query workspace buffer size (pass device pointers to match API signature)
     size_t bufferSize = 0;
     auto ret = aclsparseSgtsvInterleavedBatch_bufferSizeExt(
         handle, algo, m,
@@ -72,13 +85,11 @@ inline std::vector<float> GtsvInterleavedBatchNpu(
             + std::to_string(ret));
     }
 
-    // 3. Allocate workspace (128-byte alignment by aclrtMalloc)
     DeviceBuffer dBuffer;
     if (bufferSize > 0) {
         dBuffer = DeviceBuffer::alloc(bufferSize);
     }
 
-    // 4. Call the GTSV solver
     ret = aclsparseSgtsvInterleavedBatch(
         handle, algo, m,
         static_cast<float*>(dDl.get()),
@@ -93,7 +104,6 @@ inline std::vector<float> GtsvInterleavedBatchNpu(
             + std::to_string(ret));
     }
 
-    // 5. Stream synchronization
     auto aclRet = aclrtSynchronizeStream(stream);
     if (aclRet != ACL_SUCCESS) {
         throw std::runtime_error(
@@ -101,9 +111,7 @@ inline std::vector<float> GtsvInterleavedBatchNpu(
             + std::to_string(aclRet));
     }
 
-    // 6. Device-to-Host copy of the solution
     dX.copyToHost(xOut.data(), total * sizeof(float));
-
     return xOut;
 }
 
@@ -114,8 +122,12 @@ inline std::vector<float> GtsvInterleavedBatchNpu(
 inline size_t GtsvInterleavedBatchBufferSizeExt(
     aclsparseHandle_t handle, int algo, int m, int batchCount)
 {
+    const size_t total = CheckedInterleavedBatchTotal(
+        m, batchCount, "GtsvInterleavedBatchBufferSizeExt");
+    if (total == 0) {
+        return 0;
+    }
     size_t bufferSize = 0;
-    int total = m * batchCount;
     std::vector<float> dummy(total, 1.0f);
     auto dDummy = DeviceBuffer::copyFrom(dummy.data(), total * sizeof(float));
 

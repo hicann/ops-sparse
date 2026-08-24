@@ -13,7 +13,7 @@
 # 见根 CMakeLists 的 SOC_VERSION -> NPU_ARCH 映射），故统一编译 arch22 测试。
 if(SOC_VERSION_LOWER MATCHES "^ascend950")
     add_executable(spmm_test
-        spmm_test.cpp
+        arch35/spmm_test.cpp
     )
     target_include_directories(spmm_test PRIVATE
         ${CMAKE_SOURCE_DIR}/include

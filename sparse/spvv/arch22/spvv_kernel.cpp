@@ -169,7 +169,12 @@ private:
         uint32_t n = (nnzPos + ALIGN_ELEM > tn) ? (tn - nnzPos) : ALIGN_ELEM;
         for (uint32_t i = 0; i < n; i++) {
             int32_t idx = idxUb.GetValue(nnzPos + i) / static_cast<int32_t>(InputSz);
-            yGathered.SetValue(nnzPos + i, yGm_.GetValue(idx));
+            // Range-check before yGm_ gather (issue #151).
+            if (idx < 0 || static_cast<uint32_t>(idx) >= yLen_) {
+                yGathered.SetValue(nnzPos + i, static_cast<InputT>(0));
+            } else {
+                yGathered.SetValue(nnzPos + i, yGm_.GetValue(idx));
+            }
         }
         SetFlag<HardEvent::S_V>(EVENT_ID0);
         WaitFlag<HardEvent::S_V>(EVENT_ID0);

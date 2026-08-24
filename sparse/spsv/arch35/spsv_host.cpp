@@ -496,6 +496,26 @@ static aclsparseStatus_t LaunchSpSVAnalysisKernel(
     return ACL_SPARSE_STATUS_SUCCESS;
 }
 
+// Shared null-check for SpSV dense vector values (Launch + ZeroNnz paths).
+static aclsparseStatus_t ValidateSpSVDenseVecValues(
+    aclsparseConstDnVecDescr_t vecX, aclsparseDnVecDescr_t vecY,
+    struct aclsparseDnVecDescr **vecXOut, struct aclsparseDnVecDescr **vecYOut)
+{
+    auto *vecXInner = spsv::ToVecInner(vecX);
+    auto *vecYInner = spsv::ToVecInnerMut(vecY);
+    if (vecXInner->values == nullptr) {
+        OP_LOGE("aclsparseSpSV_solve", "vecX.values is nullptr");
+        return ACL_SPARSE_STATUS_INVALID_VALUE;
+    }
+    if (vecYInner->values == nullptr) {
+        OP_LOGE("aclsparseSpSV_solve", "vecY.values is nullptr");
+        return ACL_SPARSE_STATUS_INVALID_VALUE;
+    }
+    *vecXOut = vecXInner;
+    *vecYOut = vecYInner;
+    return ACL_SPARSE_STATUS_SUCCESS;
+}
+
 static aclsparseStatus_t LaunchSpSVSolveKernel(
     aclsparseHandle_t handle,
     aclsparseOperation_t opA,
@@ -530,8 +550,12 @@ static aclsparseStatus_t LaunchSpSVSolveKernel(
         values = reinterpret_cast<uint8_t *>(spsvDescr->currentValues);
     }
 
-    auto *vecXInner = spsv::ToVecInner(vecX);
-    auto *vecYInner = spsv::ToVecInnerMut(vecY);
+    struct aclsparseDnVecDescr *vecXInner = nullptr;
+    struct aclsparseDnVecDescr *vecYInner = nullptr;
+    aclsparseStatus_t vecSt = ValidateSpSVDenseVecValues(vecX, vecY, &vecXInner, &vecYInner);
+    if (vecSt != ACL_SPARSE_STATUS_SUCCESS) {
+        return vecSt;
+    }
 
     uint8_t *vecXPtr = reinterpret_cast<uint8_t *>(vecXInner->values);
     uint8_t *vecYPtr = reinterpret_cast<uint8_t *>(vecYInner->values);
@@ -564,8 +588,12 @@ static aclsparseStatus_t HandleSolveZeroNnz(
         return ACL_SPARSE_STATUS_INVALID_VALUE;
     }
     auto *h = spsv::ToInternalHandle(handle);
-    auto *vecXInner = spsv::ToVecInner(vecX);
-    auto *vecYInner = spsv::ToVecInnerMut(vecY);
+    struct aclsparseDnVecDescr *vecXInner = nullptr;
+    struct aclsparseDnVecDescr *vecYInner = nullptr;
+    aclsparseStatus_t vecSt = ValidateSpSVDenseVecValues(vecX, vecY, &vecXInner, &vecYInner);
+    if (vecSt != ACL_SPARSE_STATUS_SUCCESS) {
+        return vecSt;
+    }
     SpsvTilingData tiling{};
     tiling.m = spsvDescr->cachedM;
     tiling.nthreads = spsv::kSimtMaxThreads;

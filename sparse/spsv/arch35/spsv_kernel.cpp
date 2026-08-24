@@ -171,10 +171,13 @@ __simt_callee__ inline void SpsvBuildCsrFromCooParallel(SPSV_COO_BUILD_PARAMS(Ro
     for (int64_t p = static_cast<int64_t>(threadIdx.x);
          p < nnz;
          p += static_cast<int64_t>(blockDim.x)) {
-        int32_t r = static_cast<int32_t>(cooRowInd[p]) - idxBase;
-        if (r < 0 || r >= static_cast<int32_t>(m)) {
+        // Bounds check in original type first to avoid int64-to-int32 truncation
+        // bypassing the range check (issues #149/#150).
+        RowPtrT rawR = cooRowInd[p] - static_cast<RowPtrT>(idxBase);
+        if (rawR < 0 || rawR >= static_cast<RowPtrT>(m)) {
             continue;
         }
+        int32_t r = static_cast<int32_t>(rawR);
         asc_atomic_add(&wsRowPtr[r + 1], 1);
     }
     asc_syncthreads();
@@ -189,10 +192,11 @@ __simt_callee__ inline void SpsvBuildCsrFromCooParallel(SPSV_COO_BUILD_PARAMS(Ro
     for (int64_t p = static_cast<int64_t>(threadIdx.x);
          p < nnz;
          p += static_cast<int64_t>(blockDim.x)) {
-        int32_t row = static_cast<int32_t>(cooRowInd[p]) - idxBase;
-        if (row < 0 || row >= static_cast<int32_t>(m)) {
+        RowPtrT rawR = cooRowInd[p] - static_cast<RowPtrT>(idxBase);
+        if (rawR < 0 || rawR >= static_cast<RowPtrT>(m)) {
             continue;
         }
+        int32_t row = static_cast<int32_t>(rawR);
         int32_t pos = static_cast<int32_t>(wsRowPtr[row]) +
                       asc_atomic_add(&scratch[row], 1);
         // Write 0-based column index to workspace CSR.

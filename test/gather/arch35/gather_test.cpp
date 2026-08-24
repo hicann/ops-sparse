@@ -92,8 +92,9 @@ TEST_P(GatherTest, Gather)
     // bf16 type don't exist on host
     match_case(ACL_FLOAT, float{}, ACL_SPARSE_INDEX_32I, int32_t{});
     match_case(ACL_FLOAT, float{}, ACL_SPARSE_INDEX_64I, int64_t{});
-    match_case(ACL_FLOAT16, _Float16{}, ACL_SPARSE_INDEX_32I, int32_t{});
-    match_case(ACL_FLOAT16, _Float16{}, ACL_SPARSE_INDEX_64I, int64_t{});
+    // Host GCC may not provide _Float16; use __fp16 for ACL_FLOAT16 cases.
+    match_case(ACL_FLOAT16, __fp16{}, ACL_SPARSE_INDEX_32I, int32_t{});
+    match_case(ACL_FLOAT16, __fp16{}, ACL_SPARSE_INDEX_64I, int64_t{});
     match_case(ACL_DOUBLE, double{}, ACL_SPARSE_INDEX_32I, int32_t{});
     match_case(ACL_DOUBLE, double{}, ACL_SPARSE_INDEX_64I, int64_t{});
     ASSERT_EQ(match_count, 1);

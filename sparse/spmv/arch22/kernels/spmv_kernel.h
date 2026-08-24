@@ -113,7 +113,14 @@ __aicore__ inline void SpmvKernel<CompT, ValT, OutT>::Init(
     // 计算当前核处理行中的最大行长（tile 大小依据）
     this->tileLength = 0;
     for (int i = 0; i < this->blockRowNum; i++) {
-        uint32_t rowLength = csrRowPtrGm(i + 1) - csrRowPtrGm(i);
+        // Guard against non-monotonic rowPtr: negative (int32) length must not
+        // wrap to a huge uint32_t and blow up InitBuffer (issues #147/#148).
+        int32_t rowStart = csrRowPtrGm(i);
+        int32_t rowEnd = csrRowPtrGm(i + 1);
+        if (rowEnd < rowStart) {
+            continue;
+        }
+        uint32_t rowLength = static_cast<uint32_t>(rowEnd - rowStart);
         if (rowLength > this->tileLength)
             this->tileLength = rowLength;
     }
@@ -421,7 +428,13 @@ __aicore__ inline void SpmvKernelTrans<CompT, ValT, OutT>::Init(
 
         this->tileLength = 0;
         for (int i = 0; i < this->blockRowNum; i++) {
-            uint32_t rowLength = csrRowPtrGm(i + 1) - csrRowPtrGm(i);
+            // Guard against non-monotonic rowPtr (issues #147/#148).
+            int32_t rowStart = csrRowPtrGm(i);
+            int32_t rowEnd = csrRowPtrGm(i + 1);
+            if (rowEnd < rowStart) {
+                continue;
+            }
+            uint32_t rowLength = static_cast<uint32_t>(rowEnd - rowStart);
             if (rowLength > this->tileLength)
                 this->tileLength = rowLength;
         }

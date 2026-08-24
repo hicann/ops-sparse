@@ -44,6 +44,47 @@
         }                                                           \
     } while (0)
 
+// RAII for device buffers + sparse descriptors so CHECK_* early-returns
+// still free already-allocated resources (issues #157/#161).
+struct SpvvDeviceResources {
+    void *dIndices = nullptr;
+    void *dXValues = nullptr;
+    void *dYValues = nullptr;
+    void *dResult = nullptr;
+    aclsparseHandle_t handle = nullptr;
+    aclsparseSpVecDescr_t spVecX = nullptr;
+    aclsparseDnVecDescr_t dnVecY = nullptr;
+
+    ~SpvvDeviceResources()
+    {
+        if (spVecX != nullptr) {
+            aclsparseDestroySpVec(spVecX);
+        }
+        if (dnVecY != nullptr) {
+            aclsparseDestroyDnVec(dnVecY);
+        }
+        if (handle != nullptr) {
+            aclsparseDestroy(handle);
+        }
+        if (dIndices != nullptr) {
+            aclrtFree(dIndices);
+        }
+        if (dXValues != nullptr) {
+            aclrtFree(dXValues);
+        }
+        if (dYValues != nullptr) {
+            aclrtFree(dYValues);
+        }
+        if (dResult != nullptr) {
+            aclrtFree(dResult);
+        }
+    }
+
+    SpvvDeviceResources() = default;
+    SpvvDeviceResources(const SpvvDeviceResources &) = delete;
+    SpvvDeviceResources &operator=(const SpvvDeviceResources &) = delete;
+};
+
 // ---------------------------------------------------------------------------
 // Data generation helpers
 // ---------------------------------------------------------------------------
@@ -240,38 +281,35 @@ static bool run_spvv_once(aclDataType dtype, uint32_t nnz, uint32_t yLen, const 
     }
 
     size_t elemSz = isFp16 ? sizeof(uint16_t) : sizeof(float);
-    void *dIndices = nullptr, *dXValues = nullptr, *dYValues = nullptr, *dResult = nullptr;
-    CHECK_ACL(aclrtMalloc(&dIndices, std::max<size_t>(nnz * sizeof(int32_t), 4), ACL_MEM_MALLOC_HUGE_FIRST));
-    CHECK_ACL(aclrtMalloc(&dXValues, std::max<size_t>(nnz * elemSz, 4), ACL_MEM_MALLOC_HUGE_FIRST));
-    CHECK_ACL(aclrtMalloc(&dYValues, yLen * elemSz, ACL_MEM_MALLOC_HUGE_FIRST));
-    CHECK_ACL(aclrtMalloc(&dResult, sizeof(float), ACL_MEM_MALLOC_HUGE_FIRST));
+    SpvvDeviceResources res;
+    CHECK_ACL(aclrtMalloc(&res.dIndices, std::max<size_t>(nnz * sizeof(int32_t), 4), ACL_MEM_MALLOC_HUGE_FIRST));
+    CHECK_ACL(aclrtMalloc(&res.dXValues, std::max<size_t>(nnz * elemSz, 4), ACL_MEM_MALLOC_HUGE_FIRST));
+    CHECK_ACL(aclrtMalloc(&res.dYValues, yLen * elemSz, ACL_MEM_MALLOC_HUGE_FIRST));
+    CHECK_ACL(aclrtMalloc(&res.dResult, sizeof(float), ACL_MEM_MALLOC_HUGE_FIRST));
 
     if (nnz > 0) {
-        CHECK_ACL(aclrtMemcpy(dIndices, nnz * sizeof(int32_t), indices.data(),
+        CHECK_ACL(aclrtMemcpy(res.dIndices, nnz * sizeof(int32_t), indices.data(),
             nnz * sizeof(int32_t), ACL_MEMCPY_HOST_TO_DEVICE));
         const void *xv = isFp16 ? (const void *)xValuesFp16.data() : (const void *)xValuesFp32.data();
-        CHECK_ACL(aclrtMemcpy(dXValues, nnz * elemSz, xv, nnz * elemSz, ACL_MEMCPY_HOST_TO_DEVICE));
+        CHECK_ACL(aclrtMemcpy(res.dXValues, nnz * elemSz, xv, nnz * elemSz, ACL_MEMCPY_HOST_TO_DEVICE));
     }
     const void *yv = isFp16 ? (const void *)yValuesFp16.data() : (const void *)yValuesFp32.data();
-    CHECK_ACL(aclrtMemcpy(dYValues, yLen * elemSz, yv, yLen * elemSz, ACL_MEMCPY_HOST_TO_DEVICE));
+    CHECK_ACL(aclrtMemcpy(res.dYValues, yLen * elemSz, yv, yLen * elemSz, ACL_MEMCPY_HOST_TO_DEVICE));
 
-    aclsparseHandle_t handle = nullptr;
-    aclsparseSpVecDescr_t spVecX = nullptr;
-    aclsparseDnVecDescr_t dnVecY = nullptr;
-    CHECK_ACL_SPARSE(aclsparseCreate(&handle));
-    CHECK_ACL_SPARSE(aclsparseCreateSpVec(&spVecX, yLen, nnz, dIndices, dXValues,
+    CHECK_ACL_SPARSE(aclsparseCreate(&res.handle));
+    CHECK_ACL_SPARSE(aclsparseCreateSpVec(&res.spVecX, yLen, nnz, res.dIndices, res.dXValues,
         ACL_SPARSE_INDEX_32I, ACL_SPARSE_INDEX_BASE_ZERO, dtype));
-    CHECK_ACL_SPARSE(aclsparseCreateDnVec(&dnVecY, yLen, dYValues, dtype));
+    CHECK_ACL_SPARSE(aclsparseCreateDnVec(&res.dnVecY, yLen, res.dYValues, dtype));
 
-    aclsparseStatus_t st = run_spvv(handle, ACL_SPARSE_OP_NON_TRANSPOSE,
-        spVecX, dnVecY, dResult, ACL_FLOAT);
+    aclsparseStatus_t st = run_spvv(res.handle, ACL_SPARSE_OP_NON_TRANSPOSE,
+        res.spVecX, res.dnVecY, res.dResult, ACL_FLOAT);
     bool pass = true;
     if (st != ACL_SPARSE_STATUS_SUCCESS) {
         fprintf(stderr, "aclsparseSpvv %s [%s] failed: %d\n", dtName, tag, st);
         pass = false;
     } else {
         float hResult = 0.0f;
-        CHECK_ACL(aclrtMemcpy(&hResult, sizeof(float), dResult, sizeof(float),
+        CHECK_ACL(aclrtMemcpy(&hResult, sizeof(float), res.dResult, sizeof(float),
             ACL_MEMCPY_DEVICE_TO_HOST));
         float tol = (isFp16 ? 1e-2f : 1e-3f) * std::max(1.0f, std::abs(golden));
         pass = std::abs(hResult - golden) < tol;
@@ -279,14 +317,6 @@ static bool run_spvv_once(aclDataType dtype, uint32_t nnz, uint32_t yLen, const 
                dtName, tag, nnz, yLen, golden, hResult, std::abs(hResult - golden),
                pass ? "PASS" : "FAIL");
     }
-
-    CHECK_ACL_SPARSE(aclsparseDestroySpVec(spVecX));
-    CHECK_ACL_SPARSE(aclsparseDestroyDnVec(dnVecY));
-    CHECK_ACL_SPARSE(aclsparseDestroy(handle));
-    CHECK_ACL(aclrtFree(dIndices));
-    CHECK_ACL(aclrtFree(dXValues));
-    CHECK_ACL(aclrtFree(dYValues));
-    CHECK_ACL(aclrtFree(dResult));
 
     return pass;
 }
@@ -407,31 +437,28 @@ static bool test_spvv_benchmark()
                 golden = compute_golden_fp32(indices, xValuesFp32, yValuesFp32);
             }
 
-            void *dIndices = nullptr, *dXValues = nullptr, *dYValues = nullptr, *dResult = nullptr;
-            CHECK_ACL(aclrtMalloc(&dIndices, std::max<size_t>(nnz * sizeof(int32_t), 4), ACL_MEM_MALLOC_HUGE_FIRST));
-            CHECK_ACL(aclrtMalloc(&dXValues, std::max<size_t>(nnz * elemSz, 4), ACL_MEM_MALLOC_HUGE_FIRST));
-            CHECK_ACL(aclrtMalloc(&dYValues, yLen * elemSz, ACL_MEM_MALLOC_HUGE_FIRST));
-            CHECK_ACL(aclrtMalloc(&dResult, sizeof(float), ACL_MEM_MALLOC_HUGE_FIRST));
+            SpvvDeviceResources res;
+            CHECK_ACL(aclrtMalloc(&res.dIndices, std::max<size_t>(nnz * sizeof(int32_t), 4), ACL_MEM_MALLOC_HUGE_FIRST));
+            CHECK_ACL(aclrtMalloc(&res.dXValues, std::max<size_t>(nnz * elemSz, 4), ACL_MEM_MALLOC_HUGE_FIRST));
+            CHECK_ACL(aclrtMalloc(&res.dYValues, yLen * elemSz, ACL_MEM_MALLOC_HUGE_FIRST));
+            CHECK_ACL(aclrtMalloc(&res.dResult, sizeof(float), ACL_MEM_MALLOC_HUGE_FIRST));
 
             if (nnz > 0) {
-                CHECK_ACL(aclrtMemcpy(dIndices, nnz * sizeof(int32_t), indices.data(),
+                CHECK_ACL(aclrtMemcpy(res.dIndices, nnz * sizeof(int32_t), indices.data(),
                     nnz * sizeof(int32_t), ACL_MEMCPY_HOST_TO_DEVICE));
                 const void *xv = isFp16 ? (const void *)xValuesFp16.data() : (const void *)xValuesFp32.data();
-                CHECK_ACL(aclrtMemcpy(dXValues, nnz * elemSz, xv, nnz * elemSz, ACL_MEMCPY_HOST_TO_DEVICE));
+                CHECK_ACL(aclrtMemcpy(res.dXValues, nnz * elemSz, xv, nnz * elemSz, ACL_MEMCPY_HOST_TO_DEVICE));
             }
             const void *yv = isFp16 ? (const void *)yValuesFp16.data() : (const void *)yValuesFp32.data();
-            CHECK_ACL(aclrtMemcpy(dYValues, yLen * elemSz, yv, yLen * elemSz, ACL_MEMCPY_HOST_TO_DEVICE));
+            CHECK_ACL(aclrtMemcpy(res.dYValues, yLen * elemSz, yv, yLen * elemSz, ACL_MEMCPY_HOST_TO_DEVICE));
 
-            aclsparseHandle_t handle = nullptr;
-            aclsparseSpVecDescr_t spVecX = nullptr;
-            aclsparseDnVecDescr_t dnVecY = nullptr;
-            CHECK_ACL_SPARSE(aclsparseCreate(&handle));
-            CHECK_ACL_SPARSE(aclsparseCreateSpVec(&spVecX, yLen, nnz, dIndices, dXValues,
+            CHECK_ACL_SPARSE(aclsparseCreate(&res.handle));
+            CHECK_ACL_SPARSE(aclsparseCreateSpVec(&res.spVecX, yLen, nnz, res.dIndices, res.dXValues,
                 ACL_SPARSE_INDEX_32I, ACL_SPARSE_INDEX_BASE_ZERO, dtype));
-            CHECK_ACL_SPARSE(aclsparseCreateDnVec(&dnVecY, yLen, dYValues, dtype));
+            CHECK_ACL_SPARSE(aclsparseCreateDnVec(&res.dnVecY, yLen, res.dYValues, dtype));
 
             for (int w = 0; w < 5; w++) {
-                aclsparseSpvv(handle, ACL_SPARSE_OP_NON_TRANSPOSE, spVecX, dnVecY, dResult, ACL_FLOAT);
+                aclsparseSpvv(res.handle, ACL_SPARSE_OP_NON_TRANSPOSE, res.spVecX, res.dnVecY, res.dResult, ACL_FLOAT);
             }
             CHECK_ACL(aclrtSynchronizeDevice());
 
@@ -443,7 +470,7 @@ static bool test_spvv_benchmark()
             aclrtCreateEvent(&stopEvt);
             for (int iter = 0; iter < N_ITERS; iter++) {
                 aclrtRecordEvent(startEvt, nullptr);
-                aclsparseSpvv(handle, ACL_SPARSE_OP_NON_TRANSPOSE, spVecX, dnVecY, dResult, ACL_FLOAT);
+                aclsparseSpvv(res.handle, ACL_SPARSE_OP_NON_TRANSPOSE, res.spVecX, res.dnVecY, res.dResult, ACL_FLOAT);
                 aclrtRecordEvent(stopEvt, nullptr);
                 aclrtSynchronizeEvent(stopEvt);
                 float ms = 0.0f;
@@ -462,7 +489,7 @@ static bool test_spvv_benchmark()
 
             CHECK_ACL(aclrtSynchronizeDevice());
             float hResult = 0.0f;
-            CHECK_ACL(aclrtMemcpy(&hResult, sizeof(float), dResult, sizeof(float),
+            CHECK_ACL(aclrtMemcpy(&hResult, sizeof(float), res.dResult, sizeof(float),
                 ACL_MEMCPY_DEVICE_TO_HOST));
             float tol = (isFp16 ? 1e-2f : 1e-3f) * std::max(1.0f, std::abs(golden));
             bool pass = std::abs(hResult - golden) < tol;
@@ -470,14 +497,6 @@ static bool test_spvv_benchmark()
             printf("  avg=%.4f ms, min=%.4f ms, max=%.4f ms, %.1f Mnnz/s | diff=%.2e → %s\n",
                    avgMs, minMs, maxMs, throughput, std::abs(hResult - golden), pass ? "PASS" : "FAIL");
             if (!pass) allPass = false;
-
-            CHECK_ACL_SPARSE(aclsparseDestroySpVec(spVecX));
-            CHECK_ACL_SPARSE(aclsparseDestroyDnVec(dnVecY));
-            CHECK_ACL_SPARSE(aclsparseDestroy(handle));
-            CHECK_ACL(aclrtFree(dIndices));
-            CHECK_ACL(aclrtFree(dXValues));
-            CHECK_ACL(aclrtFree(dYValues));
-            CHECK_ACL(aclrtFree(dResult));
         }
     }
 

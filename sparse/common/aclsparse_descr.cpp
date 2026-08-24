@@ -377,6 +377,9 @@ aclsparseStatus_t aclsparseCreateCsr(aclsparseSpMatDescr_t *spMatDescr, int64_t 
     if (rows < 0 || cols < 0 || nnz < 0) {
         return ACL_SPARSE_STATUS_INVALID_VALUE;
     }
+    // Null CSR pointers are allowed at Create for delayed binding (SetPointers /
+    // later BufferSize/Execute validate before use). See densetosparse L2_17,
+    // sddmm NullCsrPtrs.
     aclsparseStatus_t idxSt =
         AclsparseValidateSupportedCsrIndexTypesExtended(csrRowOffsetsType, csrColIndType);
     if (idxSt != ACL_SPARSE_STATUS_SUCCESS) {

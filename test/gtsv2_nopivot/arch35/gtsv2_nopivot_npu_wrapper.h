@@ -76,6 +76,11 @@ inline Gtsv2NopivotNpuResult Gtsv2NopivotNpu(
         result.bufferSizeRet = ACL_SPARSE_STATUS_SUCCESS;  // early return, no error
         return result;
     }
+    // ldb must be >= m and non-negative to bound B allocation (issue #152).
+    if (ldb < m || ldb < 0) {
+        result.bufferSizeRet = ACL_SPARSE_STATUS_INVALID_VALUE;
+        return result;
+    }
 
     handle.setStream(stream);
 

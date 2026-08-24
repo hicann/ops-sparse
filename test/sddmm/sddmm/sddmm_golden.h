@@ -55,10 +55,10 @@ inline SddmmCsr MakeSddmmSparsity(int64_t m, int64_t n, double sparsity_ratio,
     SddmmCsr csr;
     csr.m = m;
     csr.n = n;
-    csr.rowOffsets.assign(static_cast<size_t>(m) + 1, 0);
     if (m <= 0 || n <= 0) {
         return csr;
     }
+    csr.rowOffsets.assign(static_cast<size_t>(m) + 1, 0);
 
     int32_t threshold = static_cast<int32_t>(sparsity_ratio * 100);
     std::mt19937 rng(seed);

@@ -129,6 +129,11 @@ inline Csr2CscNpuResult Csr2CscNpu(
     using namespace sparse_test;
     Csr2CscNpuResult result{};
     result.nnz = nnz;
+    // Reject negative nnz before size_t casts that would wrap to huge allocs (issue #156).
+    if (m < 0 || n < 0 || nnz < 0) {
+        result.computeRet = ACL_SPARSE_STATUS_INVALID_VALUE;
+        return result;
+    }
     size_t valSize = AclDataTypeSize(valType);
     auto dRowPtr = DeviceBuffer::copyFrom(csrRowPtrHost, (m + 1) * sizeof(int32_t));
     size_t colIndBytes = std::max(static_cast<size_t>(nnz) * sizeof(int32_t), size_t(1));

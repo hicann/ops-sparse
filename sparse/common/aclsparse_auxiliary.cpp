@@ -206,6 +206,7 @@ aclsparseStatus_t aclsparseCreateCsc(aclsparseSpMatDescr_t *spMatDescr, int64_t 
     if (st != ACL_SPARSE_STATUS_SUCCESS) {
         return st;
     }
+    // Null CSC pointers are allowed at Create for delayed binding; validate at use.
     if (cscColOffsetsType != ACL_SPARSE_INDEX_32I && cscColOffsetsType != ACL_SPARSE_INDEX_64I) {
         return ACL_SPARSE_STATUS_INVALID_VALUE;
     }

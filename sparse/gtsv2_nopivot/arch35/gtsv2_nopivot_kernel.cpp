@@ -27,6 +27,25 @@
 #include "gtsv2_nopivot_kernel.h"
 
 // ---------------------------------------------------------------------------
+// IEEE-754 division that keeps Inf/NaN on a singular pivot (issues #154/#155).
+// Writing 0 on zero pivot would silently yield a wrong "solution"; nopivot API
+// documents Inf/NaN instead (caller must supply a nonsingular system).
+// ---------------------------------------------------------------------------
+__simt_callee__ inline float GtsvIeeeDiv(float num, float den)
+{
+    if (den != 0.0f) {
+        return num / den;
+    }
+    // 0/±0 -> NaN; nonzero/±0 -> ±Inf with IEEE sign(num) XOR sign(den).
+    if (num == 0.0f) {
+        return __builtin_nanf("");
+    }
+    const bool neg =
+        static_cast<bool>(__builtin_signbit(num)) != static_cast<bool>(__builtin_signbit(den));
+    return neg ? -__builtin_inff() : __builtin_inff();
+}
+
+// ---------------------------------------------------------------------------
 // 每个 RHS 列的 Thomas 算法 (参考 gtsv_interleaved_batch 的 GtsvProcessOneBatch)
 //
 // Forward:  读取 GM 上的 dl/d/du/b，d'/b' 写回 ws/b 供 backward 用
@@ -65,7 +84,7 @@ __simt_callee__ inline void Gtsv2ProcessOneRhs(
         float du_p = duGm[i - 1];
         float b_i  = BGm[idx];
 
-        float w = dl_i / d_prev;
+        const float w = GtsvIeeeDiv(dl_i, d_prev);
         d_prev = d_i - w * du_p;
         b_prev = b_i - w * b_prev;
 
@@ -79,7 +98,7 @@ __simt_callee__ inline void Gtsv2ProcessOneRhs(
     // 行 m-1: x[m-1] = b'[m-1] / d'[m-1]
     {
         int64_t idxLast = colOff + (m - 1);
-        float x_next = b_prev / d_prev;
+        float x_next = GtsvIeeeDiv(b_prev, d_prev);
         BGm[idxLast] = x_next;
 
         // 行 m-2..0: x[i] = (b'[i] - du[i] * x[i+1]) / d'[i]
@@ -88,7 +107,7 @@ __simt_callee__ inline void Gtsv2ProcessOneRhs(
             float b_prime = BGm[idx];           // b'[i] 在 forward 中写入 B
             float d_prime = (i > 0) ? wsGm[wsOff + i] : dGm[0];  // d'[0] = d[0] (未写入 ws)
             float du_i    = duGm[i];
-            float x_i = (b_prime - du_i * x_next) / d_prime;
+            float x_i = GtsvIeeeDiv(b_prime - du_i * x_next, d_prime);
             x_next = x_i;
 
             // Phase 3: CopyOut (写解 x[i] 回 B)
