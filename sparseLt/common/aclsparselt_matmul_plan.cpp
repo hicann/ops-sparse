@@ -18,6 +18,7 @@
 #include "cann_ops_sparseLt.h"
 #include "aclsparselt_matmul_alg_selection_internal.h"
 #include "aclsparselt_matmul_plan_internal.h"
+#include "shared/aclsparselt_internal.h"
 
 #include <new>
 
@@ -79,6 +80,23 @@ aclsparseStatus_t aclsparseLtMatmulPlanInit(
     }
 
     FillPlan(p, matmulDescr, algSelection);
+
+    auto* md = p->matmulDescr;
+    auto* asel = p->algSelection;
+    int32_t dt = dtype_from_acl(md->matA->valueType);
+    int32_t effectiveSplitK = (asel->splitKMode == ACLSPARSELT_SPLIT_K_MODE_ONE_KERNEL) ? 1 : asel->splitK;
+    WsLayout wsl = compute_ws_layout(md_m(md), md_n(md), md_k(md), effectiveSplitK, dt);
+    uint32_t coreNum = get_cube_core_num();
+    auto* td = new (std::nothrow) AclsparseltTilingData();
+    if (td == nullptr) {
+        delete p->tilingData;
+        delete p;
+        return ACL_SPARSE_STATUS_ALLOC_FAILED;
+    }
+    fill_tiling_dims(*td, handle, md, asel, wsl, coreNum);
+    p->tilingData = td;
+    p->workspaceSize = static_cast<size_t>(wsl.totalBytes);
+
     *plan = p;
     return ACL_SPARSE_STATUS_SUCCESS;
 }
@@ -95,6 +113,8 @@ aclsparseStatus_t aclsparseLtMatmulPlanDestroy(aclsparseLtMatmulPlan_t* plan)
 
     auto* p = *plan;
     // matmulDescr / algSelection 为非所有权引用，Destroy 不销毁它们
+    delete p->tilingData;
+    p->tilingData = nullptr;
     delete p;
     *plan = nullptr;
     return ACL_SPARSE_STATUS_SUCCESS;

@@ -40,6 +40,7 @@ inline bool IsSupportedValueType(aclDataType t)
         case ACL_FLOAT16:
         case ACL_BF16:
         case ACL_INT8:
+        case ACL_INT32:
         case ACL_HIFLOAT8:
         case ACL_FLOAT8_E4M3FN:
         case ACL_FLOAT8_E5M2:
@@ -74,6 +75,7 @@ inline int64_t GetAlignMultiple(aclDataType valueType, bool isStructured)
         case ACL_BF16:
             return isStructured ? 16 : 8;
         case ACL_FLOAT:
+        case ACL_INT32:
             return isStructured ? 8 : 4;
         default:
             return 0;

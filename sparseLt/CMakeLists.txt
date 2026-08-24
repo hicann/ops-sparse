@@ -67,3 +67,31 @@ set(ALL_SPARSELT_SRC_FILES ${SPARSELT_HOST_SRCS} ${SPARSELT_KERNEL_SRCS} PARENT_
 set(ALL_SPARSELT_HOST_SRC_FILES ${SPARSELT_HOST_SRCS} PARENT_SCOPE)
 set(ALL_SPARSELT_KERNEL_SRC_FILES ${SPARSELT_KERNEL_SRCS} PARENT_SCOPE)
 set(ENABLE_SPARSELT ${ENABLE_SPARSELT} PARENT_SCOPE)
+
+# tensor_api (CANN-provided at asc/include/tensor_api) pulls in implementation
+# headers from asc/impl/ and asc/impl/c_api/. In NPU build mode the ASC cmake
+# module does NOT add asc/impl/c_api to the compiler system include path (it
+# only does so in --run-mode=cpu via CMakeASCInformation.cmake). Without this
+# path the deep include chain (tensor_api -> impl/tensor_api -> impl/c_api ->
+# instr_impl/...) fails with "file not found".
+#
+# The ops_sparseLt target is created in the parent (root) CMakeLists.txt AFTER
+# add_subdirectory(sparseLt) returns, so target_include_directories cannot be
+# called here directly. Use cmake_language(DEFER DIRECTORY) to schedule the call
+# at the end of the root directory processing, by which time the target exists.
+# This uses the CANN-provided tensor_api (no ops-tensor dependency).
+if(ENABLE_SPARSELT AND CMAKE_VERSION VERSION_GREATER_EQUAL "3.19")
+    set(_tensor_api_base
+        "${ASCEND_CANN_PACKAGE_PATH}/opp/built-in/op_impl/ai_core/tbe/impl/ops_nn/ascendc/common/tensor_api")
+    cmake_language(DEFER DIRECTORY ${CMAKE_SOURCE_DIR}
+        CALL target_include_directories ${OPS_SPARSELT} PRIVATE
+            ${ASCEND_CANN_PACKAGE_PATH}/${CMAKE_SYSTEM_PROCESSOR}-linux/asc/impl/c_api
+            ${_tensor_api_base}
+            ${_tensor_api_base}/include
+        )
+    cmake_language(DEFER DIRECTORY ${CMAKE_SOURCE_DIR}
+        CALL target_compile_options ${OPS_SPARSELT} PRIVATE
+            $<$<COMPILE_LANGUAGE:ASC>:-I${_tensor_api_base}/include>
+            $<$<COMPILE_LANGUAGE:ASC>:-I${_tensor_api_base}>
+        )
+endif()

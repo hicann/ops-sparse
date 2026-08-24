@@ -12,12 +12,17 @@
 
 /*!
  * \file aclsparselt_host.cpp
- * \brief sparseLt shared host-side helpers (prune-only trimmed copy).
+ * \brief sparseLt shared host-side API implementation.
  *
- * Implements only the platform query helpers (get_cube_core_num / get_ub_size)
- * consumed by prune_host.cpp. All matmul / algSet / algGet / PlanInit /
- * Destroy extern "C" entry points are intentionally excluded — this fork
- * ships prune only.
+ * Implements the host-only APIs consumed by the alg_set_attribute /
+ * alg_get_attribute / matmul / prune host TUs: GetWorkspaceSize,
+ * DescSetAttribute, DescGetAttribute, Version, Property. The host-only
+ * helpers (dtype_from_acl / align_up / CubeTiling / WsLayout /
+ * push_tiling_to_device / fill_tiling_dims ... live in
+ * shared/aclsparselt_internal.h as inline host-only functions).
+ *
+ * aclsparseLtMatmul (the kernel-launching entry) lives in
+ * sparseLt/matmul/arch35/matmul_host.cpp.
  */
 
 // Include order: C standard → C++ → CANN → local.
@@ -35,9 +40,105 @@
 #include "aclsparselt_handle_internal.h"
 #include "shared/aclsparselt_internal.h"
 
+extern "C" aclsparseStatus_t aclsparseLtMatmulDescSetAttribute(
+    const aclsparseLtHandle_t* handle,
+    aclsparseLtMatmulDescriptor_t* matmulDescr,
+    aclsparseLtMatmulDescAttribute_t matmulAttribute,
+    const void* data,
+    size_t dataSize)
+{
+    if (handle == nullptr || *handle == nullptr) {
+        OP_LOGE(kSparseLtLogTag, "MatmulDescSetAttribute: handle is null");
+        return ACL_SPARSE_STATUS_HANDLE_IS_NULLPTR;
+    }
+    if (matmulDescr == nullptr || *matmulDescr == nullptr || data == nullptr) {
+        OP_LOGE(kSparseLtLogTag, "MatmulDescSetAttribute: matmulDescr/data is null");
+        return ACL_SPARSE_STATUS_INVALID_VALUE;
+    }
+    auto* md = *matmulDescr;
+    if (md->matD == nullptr) {
+        OP_LOGE(kSparseLtLogTag, "MatmulDescSetAttribute: matmulDesc not fully initialized (matD is null)");
+        return ACL_SPARSE_STATUS_INVALID_VALUE;
+    }
+    switch (matmulAttribute) {
+        case ACLSPARSELT_MATMUL_ALPHA_VECTOR_SCALING:
+            if (dataSize != sizeof(int)) {
+                OP_LOGE(kSparseLtLogTag, "ALPHA_VECTOR_SCALING: size mismatch, got %zu", dataSize);
+                return ACL_SPARSE_STATUS_INVALID_VALUE;
+            }
+            {
+                bool alphaVec = (*static_cast<const int*>(data) != 0);
+                // betaVectorScaling must be preserved: read current beta flag, re-encode both.
+                bool betaVec = decode_beta_scaling(md);
+                encode_scaling_flags(md, alphaVec, betaVec);
+            }
+            return ACL_SPARSE_STATUS_SUCCESS;
+        case ACLSPARSELT_MATMUL_BETA_VECTOR_SCALING:
+            if (dataSize != sizeof(int)) {
+                OP_LOGE(kSparseLtLogTag, "BETA_VECTOR_SCALING: size mismatch, got %zu", dataSize);
+                return ACL_SPARSE_STATUS_INVALID_VALUE;
+            }
+            {
+                bool betaVec = (*static_cast<const int*>(data) != 0);
+                // Setting betaVec=true implies alphaVec=true (cuSPARSELt semantics).
+                bool alphaVec = betaVec || decode_alpha_scaling(md);
+                encode_scaling_flags(md, alphaVec, betaVec);
+            }
+            return ACL_SPARSE_STATUS_SUCCESS;
+        default:
+            OP_LOGE(kSparseLtLogTag, "MatmulDescSetAttribute: unsupported attr %d",
+                    static_cast<int32_t>(matmulAttribute));
+            return ACL_SPARSE_STATUS_NOT_SUPPORTED;
+    }
+}
+
+extern "C" aclsparseStatus_t aclsparseLtMatmulDescGetAttribute(
+    const aclsparseLtHandle_t* handle,
+    aclsparseLtConstMatmulDescriptor_t* matmulDescr,
+    aclsparseLtMatmulDescAttribute_t matmulAttribute,
+    void* data,
+    size_t dataSize)
+{
+    if (handle == nullptr || *handle == nullptr) {
+        OP_LOGE(kSparseLtLogTag, "MatmulDescGetAttribute: handle is null");
+        return ACL_SPARSE_STATUS_HANDLE_IS_NULLPTR;
+    }
+    if (matmulDescr == nullptr || *matmulDescr == nullptr || data == nullptr) {
+        OP_LOGE(kSparseLtLogTag, "MatmulDescGetAttribute: matmulDescr/data is null");
+        return ACL_SPARSE_STATUS_INVALID_VALUE;
+    }
+    auto* md = to_matmul_internal(*matmulDescr);
+    if (md->matD == nullptr) {
+        OP_LOGE(kSparseLtLogTag, "MatmulDescGetAttribute: matmulDesc not fully initialized (matD is null)");
+        return ACL_SPARSE_STATUS_INVALID_VALUE;
+    }
+    switch (matmulAttribute) {
+        case ACLSPARSELT_MATMUL_ALPHA_VECTOR_SCALING:
+            if (dataSize != sizeof(int)) {
+                OP_LOGE(kSparseLtLogTag, "ALPHA_VECTOR_SCALING: size mismatch, got %zu", dataSize);
+                return ACL_SPARSE_STATUS_INVALID_VALUE;
+            }
+            *static_cast<int*>(data) = decode_alpha_scaling(md) ? 1 : 0;
+            return ACL_SPARSE_STATUS_SUCCESS;
+        case ACLSPARSELT_MATMUL_BETA_VECTOR_SCALING:
+            if (dataSize != sizeof(int)) {
+                OP_LOGE(kSparseLtLogTag, "BETA_VECTOR_SCALING: size mismatch, got %zu", dataSize);
+                return ACL_SPARSE_STATUS_INVALID_VALUE;
+            }
+            *static_cast<int*>(data) = decode_beta_scaling(md) ? 1 : 0;
+            return ACL_SPARSE_STATUS_SUCCESS;
+        default:
+            OP_LOGE(kSparseLtLogTag, "MatmulDescGetAttribute: unsupported attr %d",
+                    static_cast<int32_t>(matmulAttribute));
+            return ACL_SPARSE_STATUS_NOT_SUPPORTED;
+    }
+}
+
 // ============================================================================
-// get_cube_core_num implementation — queries the platform API for the AIC
-// core count, falling back to SPLT_CORE_NUM (32) when unavailable.
+// get_cube_core_num implementation — moved here from
+// aclsparselt_internal.h so that tiling/platform/platform_ascendc.h (the heavy
+// platform header) is only pulled into this TU, not into every host TU that
+// includes the shared internal header.
 // ============================================================================
 uint32_t get_cube_core_num()
 {
@@ -59,4 +160,65 @@ uint64_t get_ub_size()
     uint64_t ubSize = 0;
     plat->GetCoreMemSize(platform_ascendc::CoreMemType::UB, ubSize);
     return (ubSize > 0) ? ubSize : static_cast<uint64_t>(248 * 1024);
+}
+
+extern "C" aclsparseStatus_t aclsparseLtMatmulGetWorkspaceSize(
+    const aclsparseLtHandle_t* handle,
+    aclsparseLtConstMatmulPlan_t* plan, size_t* workspaceSize)
+{
+    if (handle == nullptr || *handle == nullptr) {
+        OP_LOGE(kSparseLtLogTag, "GetWorkspaceSize: handle is null");
+        return ACL_SPARSE_STATUS_HANDLE_IS_NULLPTR;
+    }
+    if (plan == nullptr || *plan == nullptr || workspaceSize == nullptr) {
+        OP_LOGE(kSparseLtLogTag, "GetWorkspaceSize: plan/workspaceSize is null");
+        return ACL_SPARSE_STATUS_INVALID_VALUE;
+    }
+    *workspaceSize = (*plan)->workspaceSize;
+    return ACL_SPARSE_STATUS_SUCCESS;
+}
+
+// ============================================================================
+// Version / property queries — moved from common/aclsparselt_auxiliary.cpp
+// to keep common zero-change (aligned with upstream PR#82/#84).
+// Version is a compile-time constant derived from ACLSPARSELT_VERSION
+// (handle_internal.h: MAJOR*10000 + MINOR*100 + PATCH, e.g. 0.1.0 -> 100).
+// ============================================================================
+extern "C" aclsparseStatus_t aclsparseLtGetVersion(const aclsparseLtHandle_t* handle, int* version)
+{
+    // version is compile-time constant, handle not needed beyond null check
+    if (handle == nullptr || *handle == nullptr) {
+        return ACL_SPARSE_STATUS_HANDLE_IS_NULLPTR;
+    }
+    if (version == nullptr) {
+        return ACL_SPARSE_STATUS_INVALID_VALUE;
+    }
+    *version = static_cast<int32_t>(ACLSPARSELT_VERSION);
+    return ACL_SPARSE_STATUS_SUCCESS;
+}
+
+extern "C" aclsparseStatus_t aclsparseLtGetProperty(
+    aclsparseLtLibraryPropertyType_t propertyType, int* value)
+{
+    // Aligned with cuSPARSELt cusparseLtGetProperty: returns the requested
+    // version component (MAJOR/MINOR/PATCH) into *value. No handle parameter
+    // (version is a compile-time constant).
+    if (value == nullptr) {
+        return ACL_SPARSE_STATUS_INVALID_VALUE;
+    }
+    switch (propertyType) {
+        case ACLSPARSELT_MAJOR_VERSION:
+            *value = ACLSPARSELT_VERSION_MAJOR;
+            break;
+        case ACLSPARSELT_MINOR_VERSION:
+            *value = ACLSPARSELT_VERSION_MINOR;
+            break;
+        case ACLSPARSELT_PATCH_LEVEL:
+            *value = ACLSPARSELT_VERSION_PATCH;
+            break;
+        default:
+            OP_LOGE(kSparseLtLogTag, "GetProperty: invalid propertyType %d", (int)propertyType);
+            return ACL_SPARSE_STATUS_INVALID_VALUE;
+    }
+    return ACL_SPARSE_STATUS_SUCCESS;
 }

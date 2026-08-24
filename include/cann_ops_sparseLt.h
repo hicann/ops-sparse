@@ -43,10 +43,13 @@ typedef struct aclsparseLtMatmulPlan* aclsparseLtMatmulPlan_t;
 
 typedef const struct aclsparseLtMatDescriptor* aclsparseLtConstMatDescriptor_t;
 typedef const struct aclsparseLtMatmulDescriptor* aclsparseLtConstMatmulDescriptor_t;
+typedef const struct aclsparseLtMatmulAlgSelection* aclsparseLtConstMatmulAlgSelection_t;
+typedef const struct aclsparseLtMatmulPlan* aclsparseLtConstMatmulPlan_t;
 
 // Structured sparsity mode.
 typedef enum aclsparseLtSparsity_t {
-    ACL_SPARSE_LT_SPARSITY_50_PERCENT = 0   // 2:4 structured sparsity
+    ACL_SPARSE_LT_SPARSITY_50_PERCENT = 0,  // 2:4 structured sparsity
+    ACL_SPARSE_LT_SPARSITY_NONE = 1,        // dense (PR extension, identifies dense matrix)
 } aclsparseLtSparsity_t;
 
 // Compute precision
@@ -68,6 +71,49 @@ typedef enum aclsparseLtPruneAlg_t {
     ACLSPARSELT_PRUNE_SPMMA_TILE = 0,
     ACLSPARSELT_PRUNE_SPMMA_STRIP = 1,
 } aclsparseLtPruneAlg_t;
+
+/* ========== Split-K mode (cuSPARSELt SplitKMode_t) ==========
+ * ONE_KERNEL(0):   fused __mix__(1,2) kernel, GEMM+reduction in single launch.
+ *                  splitK is absorbed (effectiveSplitK=1, K-loop full range).
+ *                  Note: splitK does NOT increase tile parallelism in this mode.
+ * TWO_KERNELS(1):  matmul kernel + epilogue kernel, splitK increases parallelism.
+ */
+typedef enum aclsparseLtSplitKMode_t {
+    ACLSPARSELT_SPLIT_K_MODE_ONE_KERNEL = 0,
+    ACLSPARSELT_SPLIT_K_MODE_TWO_KERNELS = 1,
+} aclsparseLtSplitKMode_t;
+
+/* ========== Library property type (cuSPARSELt libraryPropertyType) ==========
+ * Used by aclsparseLtGetProperty to query individual version components.
+ */
+typedef enum aclsparseLtLibraryPropertyType_t {
+    ACLSPARSELT_MAJOR_VERSION = 0,
+    ACLSPARSELT_MINOR_VERSION = 1,
+    ACLSPARSELT_PATCH_LEVEL = 2,
+} aclsparseLtLibraryPropertyType_t;
+
+/* ========== Matmul algorithm attributes ========== */
+typedef enum aclsparseLtMatmulAlgAttribute_t {
+    ACLSPARSELT_MATMUL_ALG_CONFIG_ID = 0,       // algorithm config id (0 / 1)
+    ACLSPARSELT_MATMUL_SEARCH_ITERATIONS = 1,    // search iterations
+    ACLSPARSELT_MATMUL_SPLIT_K = 2,              // split-k factor [1, K]
+    ACLSPARSELT_MATMUL_SPLIT_K_MODE = 3,         // split-k mode
+    // [OPT-P3] Aligned with cuSPARSELt: additional alg attributes.
+    ACLSPARSELT_MATMUL_ALG_CONFIG_MAX_ID = 4,   // read-only: returns max algConfigId+1
+    ACLSPARSELT_MATMUL_SPLIT_K_BUFFERS = 5,     // accepted, stored; TWO_KERNELS uses max (splitK-1)
+} aclsparseLtMatmulAlgAttribute_t;
+
+/* ========== Matmul descriptor attributes (vector scaling) ==========
+ * Aligned with cuSPARSELt cusparseLtMatmulDescAttribute_t.
+ * When ALPHA_VECTOR_SCALING is enabled, alpha passed to aclsparseLtMatmul
+ * is a device pointer to a float array of length M (per-row scaling).
+ * BETA_VECTOR_SCALING implies ALPHA_VECTOR_SCALING (setting beta vector
+ * auto-enables alpha vector).
+ */
+typedef enum aclsparseLtMatmulDescAttribute_t {
+    ACLSPARSELT_MATMUL_ALPHA_VECTOR_SCALING = 0,
+    ACLSPARSELT_MATMUL_BETA_VECTOR_SCALING = 1,
+} aclsparseLtMatmulDescAttribute_t;
 
 #ifdef __cplusplus
 extern "C" {
@@ -355,6 +401,181 @@ aclsparseStatus_t aclsparseLtSpMMAPrune(
     void* d_out,
     aclsparseLtPruneAlg_t pruneAlg,
     aclrtStream stream);
+
+/* ========== PR Extension APIs (cuSPARSELt-style) ==========
+ * Data pointers are NOT bound at descriptor init time — they are passed
+ * explicitly to Matmul/Prune at execution time.
+ */
+
+/**
+ * @brief 返回 aclsparseLt 库版本号（对齐 cuSPARSELt cusparseLtGetVersion）。
+ *
+ * 版本编码格式：MAJOR*10000 + MINOR*100 + PATCH（如 0.1.0 -> 100）。
+ *
+ * @param handle IN, HOST, aclsparseLt 库句柄（版本为编译期常量，handle 仅做合法性校验）。
+ * @param version OUT, HOST, 版本号输出。
+ * @return ACL_SPARSE_STATUS_SUCCESS 成功
+ *         ACL_SPARSE_STATUS_INVALID_VALUE version 为空
+ */
+aclsparseStatus_t aclsparseLtGetVersion(aclsparseLtConstHandle_t handle, int* version);
+
+/**
+ * @brief 返回库属性（对齐 cuSPARSELt cusparseLtGetProperty）。
+ *
+ * 根据 propertyType 返回版本号的 MAJOR / MINOR / PATCH 分量到 int* value。
+ *
+ * @param propertyType IN, HOST, 要查询的属性类型（MAJOR_VERSION / MINOR_VERSION / PATCH_LEVEL）。
+ * @param value OUT, HOST, 属性值输出。
+ * @return ACL_SPARSE_STATUS_SUCCESS 成功
+ *         ACL_SPARSE_STATUS_INVALID_VALUE value 为空或 propertyType 非法
+ */
+aclsparseStatus_t aclsparseLtGetProperty(aclsparseLtLibraryPropertyType_t propertyType, int* value);
+
+/**
+ * @brief 设置 matmul 描述符属性（对齐 cuSPARSELt cusparseLtMatmulDescSetAttribute）。
+ *
+ * 设置向量缩放属性（ALPHA_VECTOR_SCALING / BETA_VECTOR_SCALING）。
+ * 设置 BETA_VECTOR_SCALING=true 时隐含 ALPHA_VECTOR_SCALING=true（cuSPARSELt 语义）。
+ *
+ * @param handle IN, HOST, aclsparseLt 库句柄的 const 指针。
+ * @param matmulDescr INOUT, HOST, matmul 描述符。
+ * @param matmulAttribute IN, HOST, 要设置的属性枚举。
+ * @param data IN, HOST, 属性值数据指针。
+ * @param dataSize IN, HOST, data 缓冲区大小（字节），须等于 sizeof(int)。
+ * @return ACL_SPARSE_STATUS_SUCCESS 成功
+ *         ACL_SPARSE_STATUS_HANDLE_IS_NULLPTR handle 为空
+ *         ACL_SPARSE_STATUS_INVALID_VALUE matmulDescr/data 为空或 dataSize 不匹配
+ *         ACL_SPARSE_STATUS_NOT_SUPPORTED matmulAttribute 不在支持范围内
+ */
+aclsparseStatus_t aclsparseLtMatmulDescSetAttribute(
+    aclsparseLtConstHandle_t handle,
+    aclsparseLtMatmulDescriptor_t* matmulDescr,
+    aclsparseLtMatmulDescAttribute_t matmulAttribute,
+    const void* data,
+    size_t dataSize);
+
+/**
+ * @brief 查询 matmul 描述符属性当前值（对齐 cuSPARSELt cusparseLtMatmulDescGetAttribute）。
+ *
+ * 查询向量缩放属性（ALPHA_VECTOR_SCALING / BETA_VECTOR_SCALING）的当前启用状态。
+ *
+ * @param handle IN, HOST, aclsparseLt 库句柄的 const 指针。
+ * @param matmulDescr IN, HOST, matmul 描述符（const 只读）。
+ * @param matmulAttribute IN, HOST, 要查询的属性枚举。
+ * @param data OUT, HOST, 属性值输出缓冲区，写入 int（1=启用，0=禁用）。
+ * @param dataSize IN, HOST, data 缓冲区大小（字节），须等于 sizeof(int)。
+ * @return ACL_SPARSE_STATUS_SUCCESS 成功
+ *         ACL_SPARSE_STATUS_HANDLE_IS_NULLPTR handle 为空
+ *         ACL_SPARSE_STATUS_INVALID_VALUE matmulDescr/data 为空或 dataSize 不匹配
+ *         ACL_SPARSE_STATUS_NOT_SUPPORTED matmulAttribute 不在支持范围内
+ */
+aclsparseStatus_t aclsparseLtMatmulDescGetAttribute(
+    aclsparseLtConstHandle_t handle,
+    aclsparseLtConstMatmulDescriptor_t* matmulDescr,
+    aclsparseLtMatmulDescAttribute_t matmulAttribute,
+    void* data,
+    size_t dataSize);
+
+/**
+ * @brief 设置算法选择属性（对齐 cuSPARSELt cusparseLtMatmulAlgSetAttribute）。
+ *
+ * 设置 algConfigId / splitK / searchIterations / splitKMode / splitKBuffers 等算法属性。
+ * ALG_CONFIG_MAX_ID 为只读属性，不可设置。须在 PlanInit 之前调用。
+ *
+ * @param handle IN, HOST, aclsparseLt 库句柄的 const 指针。
+ * @param algSelection INOUT, HOST, 算法选择描述符。
+ * @param attr IN, HOST, 要设置的属性枚举。
+ * @param attrValue IN, HOST, 属性值数据指针（均为 int32_t）。
+ * @param attrValueSize IN, HOST, attrValue 缓冲区大小（字节），须等于 sizeof(int32_t)。
+ * @return ACL_SPARSE_STATUS_SUCCESS 成功
+ *         ACL_SPARSE_STATUS_HANDLE_IS_NULLPTR handle 为空
+ *         ACL_SPARSE_STATUS_INVALID_VALUE algSelection/attrValue 为空、size 不匹配或属性值非法
+ *         ACL_SPARSE_STATUS_NOT_INITIALIZED algSelection 未初始化（已销毁）
+ *         ACL_SPARSE_STATUS_NOT_SUPPORTED attr 不被支持（如 ALG_CONFIG_MAX_ID 为只读）
+ */
+aclsparseStatus_t aclsparseLtMatmulAlgSetAttribute(
+    aclsparseLtConstHandle_t handle,
+    aclsparseLtMatmulAlgSelection_t* algSelection,
+    aclsparseLtMatmulAlgAttribute_t attr,
+    const void* attrValue,
+    size_t attrValueSize);
+
+/**
+ * @brief 查询算法选择属性当前值（对齐 cuSPARSELt cusparseLtMatmulAlgGetAttribute）。
+ *
+ * @param handle IN, HOST, aclsparseLt 库句柄的 const 指针。
+ * @param algSelection IN, HOST, 算法选择描述符。
+ * @param attr IN, HOST, 要查询的属性枚举。
+ * @param attrValue OUT, HOST, 属性值输出缓冲区。
+ * @param attrValueSize IN, HOST, attrValue 缓冲区大小（字节）。
+ * @return ACL_SPARSE_STATUS_SUCCESS 成功
+ *         ACL_SPARSE_STATUS_HANDLE_IS_NULLPTR handle 为空
+ *         ACL_SPARSE_STATUS_INVALID_VALUE algSelection/attrValue 为空或 size 不匹配
+ *         ACL_SPARSE_STATUS_NOT_INITIALIZED algSelection 未初始化（已销毁）
+ *         ACL_SPARSE_STATUS_NOT_SUPPORTED attr 不被支持（如 ALG_CONFIG_MAX_ID 为只读）
+ */
+aclsparseStatus_t aclsparseLtMatmulAlgGetAttribute(
+    aclsparseLtConstHandle_t handle,
+    aclsparseLtConstMatmulAlgSelection_t* algSelection,
+    aclsparseLtMatmulAlgAttribute_t attr,
+    void* attrValue,
+    size_t attrValueSize);
+
+/* ========== Workspace & execution ==========
+ */
+
+/**
+ * @brief 查询 matmul 执行所需的 workspace 大小（对齐 cuSPARSELt cusparseLtMatmulGetWorkspace）。
+ *
+ * 根据 PlanInit 阶段计算的 tiling 参数返回 workspace 字节数。调用方据此分配 Device 内存，
+ * 再将指针传递给 aclsparseLtMatmul。workspaceSize 为 0 时无需分配。
+ *
+ * @param handle IN, HOST, aclsparseLt 库句柄的 const 指针。
+ * @param plan IN, HOST, 执行计划。
+ * @param workspaceSize OUT, HOST, workspace 字节数输出。
+ * @return ACL_SPARSE_STATUS_SUCCESS 成功
+ *         ACL_SPARSE_STATUS_HANDLE_IS_NULLPTR handle 为空
+ *         ACL_SPARSE_STATUS_INVALID_VALUE plan/workspaceSize 为空
+ */
+aclsparseStatus_t aclsparseLtMatmulGetWorkspaceSize(
+    aclsparseLtConstHandle_t handle,
+    aclsparseLtConstMatmulPlan_t* plan, size_t* workspaceSize);
+
+/**
+ * @brief 执行结构化稀疏矩阵乘法（对齐 cuSPARSELt cusparseLtMatmul）。
+ *
+ * 计算 D = alpha * A_pruned * B + beta * C。A 须为已剪枝的矩阵（通过 aclsparseLtSpMMAPrune 产出）。
+ * 当 matA 为 null 时，回退到 workspace 中的 A_pruned 区域（须已由 SpMMAPrune 填充）。
+ * alpha/beta 可为标量（float 指针）或设备端向量（启用 ALPHA_VECTOR_SCALING 时为 float[M] 数组指针）。
+ * 该接口异步执行，调用方须通过 aclrtSynchronizeStream 同步后读取 D。
+ *
+ * @param handle IN, HOST, aclsparseLt 库句柄的 const 指针。
+ * @param plan IN, HOST, 执行计划。
+ * @param alpha IN, HOST/DEVICE, alpha 缩放因子（标量时为 float 指针，向量缩放时为 Device float[M] 指针）。
+ * @param matA IN, DEVICE, 矩阵 A 数据指针（剪枝后）。可为 null（回退到 workspace A_pruned 区域）。
+ * @param matB IN, DEVICE, 矩阵 B 数据指针。
+ * @param beta IN, HOST/DEVICE, beta 缩放因子（标量时为 float 指针，向量缩放时为 Device float[M] 指针）。
+ * @param matC IN, DEVICE, 矩阵 C 数据指针（累加项）。
+ * @param matD OUT, DEVICE, 矩阵 D 数据指针（输出，须预分配）。
+ * @param workspace IN, DEVICE, workspace 指针（大小由 GetWorkspaceSize 查询）。
+ * @param streams IN, HOST, ACL 流指针数组。
+ * @param numStreams IN, HOST, 流数量（当前仅使用 streams[0]，须 > 0）。
+ * @return ACL_SPARSE_STATUS_SUCCESS 成功
+ *         ACL_SPARSE_STATUS_HANDLE_IS_NULLPTR handle 为空
+ *         ACL_SPARSE_STATUS_INVALID_VALUE plan/streams/matB/matC/matD/workspace 为空或参数非法
+ *         ACL_SPARSE_STATUS_INSUFFICIENT_RESOURCES workspace 为空但计划需要
+ *         ACL_SPARSE_STATUS_NOT_SUPPORTED dataType 不支持
+ *         ACL_SPARSE_STATUS_EXECUTION_FAILED kernel 执行或 aclrt 调用失败
+ */
+aclsparseStatus_t aclsparseLtMatmul(
+    aclsparseLtConstHandle_t handle,
+    aclsparseLtConstMatmulPlan_t* plan,
+    const void* alpha,
+    const void* matA, const void* matB,
+    const void* beta,
+    const void* matC, void* matD,
+    void* workspace,
+    aclrtStream* streams, int32_t numStreams);
 
 #ifdef __cplusplus
 }

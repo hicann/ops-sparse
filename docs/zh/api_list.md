@@ -52,6 +52,8 @@
 | [aclsparseSgtsv2_bufferSizeExt](#aclsparsesgtsv2_buffersizeext) | 查询 aclsparseSgtsv2 所需工作区大小 |
 | [aclsparseXcscsort_bufferSizeExt](#aclsparsexcscsort_buffersizeext) | 获取CSC排序缓冲区大小 |
 | [aclsparseXcscsort](#aclsparsexcscsort) | CSC格式按列稳定排序 |
+| [aclsparseLtMatmulAlgSetAttribute](#aclsparseltmatmulalgsetattribute) | 设置结构化稀疏矩阵乘法的算法属性 |
+| [aclsparseLtSpMMAPrune](#aclsparseltspmmaprune) | 对稠密矩阵执行 2:4 结构化稀疏剪枝 |
 
 ## 接口详情
 
@@ -1268,6 +1270,71 @@ aclsparseStatus_t aclsparseXcscsort(
 
 ---
 
+### aclsparseLtMatmulAlgSetAttribute
+
+```cpp
+aclsparseStatus_t aclsparseLtMatmulAlgSetAttribute(
+    aclsparseLtConstHandle_t handle,
+    aclsparseLtMatmulAlgSelection_t* algSelection,
+    aclsparseLtMatmulAlgAttribute_t attr,
+    const void* attrValue,
+    size_t attrValueSize);
+```
+
+**功能**：设置结构化稀疏矩阵乘法的算法选择属性。在 `aclsparseLtMatmulPlanInit` 之前调用，覆盖 `aclsparseLtMatmulAlgSelectionInit` 的默认值（algConfigId=0、splitK=1、searchIterations=5），影响后续 PlanInit 计算的 cube tiling 策略与 workspace 布局。纯 Host 端元数据操作，不启动任何 kernel、不消耗 NPU 计算资源。配套接口 `aclsparseLtMatmulAlgGetAttribute` 用于查询属性当前值。对标 cuSPARSELt 的 `cusparseLtMatmulAlgSetAttribute`。
+
+**产品支持情况**：
+
+| 产品 | 是否支持 |
+| :----------------------------------------- | :------:|
+| <term>Ascend 950PR/Ascend 950DT</term> | √ |
+| <term>Atlas A3 训练系列产品/Atlas A3 推理系列产品</term> | × |
+| <term>Atlas A2 训练系列产品/Atlas A2 推理系列产品</term> | × |
+
+> 依赖 CANN asc-devkit >= 9.1.0（`ASC_DEVKIT_MAJOR >= 9 && ASC_DEVKIT_MINOR >= 1`），低于该版本时编译与运行将跳过此算子。
+
+**参数说明**：
+
+- `handle`（IN）：HOST，aclsparseLt 库句柄的 const 指针。
+- `algSelection`（IN/OUT）：HOST，算法选择描述符，由 `aclsparseLtMatmulAlgSelectionInit` 创建。AlgSetAttribute 写入 algSelection 结构体的属性字段。
+- `attr`（IN）：HOST，要设置的属性枚举（`aclsparseLtMatmulAlgAttribute_t`）。
+- `attrValue`（IN）：HOST，属性值指针，指向 `int32_t` 类型值。
+- `attrValueSize`（IN）：HOST，`attrValue` 缓冲区大小（字节），须为 `sizeof(int32_t)`。
+
+**可设置的属性**：
+
+| 属性枚举 | 值类型 | 取值范围 | 说明 |
+|----------|--------|---------|------|
+| `ACLSPARSELT_MATMUL_ALG_CONFIG_ID` | int32_t | 0 / 1 | 算法配置 ID，影响 cube tiling（baseM/baseN/baseK）。需在 PlanInit 前设置 |
+| `ACLSPARSELT_MATMUL_SPLIT_K` | int32_t | [1, K] | splitK 切分因子。需在 PlanInit 前设置 |
+| `ACLSPARSELT_MATMUL_SEARCH_ITERATIONS` | int32_t | > 0 | 搜索迭代次数（默认 5），当前仅存储不参与执行 |
+| `ACLSPARSELT_MATMUL_SPLIT_K_MODE` | int32_t | 0 / 1 | splitK 模式（ONE_KERNEL / TWO_KERNELS），参与 effectiveSplitK 计算：ONE_KERNEL 时 effectiveSplitK=1（融合路径），TWO_KERNELS 时 effectiveSplitK=splitK（两段式路径） |
+| `ACLSPARSELT_MATMUL_SPLIT_K_BUFFERS` | int32_t | [0, splitK-1] | splitK 缓冲区数，当前仅存储不参与执行 |
+| `ACLSPARSELT_MATMUL_ALG_CONFIG_MAX_ID` | — | 只读 | 不可设置，返回 `ACL_SPARSE_STATUS_NOT_SUPPORTED` |
+
+**约束说明**：
+
+- handle 不可为 nullptr 且 *handle 不可为 nullptr，否则返回 `ACL_SPARSE_STATUS_HANDLE_IS_NULLPTR`。
+- algSelection 不可为 nullptr，否则返回 `ACL_SPARSE_STATUS_INVALID_VALUE`。
+- attrValue 不可为 nullptr，否则返回 `ACL_SPARSE_STATUS_INVALID_VALUE`。
+- attrValueSize 须与属性值类型大小匹配（int32_t 为 4 字节），否则返回 `ACL_SPARSE_STATUS_INVALID_VALUE`。
+- `ACLSPARSELT_MATMUL_ALG_CONFIG_ID` 取值仅 0 或 1，其他值返回 `ACL_SPARSE_STATUS_INVALID_VALUE`。
+- `ACLSPARSELT_MATMUL_SPLIT_K` 须 ≥ 1；若 algSelection 已绑定 matmulDesc 且 K > 0，splitK 须 ≤ K，否则返回 `ACL_SPARSE_STATUS_INVALID_VALUE`。
+- `ACLSPARSELT_MATMUL_SEARCH_ITERATIONS` 须 > 0，否则返回 `ACL_SPARSE_STATUS_INVALID_VALUE`。
+- `ACLSPARSELT_MATMUL_SPLIT_K_BUFFERS` 须在 [0, splitK-1] 范围内，否则返回 `ACL_SPARSE_STATUS_INVALID_VALUE`。
+- `ACLSPARSELT_MATMUL_ALG_CONFIG_MAX_ID` 为只读属性，设置时返回 `ACL_SPARSE_STATUS_NOT_SUPPORTED`。
+- **属性设置时机**：须在 `aclsparseLtMatmulPlanInit` 之前调用，PlanInit 读取 algConfigId 与 splitK 计算 tiling 并冻结到计划中。PlanInit 之后修改属性不会生效，需重新初始化计划。
+
+**返回值**：
+
+- `ACL_SPARSE_STATUS_SUCCESS`：成功
+- `ACL_SPARSE_STATUS_HANDLE_IS_NULLPTR`：handle 为 nullptr 或 *handle 为 nullptr
+- `ACL_SPARSE_STATUS_INVALID_VALUE`：algSelection/attrValue 为 nullptr、attrValueSize 不匹配、algConfigId/splitK/searchIterations/splitKBuffers 取值非法
+- `ACL_SPARSE_STATUS_NOT_SUPPORTED`：设置只读属性（ALG_CONFIG_MAX_ID）、attr 枚举值不被支持
+- 其他值：失败
+
+---
+
 ### aclsparseLtSpMMAPrune
 
 ```cpp
@@ -1280,9 +1347,7 @@ aclsparseStatus_t aclsparseLtSpMMAPrune(
     aclrtStream stream);
 ```
 
-**功能**：对稠密矩阵 A 执行 2:4 结构化稀疏剪枝，将每 4 个元素（FP16/BF16/INT8）或每 2 个元素（FP32）中绝对值较小的元素置零，保留绝对值最大的元素，输出与 A 同型的稠密存储矩阵 A_pruned（被置零元素以 0 表示）。直接接收 Matmul 描述符，从中读取矩阵 A 的维度（m、k）、数据类型、order 与 opA 派生剪枝参数。算子异步启动，内部不执行 stream 同步，调用方如需读取结果须自行同步。对标 cuSPARSELt 的 `cusparseLtSpMMAPrune`。
-
-> 说明：本算子为软件实现的 2:4 结构化稀疏剪枝，不依赖 Ascend 950 硬件的 2:4 稀疏加速单元，仅通过 Vector API 完成剪枝计算。FP32 统一采用 1:2 模式（分组为 2、保留 1，即每 2 个元素中保留绝对值最大的 1 个），并非"4 选 2"；FP16/BF16/INT8 采用标准 2:4 模式（分组为 4、保留 2）。所有数据类型稀疏度均为 50%。
+**功能**：对稠密矩阵 A 执行 2:4 结构化稀疏剪枝，将每 4 个元素（FP16）或每 2 个元素（FP32）中绝对值较小的元素置零，保留绝对值最大的元素，输出与 A 同型的稠密存储矩阵 A_pruned（被置零元素以 0 表示）。剪枝后的 A_pruned 作为 `aclsparseLtMatmul` 的稀疏侧输入。直接接收 Matmul 描述符，从中读取矩阵 A 的维度（m、k）、数据类型、order 与 opA 派生剪枝参数。算子异步启动，内部不执行 stream 同步，调用方如需读取结果须自行同步。对标 cuSPARSELt 的 `cusparseLtSpMMAPrune`。
 
 **剪枝规则**：
 
@@ -1292,6 +1357,8 @@ aclsparseStatus_t aclsparseLtSpMMAPrune(
 | BF16（ACL_BF16） | 4 | 2（保留绝对值最大的 2 个） | 50%（2:4） |
 | INT8（ACL_INT8） | 4 | 2（保留绝对值最大的 2 个） | 50%（2:4） |
 | FP32（ACL_FLOAT） | 2 | 1（保留绝对值最大的 1 个） | 50%（1:2，等价 2:4 密度） |
+
+> 说明：FP32 统一采用 1:2 模式（分组为 2、保留 1）以简化实现，与 NVIDIA cuSPARSELt 规范的 1:2 一致；FP16/BF16/INT8 采用标准 2:4 模式（分组为 4、保留 2）。所有数据类型稀疏度均为 50%。
 
 **产品支持情况**：
 
@@ -1322,9 +1389,9 @@ aclsparseStatus_t aclsparseLtSpMMAPrune(
 - d_in 与 d_out 须 16 字节对齐，否则返回 `ACL_SPARSE_STATUS_INVALID_VALUE`。
 - d_in 不可为 nullptr，否则返回 `ACL_SPARSE_STATUS_INVALID_VALUE`。
 - d_out 不可为 nullptr（无 workspace 回退路径），否则返回 `ACL_SPARSE_STATUS_INVALID_VALUE`。
-- 支持 in-place 操作：d_in 与 d_out 可指向同一 Device 内存。**例外**：转置路径（opA=TRANSPOSE 且 order=ROW，即沿列剪枝的转置场景）不支持 in-place，因为输出布局 (m,k) 与输入布局 (k,m) 不同，多核并行写入会覆盖后续 block 的读取区域；此时若 d_in == d_out 将返回 `ACL_SPARSE_STATUS_NOT_SUPPORTED`。
-- **K 维度对齐约束**：K 须满足结构化描述符初始化（`aclsparseLtStructuredDescriptorInit`）的对齐要求——FP32 为 8 的倍数、FP16/BF16 为 16 的倍数、INT8 为 32 的倍数。描述符初始化会强制校验并向上对齐 rows/cols，因此经 API 调用时 K 必然为对应分组大小的倍数。
-- **UB 容量约束**：沿行剪枝时，STRIP 需单行数据（k × elemSize）不超过单核 UB 容量，TILE 需 TS 行数据（TS × k × elemSize，TS=4 for FP16 / 2 for FP32，每行按 32 字节对齐）不超过单核 UB 容量；沿列剪枝时行块数据（k × elemSize × 16，每行按 32 字节对齐）须不超过单核 UB 容量。超限时返回 `ACL_SPARSE_STATUS_NOT_SUPPORTED`。
+- 支持 in-place 操作：d_in 与 d_out 可指向同一 Device 内存。
+- **K 维度无对齐约束**：kernel 通过 DataCopyPad 和 tail-clearing 处理非对齐 K，无需 K 为分组大小的倍数。
+- **UB 容量约束**：沿行剪枝时单行数据（k × elemSize）须不超过单核 UB 容量；沿列剪枝时行块数据（k × elemSize × 16）须不超过单核 UB 容量。超限时返回 `ACL_SPARSE_STATUS_NOT_SUPPORTED`。
 - **异步执行**：算子异步启动，内部不执行 `aclrtSynchronizeStream`；调用方如需读取 d_out 结果，须自行同步 stream。
 - **内存布局**：矩阵 A 须以行主序存储（当前实现中 order 仅影响剪枝方向，不改变内存访问模式；不支持真实列主序存储的矩阵）。
 
@@ -1333,7 +1400,7 @@ aclsparseStatus_t aclsparseLtSpMMAPrune(
 - `ACL_SPARSE_STATUS_SUCCESS`：成功
 - `ACL_SPARSE_STATUS_HANDLE_IS_NULLPTR`：handle 为 nullptr
 - `ACL_SPARSE_STATUS_INVALID_VALUE`：matmulDescr/matA/d_in/d_out 为 nullptr、数据指针未 16 字节对齐
-- `ACL_SPARSE_STATUS_NOT_SUPPORTED`：pruneAlg 非 STRIP/TILE、数据类型非 FP32/FP16/BF16/INT8、K 维度超过 UB 容量、转置路径 in-place（d_in == d_out）
+- `ACL_SPARSE_STATUS_NOT_SUPPORTED`：pruneAlg 非 STRIP/TILE、数据类型非 FP32/FP16/BF16/INT8、K 维度超过 UB 容量
 - 其他值：失败
 
 ---

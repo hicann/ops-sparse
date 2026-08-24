@@ -20,6 +20,8 @@
 
 #include "cann_ops_sparseLt.h"
 
+struct AclsparseltTilingData;
+
 /**
  * @brief matmul plan 内部结构体。
  *
@@ -29,6 +31,8 @@
 struct aclsparseLtMatmulPlan {
     aclsparseLtMatmulDescriptor_t matmulDescr = nullptr;       ///< matmul 描述符引用（非所有权）
     aclsparseLtMatmulAlgSelection_t algSelection = nullptr;    ///< 算法选择描述符引用（非所有权）
+    AclsparseltTilingData* tilingData = nullptr;
+    size_t workspaceSize = 0;
 };
 
 /** @brief 对外句柄安全转换为内部结构体指针。 */

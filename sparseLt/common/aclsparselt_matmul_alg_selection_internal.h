@@ -28,6 +28,11 @@
 struct aclsparseLtMatmulAlgSelection {
     aclsparseLtMatmulDescriptor_t matmulDescr = nullptr;            ///< matmul 描述符引用（非所有权）
     aclsparseLtMatmulAlg_t alg = ACL_SPARSE_LT_MATMUL_ALG_DEFAULT;  ///< 算法模式
+    int32_t algConfigId = 0;
+    int32_t splitK = 1;
+    int32_t searchIterations = 5;
+    int32_t splitKMode = 0;
+    int32_t splitKBuffers = 0;
 };
 
 /** @brief 判断 matmul 描述符引用是否有效（指针非空且句柄已初始化）。 */

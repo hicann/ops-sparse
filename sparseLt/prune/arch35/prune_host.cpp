@@ -73,7 +73,7 @@ static aclsparseStatus_t derive_bsparse_params(
 }
 
 static aclsparseStatus_t validate_prune_params(
-    aclsparseLtConstHandle_t handle, aclsparseLtConstMatmulDescriptor_t* matmulDescr,
+    const aclsparseLtHandle_t* handle, aclsparseLtConstMatmulDescriptor_t* matmulDescr,
     aclsparseLtPruneAlg_t pruneAlg, aclrtStream stream,
     aclsparseLtMatmulDescriptor_t& md, int32_t& dt,
     int32_t& m, int32_t& k, int32_t& pruneAlongRow, int32_t& pruneAlgOut)
@@ -252,7 +252,7 @@ static AclsparseltTilingData compute_prune_tiling(
 // Public API entry point.
 // ============================================================================
 extern "C" aclsparseStatus_t aclsparseLtSpMMAPrune(
-    aclsparseLtConstHandle_t handle,
+    const aclsparseLtHandle_t* handle,
     aclsparseLtConstMatmulDescriptor_t* matmulDescr,
     const void* d_in,
     void* d_out,
