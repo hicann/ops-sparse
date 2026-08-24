@@ -31,6 +31,7 @@ struct aclsparseContext;
 struct aclsparseSpMatDescr;
 struct aclsparseDnVecDescr;
 struct aclsparseDnMatDescr;
+struct aclsparseCubeSpmmMatDescr;
 struct aclsparseSpVecDescr;
 struct aclsparseSpSMDescr;
 
@@ -38,12 +39,14 @@ typedef struct aclsparseContext* aclsparseHandle_t;
 typedef struct aclsparseSpMatDescr* aclsparseSpMatDescr_t;
 typedef struct aclsparseDnVecDescr* aclsparseDnVecDescr_t;
 typedef struct aclsparseDnMatDescr* aclsparseDnMatDescr_t;
+typedef struct aclsparseCubeSpmmMatDescr* aclsparseCubeSpmmMatDescr_t;
 typedef struct aclsparseSpVecDescr* aclsparseSpVecDescr_t;
 typedef struct aclsparseSpSMDescr* aclsparseSpSMDescr_t;
 
 typedef struct aclsparseSpMatDescr const* aclsparseConstSpMatDescr_t;
 typedef struct aclsparseDnVecDescr const* aclsparseConstDnVecDescr_t;
 typedef struct aclsparseDnMatDescr const* aclsparseConstDnMatDescr_t;
+typedef struct aclsparseCubeSpmmMatDescr const* aclsparseConstCubeSpmmMatDescr_t;
 typedef struct aclsparseSpVecDescr const* aclsparseConstSpVecDescr_t;
 
 // Dense matrix data layout (used by B / C of SpMM).
@@ -702,6 +705,95 @@ aclsparseStatus_t aclsparseSpMM(
     const void *alpha, aclsparseConstSpMatDescr_t matA, aclsparseConstDnMatDescr_t matB,
     const void *beta, aclsparseDnMatDescr_t matC, aclDataType computeType,
     aclsparseSpMMAlg_t alg, void *buffer);
+
+/**
+ * @brief 创建 Cube SpMM 稀疏矩阵描述符（BCSR 专用）。
+ *
+ * 该描述符只保存稀疏矩阵的元信息以及预处理后的 BCSR 输出缓冲区；
+ * COO 原始输入不保存在描述符中，而是在 aclsparseCubeSpmmPreprocess 时直接传入。
+ *
+ * @param descr     输出描述符。
+ * @param rows      稀疏矩阵行数 M。
+ * @param cols      稀疏矩阵列数 K。
+ * @param nnz       COO 非零元个数。
+ * @param blockM    行方向块大小。
+ * @param blockK    列方向块大小。
+ * @param numCores  使用的 AICore 数。
+ * @return aclsparseStatus_t
+ */
+aclsparseStatus_t aclsparseCreateCubeSpmmMat(aclsparseCubeSpmmMatDescr_t *descr,
+    int64_t rows, int64_t cols, int64_t nnz,
+    int64_t blockM, int64_t blockK, int32_t numCores);
+
+/**
+ * @brief 销毁 Cube SpMM 稀疏矩阵描述符。
+ */
+aclsparseStatus_t aclsparseDestroyCubeSpmmMat(aclsparseConstCubeSpmmMatDescr_t descr);
+
+/**
+ * @brief 计算 Cube SpMM 所需 workspace 字节数。
+ *
+ * 当前实现不需要 device workspace：tiling 作为 kernel 启动参数随 <<<>>> 下发，
+ * 本接口固定返回 0，aclsparseCubeSpmm 的 buffer 可传 nullptr。
+ */
+aclsparseStatus_t aclsparseCubeSpmmGetBufferSize(
+    aclsparseHandle_t handle,
+    const void *alpha, aclsparseConstCubeSpmmMatDescr_t matA,
+    aclsparseConstDnMatDescr_t matB, const void *beta,
+    aclsparseDnMatDescr_t matC, aclDataType computeType,
+    size_t *size);
+
+/**
+ * @brief 对 Cube SpMM 输入进行预处理（COO -> Cube-BCSR）。
+ *
+ * 只负责稀疏矩阵 A 的格式转换、列凝聚与负载均衡，不处理稠密 B。
+ * 预处理结果保存在 matA 描述符内部；workspace 不被本接口使用。
+ *
+ * @param cooRows   设备 COO 行索引（int32）。
+ * @param cooCols   设备 COO 列索引（int32）。
+ * @param cooVals   设备 COO 值（float16，按 uint16_t 传入）。
+ */
+aclsparseStatus_t aclsparseCubeSpmmPreprocess(
+    aclsparseHandle_t handle,
+    const void *alpha, aclsparseCubeSpmmMatDescr_t matA,
+    const int32_t *cooRows, const int32_t *cooCols, const uint16_t *cooVals,
+    aclDataType computeType);
+
+/**
+ * @brief 对 Cube SpMM 的稠密 B 做 padding 对齐。
+ *
+ * 根据 L0B / CopyInB stride 对齐要求，对稠密 B 的 N 维度做 padding，输出
+ * nPadOut 与 bPadOut。该函数与稀疏 A 的预处理解耦，允许在 A 不变而 B
+ * 变化时单独调用。
+ *
+ * @param bRows     稠密 B 的行数（应等于 matA->cols）。
+ * @param bCols     稠密 B 的列数（原始 N）。
+ * @param bLd       稠密 B 的 leading dimension。
+ * @param bValues   稠密 B 的主机内存指针（fp16），由本接口负责 padding 后 H2D 拷贝到 *bPadOut。
+ * @param bType     稠密 B 的数据类型，必须为 ACL_FLOAT16。
+ * @param bOrder    稠密 B 的存储顺序，必须为 ACL_SPARSE_ORDER_ROW。
+ * @param nPadOut   输出 padding 后的 N 大小。
+ * @param bPadOut   输出 padding 后的 B 设备内存指针（需由调用者 aclrtFree）。
+ */
+aclsparseStatus_t aclsparseCubeSpmmPadDenseMatrixB(
+    aclsparseHandle_t handle,
+    int64_t bRows, int64_t bCols, int64_t bLd, const void *bValues,
+    aclDataType bType, aclsparseOrder_t bOrder,
+    int64_t *nPadOut, void **bPadOut);
+
+/**
+ * @brief Cube SpMM 计算：C = alpha * A(BCSR, fp16) * B(fp16) + beta * C。
+ *
+ * 仅支持 opA = NON_TRANSPOSE, opB = NON_TRANSPOSE；B/C 的 N 需已经过 padding 对齐。
+ * 每次调用都会按当前 B/C 维度重建 tiling，并作为 kernel 启动参数随 <<<>>> 下发；
+ * 当前实现不使用 workspace，buffer 可传 nullptr。
+ */
+aclsparseStatus_t aclsparseCubeSpmm(
+    aclsparseHandle_t handle,
+    const void *alpha, aclsparseConstCubeSpmmMatDescr_t matA,
+    aclsparseConstDnMatDescr_t matB, const void *beta,
+    aclsparseDnMatDescr_t matC, aclDataType computeType,
+    void *buffer);
 
 // ============================================================================
 // SDDMM (Sampled Dense-Dense Matrix Multiplication) Generic API

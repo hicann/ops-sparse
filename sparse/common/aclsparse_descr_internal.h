@@ -127,6 +127,27 @@ struct aclsparseDnMatDescr {
     aclDataType valueType{};
 };
 
+// Cube SpMM 稀疏矩阵描述符内部结构（Cube-BCSR 专用）。
+// 不保存 COO 原始输入；COO 数组在 aclsparseCubeSpmmPreprocess 调用时直接传入。
+struct aclsparseCubeSpmmMatDescr {
+    // 记录当前与该 Cube-BCSR 描述符绑定的 workspace buffer，用于多次 SpMM 复用。
+    const void *activeBuffer = nullptr;
+    int64_t rows = 0;
+    int64_t cols = 0;
+    int64_t nnz = 0;
+    int64_t blockM = 16;
+    int64_t blockK = 16;
+    int32_t numCores = 0;
+    void *rwPtr = nullptr;     // device, int64, 预处理输出
+    void *colRef = nullptr;    // device, int32, 预处理输出
+    void *vals = nullptr;      // device, float16, 预处理输出
+    void *coreInfo = nullptr;  // device, int32, 预处理输出
+    aclsparseIndexBase_t baseType{};
+    aclsparseIndexType_t ptrType{};
+    aclsparseIndexType_t IdxType{};
+    aclDataType valueType{};
+};
+
 // Legacy 矩阵描述符内部结构（Format Conversion / nnz 等 Legacy API 使用）。
 struct aclsparseMatDescr {
     aclsparseMatrixType_t type = ACL_SPARSE_MATRIX_TYPE_GENERAL;
