@@ -79,7 +79,7 @@ target_include_directories(${_target} PRIVATE
     ${CMAKE_SOURCE_DIR}/include
     ${CMAKE_SOURCE_DIR}/sparseLt/prune/${_src_arch}
     ${CMAKE_SOURCE_DIR}/sparseLt/shared
-    ${CMAKE_SOURCE_DIR}/sparseLt/common
+    ${CMAKE_SOURCE_DIR}/sparseLt/matmul_descriptor
     ${CMAKE_SOURCE_DIR}/test/frame
     ${CMAKE_SOURCE_DIR}/test/sparseLt/matmulDescriptorInit
     ${CMAKE_CURRENT_SOURCE_DIR}

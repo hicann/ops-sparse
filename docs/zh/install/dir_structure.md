@@ -30,20 +30,9 @@
 │           └── ${operator}.h                          # 算子内部头文件
 ├── sparseLt                                            # 稀疏矩阵高级运算库（已实现库管理、描述符、算法选择与执行计划接口）
 │   ├── CMakeLists.txt                                 # sparseLt 源文件收集与编译规则
-│   └── common                                         # 库管理、描述符、算法选择与执行计划通用实现（Host 侧 C++）
-│       ├── aclsparselt_auxiliary.cpp                  # 库管理接口实现（Init/Destroy/GetErrorName/GetErrorString）
-│       ├── aclsparselt_error.cpp                      # 错误码字符串实现
-│       ├── aclsparselt_handle_internal.h              # 句柄内部定义
-│       ├── aclsparselt_mat_descriptor_internal.h      # 矩阵描述符内部定义
-│       ├── aclsparselt_mat_descriptor.cpp             # 矩阵描述符初始化/销毁实现
-│       ├── aclsparselt_matmul_descriptor_internal.h   # matmul 描述符内部定义
-│       ├── aclsparselt_matmul_descriptor.cpp          # matmul 描述符初始化/销毁实现
-│       ├── aclsparselt_matmul_alg_selection_internal.h# 算法选择描述符内部定义
-│       ├── aclsparselt_matmul_alg_selection.cpp       # 算法选择描述符初始化/销毁实现
-│       ├── aclsparselt_matmul_plan_internal.h         # 执行计划内部定义
-│       ├── aclsparselt_matmul_plan.cpp                # 执行计划初始化/销毁实现
-│       ├── sparseLtDescriptor_README.md               # 接口规格文档（接口原型/参数/约束/调用示例）
-│       └── sparseLtMatmulPlan_README.md               # 算法选择与执行计划类接口文档
+│   ├── common                                         # handle、错误处理及跨算子公共能力（Host 侧 C++）
+│   ├── ${operator}                                    # 算子目录（如 prune），含实现文件、内部头文件和 README
+│   └── shared                                         # host/kernel 共享头文件及平台查询 helper
 ├── include                                            # 对外头文件
 │   ├── cann_ops_sparse.h                              # aclsparse API 声明（纯 C，含公共类型定义）
 │   └── cann_ops_sparseLt.h                            # aclsparseLt API 声明（含库管理与描述符接口，include cann_ops_sparse.h）

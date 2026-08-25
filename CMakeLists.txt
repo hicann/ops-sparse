@@ -103,7 +103,7 @@ if(ALL_SPARSELT_SRC_FILES)
     target_include_directories(${OPS_SPARSELT} PRIVATE
         ./include
         ./sparseLt
-        ./sparseLt/common
+        ${SPARSELT_INCLUDE_DIRS}
         ${ASCEND_CANN_PACKAGE_PATH}/pkg_inc/op_common/
         ${ASCEND_CANN_PACKAGE_PATH}/pkg_inc/base/
         ${ASCEND_CANN_PACKAGE_PATH}/pkg_inc/

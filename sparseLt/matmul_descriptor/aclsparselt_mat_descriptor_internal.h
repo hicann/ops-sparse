@@ -26,7 +26,7 @@
  * @brief 矩阵描述符内部结构体（dense / structured 共用）。
  *
  * 通过 isStructured 字段区分稠密与结构化稀疏矩阵。
- * 对外完全隐藏，仅在 sparseLt/common/ 实现文件中可见。
+ * 对外完全隐藏，仅在 sparseLt/matmul_descriptor/ 实现文件中可见。
  */
 struct aclsparseLtMatDescriptor {
     int64_t rows = 0;                              ///< 行数

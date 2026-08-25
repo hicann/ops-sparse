@@ -9,12 +9,23 @@
 # ----------------------------------------------------------------------------------------------------------
 
 # sparseLt 源文件收集：host (CXX) 与 kernel (ASC) 分离
-# host: *_host.cpp + common/*.cpp；kernel: *_kernel.cpp
+# 全量递归收集 *.cpp，再从中剔除 _kernel.cpp 得到 host 源文件（新增模块无需修改）
 file(GLOB_RECURSE SPARSELT_HOST_SRCS CONFIGURE_DEPENDS
-    ${CMAKE_CURRENT_SOURCE_DIR}/*_host.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/common/*.cpp)
+    ${CMAKE_CURRENT_SOURCE_DIR}/*.cpp)
 file(GLOB_RECURSE SPARSELT_KERNEL_SRCS_ALL CONFIGURE_DEPENDS
     ${CMAKE_CURRENT_SOURCE_DIR}/*_kernel.cpp)
+list(REMOVE_ITEM SPARSELT_HOST_SRCS ${SPARSELT_KERNEL_SRCS_ALL})
+
+# 自动收集 sparseLt 子目录作为 include 路径（新增模块无需修改 CMake）
+file(GLOB SPARSELT_ALL_SUBDIRS LIST_DIRECTORIES true ${CMAKE_CURRENT_SOURCE_DIR}/*/)
+set(SPARSELT_INCLUDE_DIRS "")
+foreach(_dir ${SPARSELT_ALL_SUBDIRS})
+    if(IS_DIRECTORY ${_dir})
+        list(APPEND SPARSELT_INCLUDE_DIRS ${_dir})
+    endif()
+endforeach()
+set(SPARSELT_INCLUDE_DIRS ${SPARSELT_INCLUDE_DIRS} PARENT_SCOPE)
+
 set(SPARSELT_KERNEL_SRCS "")
 foreach(arch_dir ${SOC_ARCH_DIRS})
     foreach(src ${SPARSELT_KERNEL_SRCS_ALL})

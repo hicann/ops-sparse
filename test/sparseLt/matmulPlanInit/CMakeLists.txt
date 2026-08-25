@@ -11,7 +11,7 @@
 # aclsparseLtMatmulPlanInit / aclsparseLtMatmulAlgSelectionInit GTest tests (Host-side, no kernel)
 #
 # 隔离设计：测试目录独立，不依赖 matmulDescriptorInit 的测试头文件。
-# EXTRA_INCLUDES sparseLt/common：使测试可 include aclsparselt_*_internal.h（白盒字段验证）。
+# EXTRA_INCLUDES 同时指向 matmul_plan 和 matmul_descriptor：测试白盒头文件依赖两个目录中的内部头文件。
 ops_sparse_add_gtest_tests(matmulPlanInit ${OPS_SPARSELT}
     NO_SRC_DIR
-    EXTRA_INCLUDES ${CMAKE_SOURCE_DIR}/sparseLt/common)
+    EXTRA_INCLUDES ${CMAKE_SOURCE_DIR}/sparseLt/matmul_plan ${CMAKE_SOURCE_DIR}/sparseLt/matmul_descriptor)
