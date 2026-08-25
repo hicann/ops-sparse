@@ -28,6 +28,13 @@
 #include <acl/acl.h>
 #include "cann_ops_sparse.h"
 
+// 描述符签名常量，用于 Destroy/Get/Set 校验，防止悬垂指针误操作。
+enum DescrSignature : uint32_t {
+    kDnVecSignature = 0xD0D2D4D6,
+    kSpVecSignature = 0x51705663,
+    kDnMatSignature = 0xD0D2D4D8,
+};
+
 // 稀疏矩阵描述符内部结构（CSR / CSC / COO / BELL / SLICED_ELL 共用）。
 struct aclsparseSpMatDescr {
     // 由 *Preprocess 写入：记录当前已预处理(active)的 workspace buffer。
@@ -108,6 +115,7 @@ struct aclsparseDnVecDescr {
 
 // 稀疏向量描述符内部结构。
 struct aclsparseSpVecDescr {
+    uint32_t signature = 0;
     uint64_t size = 0;
     uint64_t nnz = 0;
     void *indices = nullptr;
@@ -119,6 +127,7 @@ struct aclsparseSpVecDescr {
 
 // 稠密矩阵描述符内部结构（SpMM 的 B / C）。
 struct aclsparseDnMatDescr {
+    uint32_t signature = 0;
     int64_t rows = 0;
     int64_t cols = 0;
     int64_t ld = 0;

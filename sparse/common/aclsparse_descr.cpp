@@ -26,8 +26,6 @@
 
 namespace {
 
-constexpr uint32_t kDnVecSignature = 0xD0D2D4D6;
-
 static aclsparseStatus_t ValidateAttributeParams(const void *spMatDescr, const void *data)
 {
     if (spMatDescr == nullptr) {
@@ -141,8 +139,12 @@ aclsparseStatus_t aclsparseDestroyDnVec(aclsparseConstDnVecDescr_t dnVecDescr)
     if (dnVecDescr == nullptr) {
         return ACL_SPARSE_STATUS_INVALID_VALUE;
     }
-    const_cast<aclsparseDnVecDescr *>(dnVecDescr)->signature = 0;
-    delete const_cast<aclsparseDnVecDescr *>(dnVecDescr);
+    auto *inner = const_cast<aclsparseDnVecDescr *>(dnVecDescr);
+    if (inner->signature != kDnVecSignature) {
+        return ACL_SPARSE_STATUS_INVALID_VALUE;
+    }
+    inner->signature = 0;
+    delete inner;
     return ACL_SPARSE_STATUS_SUCCESS;
 }
 
@@ -159,6 +161,15 @@ aclsparseStatus_t aclsparseCreateSpVec(aclsparseSpVecDescr_t *spVecDescr, int64_
     if (nnz > 0 && (indices == nullptr || values == nullptr)) {
         return ACL_SPARSE_STATUS_INVALID_VALUE;
     }
+    if (idxType != ACL_SPARSE_INDEX_32I && idxType != ACL_SPARSE_INDEX_64I) {
+        return ACL_SPARSE_STATUS_INVALID_VALUE;
+    }
+    if (idxBase != ACL_SPARSE_INDEX_BASE_ZERO && idxBase != ACL_SPARSE_INDEX_BASE_ONE) {
+        return ACL_SPARSE_STATUS_INVALID_VALUE;
+    }
+    if (!IsValidSparseValueType(valueType)) {
+        return ACL_SPARSE_STATUS_INVALID_VALUE;
+    }
     auto *inner = new (std::nothrow) aclsparseSpVecDescr();
     if (inner == nullptr) {
         return ACL_SPARSE_STATUS_ALLOC_FAILED;
@@ -171,6 +182,7 @@ aclsparseStatus_t aclsparseCreateSpVec(aclsparseSpVecDescr_t *spVecDescr, int64_
     inner->idxType = idxType;
     inner->idxBase = idxBase;
     inner->valueType = valueType;
+    inner->signature = kSpVecSignature;
     *spVecDescr = inner;
     return ACL_SPARSE_STATUS_SUCCESS;
 }
@@ -197,7 +209,12 @@ aclsparseStatus_t aclsparseDestroySpVec(aclsparseConstSpVecDescr_t spVecDescr)
     if (spVecDescr == nullptr) {
         return ACL_SPARSE_STATUS_INVALID_VALUE;
     }
-    delete const_cast<aclsparseSpVecDescr *>(spVecDescr);
+    auto *inner = const_cast<aclsparseSpVecDescr *>(spVecDescr);
+    if (inner->signature != kSpVecSignature) {
+        return ACL_SPARSE_STATUS_INVALID_VALUE;
+    }
+    inner->signature = 0;
+    delete inner;
     return ACL_SPARSE_STATUS_SUCCESS;
 }
 
@@ -205,7 +222,7 @@ aclsparseStatus_t aclsparseSpVecGet(aclsparseSpVecDescr_t spVecDescr, int64_t *s
     int64_t *nnz, void **indices, void **values, aclsparseIndexType_t *idxType,
     aclsparseIndexBase_t *idxBase, aclDataType *valueType)
 {
-    if (spVecDescr == nullptr) {
+    if (spVecDescr == nullptr || spVecDescr->signature != kSpVecSignature) {
         return ACL_SPARSE_STATUS_INVALID_VALUE;
     }
     if (size != nullptr) {
@@ -236,7 +253,7 @@ aclsparseStatus_t aclsparseConstSpVecGet(aclsparseConstSpVecDescr_t spVecDescr, 
     int64_t *nnz, const void **indices, const void **values, aclsparseIndexType_t *idxType,
     aclsparseIndexBase_t *idxBase, aclDataType *valueType)
 {
-    if (spVecDescr == nullptr) {
+    if (spVecDescr == nullptr || spVecDescr->signature != kSpVecSignature) {
         return ACL_SPARSE_STATUS_INVALID_VALUE;
     }
     if (size != nullptr) {
@@ -266,7 +283,7 @@ aclsparseStatus_t aclsparseConstSpVecGet(aclsparseConstSpVecDescr_t spVecDescr, 
 aclsparseStatus_t aclsparseSpVecGetIndexBase(aclsparseConstSpVecDescr_t spVecDescr,
     aclsparseIndexBase_t *idxBase)
 {
-    if (spVecDescr == nullptr) {
+    if (spVecDescr == nullptr || spVecDescr->signature != kSpVecSignature) {
         return ACL_SPARSE_STATUS_INVALID_VALUE;
     }
     if (idxBase != nullptr) {
@@ -277,7 +294,7 @@ aclsparseStatus_t aclsparseSpVecGetIndexBase(aclsparseConstSpVecDescr_t spVecDes
 
 aclsparseStatus_t aclsparseSpVecGetValues(aclsparseSpVecDescr_t spVecDescr, void **values)
 {
-    if (spVecDescr == nullptr || values == nullptr) {
+    if (spVecDescr == nullptr || spVecDescr->signature != kSpVecSignature || values == nullptr) {
         return ACL_SPARSE_STATUS_INVALID_VALUE;
     }
     *values = spVecDescr->values;
@@ -287,7 +304,7 @@ aclsparseStatus_t aclsparseSpVecGetValues(aclsparseSpVecDescr_t spVecDescr, void
 aclsparseStatus_t aclsparseConstSpVecGetValues(aclsparseConstSpVecDescr_t spVecDescr,
     const void **values)
 {
-    if (spVecDescr == nullptr || values == nullptr) {
+    if (spVecDescr == nullptr || spVecDescr->signature != kSpVecSignature || values == nullptr) {
         return ACL_SPARSE_STATUS_INVALID_VALUE;
     }
     *values = spVecDescr->values;
@@ -296,7 +313,7 @@ aclsparseStatus_t aclsparseConstSpVecGetValues(aclsparseConstSpVecDescr_t spVecD
 
 aclsparseStatus_t aclsparseSpVecSetValues(aclsparseSpVecDescr_t spVecDescr, void *values)
 {
-    if (spVecDescr == nullptr) {
+    if (spVecDescr == nullptr || spVecDescr->signature != kSpVecSignature) {
         return ACL_SPARSE_STATUS_INVALID_VALUE;
     }
     spVecDescr->values = values;
@@ -621,6 +638,7 @@ aclsparseStatus_t aclsparseCreateDnMat(aclsparseDnMatDescr_t *dnMatDescr,
     if (inner == nullptr) {
         return ACL_SPARSE_STATUS_ALLOC_FAILED;
     }
+    inner->signature = kDnMatSignature;
     inner->rows = rows;
     inner->cols = cols;
     inner->ld = ld;
@@ -636,7 +654,12 @@ aclsparseStatus_t aclsparseDestroyDnMat(aclsparseConstDnMatDescr_t dnMatDescr)
     if (dnMatDescr == nullptr) {
         return ACL_SPARSE_STATUS_INVALID_VALUE;
     }
-    delete const_cast<aclsparseDnMatDescr *>(dnMatDescr);
+    auto *inner = const_cast<aclsparseDnMatDescr *>(dnMatDescr);
+    if (inner->signature != kDnMatSignature) {
+        return ACL_SPARSE_STATUS_INVALID_VALUE;
+    }
+    inner->signature = 0;
+    delete inner;
     return ACL_SPARSE_STATUS_SUCCESS;
 }
 
@@ -644,7 +667,7 @@ aclsparseStatus_t aclsparseDnMatGet(aclsparseDnMatDescr_t dnMatDescr, int64_t *r
                                     int64_t *ld, void **values, aclDataType *valueType,
                                     aclsparseOrder_t *order)
 {
-    if (dnMatDescr == nullptr) {
+    if (dnMatDescr == nullptr || dnMatDescr->signature != kDnMatSignature) {
         return ACL_SPARSE_STATUS_INVALID_VALUE;
     }
     if (rows != nullptr) {
@@ -672,7 +695,7 @@ aclsparseStatus_t aclsparseConstDnMatGet(aclsparseConstDnMatDescr_t dnMatDescr, 
                                          int64_t *cols, int64_t *ld, const void **values,
                                          aclDataType *valueType, aclsparseOrder_t *order)
 {
-    if (dnMatDescr == nullptr) {
+    if (dnMatDescr == nullptr || dnMatDescr->signature != kDnMatSignature) {
         return ACL_SPARSE_STATUS_INVALID_VALUE;
     }
     if (rows != nullptr) {
@@ -698,7 +721,7 @@ aclsparseStatus_t aclsparseConstDnMatGet(aclsparseConstDnMatDescr_t dnMatDescr, 
 
 aclsparseStatus_t aclsparseDnMatGetValues(aclsparseDnMatDescr_t dnMatDescr, void **values)
 {
-    if (dnMatDescr == nullptr) {
+    if (dnMatDescr == nullptr || dnMatDescr->signature != kDnMatSignature) {
         return ACL_SPARSE_STATUS_INVALID_VALUE;
     }
     if (values != nullptr) {
@@ -710,7 +733,7 @@ aclsparseStatus_t aclsparseDnMatGetValues(aclsparseDnMatDescr_t dnMatDescr, void
 aclsparseStatus_t aclsparseConstDnMatGetValues(aclsparseConstDnMatDescr_t dnMatDescr,
                                                const void **values)
 {
-    if (dnMatDescr == nullptr) {
+    if (dnMatDescr == nullptr || dnMatDescr->signature != kDnMatSignature) {
         return ACL_SPARSE_STATUS_INVALID_VALUE;
     }
     if (values != nullptr) {
@@ -721,7 +744,7 @@ aclsparseStatus_t aclsparseConstDnMatGetValues(aclsparseConstDnMatDescr_t dnMatD
 
 aclsparseStatus_t aclsparseDnMatSetValues(aclsparseDnMatDescr_t dnMatDescr, void *values)
 {
-    if (dnMatDescr == nullptr) {
+    if (dnMatDescr == nullptr || dnMatDescr->signature != kDnMatSignature) {
         return ACL_SPARSE_STATUS_INVALID_VALUE;
     }
     dnMatDescr->values = values;
