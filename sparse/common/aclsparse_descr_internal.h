@@ -40,6 +40,7 @@ struct aclsparseSpMatDescr {
     // 由 *Preprocess 写入：记录当前已预处理(active)的 workspace buffer。
     // SpMM/SpMV 据此决定走快路径(复用)还是就地重算（active buffer 机制）。
     const void *activeBuffer = nullptr;
+    int32_t cInDataValid = 0;
     aclsparseFormat_t format{};
     uint64_t rows = 0;
     uint64_t cols = 0;
