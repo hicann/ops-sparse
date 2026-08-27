@@ -190,4 +190,31 @@ struct aclsparseSpMVOpDescr {
     uint32_t alg2NumBlocks = 0;
 };
 
+// SpMMOp 描述符内部结构（Generic API aclsparseSpMMOp 使用）。
+// 持有 matA 的 weak reference（指针不持有所有权，由用户管理生命周期）。
+// matA 在 createDescr 阶段绑定（CSR pattern 固定用于 plan 生命周期）；
+// matB/matC 在 execute 阶段传入（可跨多次 execute 更换，n/ldb/ldc/order 可变）。
+// ALG1 允许仅更新 csrValues 而不重建 descr/plan。
+struct aclsparseSpMMOpDescr {
+    aclsparseFormat_t format{ACL_SPARSE_FORMAT_CSR};
+    uint64_t m = 0;              // CSR 行数（固定，createDescr 绑定）
+    uint64_t k = 0;              // CSR 列数 = 收缩维度（固定，用于 execute 维度校验）
+    uint64_t nnz = 0;
+    aclsparseIndexBase_t indexBase{ACL_SPARSE_INDEX_BASE_ZERO};  // ZERO 或 ONE
+    aclsparseIndexType_t rowOffsetType{ACL_SPARSE_INDEX_32I};     // I32 或 I64（ptrType）
+    aclDataType valueType{ACL_FLOAT};  // FP32 或 FP16（A/B/C 一致）
+    aclsparseOperation_t opB{ACL_SPARSE_OP_NON_TRANSPOSE};  // createDescr 绑定，plan 生命周期固定
+    // CSR device pointers（weak reference，不持有所有权）
+    void *csrRowOffsets = nullptr;  // int32_t* 或 int64_t*（由 rowOffsetType 决定）
+    void *csrColInd = nullptr;      // int32_t*（IdxType 固定 I32）
+    void *csrValues = nullptr;      // float* 或 __fp16*
+    // 算法
+    aclsparseSpMMOpAlg_t alg{ACL_SPARSE_SPMMOP_ALG_DEFAULT};
+    // ALG2 预处理关联的 user-provided buffer（用于 reorder/bin_edge/scratch/tmpScratch）
+    void *userBuffer = nullptr;
+    // ALG2: preprocess kernel 使用的 block 数（execute 时复用，避免重新计算不一致）
+    // ALG1/DEFAULT: 未使用（execute 时独立计算 useBlocks）
+    uint32_t alg2NumBlocks = 0;
+};
+
 #endif // ACLSPARSE_DESCR_INTERNAL_H

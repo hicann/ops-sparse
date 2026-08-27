@@ -221,7 +221,7 @@ typedef enum aclsparseIndexType_t {
                                //           be mixed: allowed (I32,I32), (I64,I32), (I64,I64).
                                //           (I32,I64) is rejected (no practical use case).
                                //   SpMV  — I64 not yet supported (returns NOT_SUPPORTED).
-                               //   SpMM  — I64 not yet supported (returns NOT_SUPPORTED).
+                               //   SpMM  — I64 supported for rowOffsets (ptrType); colInd (idxType) remains I32 only.
 } aclsparseIndexType_t;
 
 typedef enum aclsparseDenseToSparseAlg_t {
@@ -1727,6 +1727,117 @@ aclsparseStatus_t aclsparseSpMVOp(
     aclsparseConstDnVecDescr_t vecX,
     aclsparseConstDnVecDescr_t vecY,
     aclsparseDnVecDescr_t vecZ);
+
+// ============================================================================
+// Generic API: aclsparseSpMMOp — 7 函数
+// ============================================================================
+//  稀疏矩阵-稠密矩阵乘法（descriptor/plan 生命周期模式）。
+//  数学公式: C = alpha * op(A) * op(B) + beta * C
+//    A: CSR(m×k)，B: dense(k×n 或 n×k)，C: dense(m×n，in-place)
+//  生命周期: bufferSize → createDescr → createPlan → [setGlobalUserData]
+//            → execute(可重复) → destroyPlan → destroyDescr。
+//  matA 在 createDescr 阶段绑定（CSR pattern 固定用于 plan 生命周期）；
+//  matB/matC 在 execute 阶段传入（可跨多次 execute 更换，n/ldb/ldc/order 可变）。
+//  对标 cuSPARSE Generic SpMM 语义 + 仓内 spmv_op 7 函数结构。
+
+// SpMMOp 算法枚举（对标 Generic API 中 SpMMOp 的算法选项）
+// 注意：新增枚举值须追加到末尾，保持既有枚举数值不变（ABI 兼容性）。
+typedef enum aclsparseSpMMOpAlg_t {
+    ACL_SPARSE_SPMMOP_ALG_DEFAULT = 0,  // 路由到 ALG1, 无 workspace
+    ACL_SPARSE_SPMMOP_ALG1,             // host-side 静态行切分, 无 workspace, 支持 csrValues 原地更新
+    ACL_SPARSE_SPMMOP_ALG2,             // host-side merge sort (std::stable_sort) + bin_edge 负载均衡, 需 workspace
+    ACL_SPARSE_SPMMOP_ALG1_HIGH_PRECISION  // FP32 Kahan 补偿求和，仅 FP32 生效；workspace 语义同 ALG1
+} aclsparseSpMMOpAlg_t;
+
+// SpMMOp opaque types
+struct aclsparseSpMMOpDescr;
+struct aclsparseSpMMOpPlan;
+
+typedef struct aclsparseSpMMOpDescr* aclsparseSpMMOpDescr_t;
+typedef struct aclsparseSpMMOpDescr const *aclsparseConstSpMMOpDescr_t;
+typedef struct aclsparseSpMMOpPlan* aclsparseSpMMOpPlan_t;
+
+/**
+ * @brief 获取 SpMMOp 所需 workspace 大小（字节数）。
+ *        ALG1/DEFAULT: 返回 0；ALG2: 返回 reorder 表 + bin_edge 表 + 对齐开销。
+ */
+aclsparseStatus_t aclsparseSpMMOp_bufferSize(
+    aclsparseHandle_t handle,
+    aclsparseOperation_t opA,
+    aclsparseOperation_t opB,
+    aclsparseConstSpMatDescr_t matA,
+    aclsparseConstDnMatDescr_t matB,
+    aclsparseDnMatDescr_t matC,
+    aclDataType computeType,
+    aclsparseSpMMOpAlg_t alg,
+    size_t *bufferSize);
+
+/**
+ * @brief 创建 SpMMOp 内部描述符并执行预处理。
+ *        ALG2: 在 host 侧同步完成排序（std::stable_sort）和 bin_edge 负载均衡切分。
+ *        buffer 由调用者在 bufferSize 后分配，保持有效直到 descr 销毁。
+ *        matA 在此阶段绑定（CSR pattern 固定用于 plan 生命周期）。
+ */
+aclsparseStatus_t aclsparseSpMMOp_createDescr(
+    aclsparseHandle_t handle,
+    aclsparseSpMMOpDescr_t *descr,
+    aclsparseOperation_t opA,
+    aclsparseOperation_t opB,
+    aclsparseConstSpMatDescr_t matA,
+    aclsparseConstDnMatDescr_t matB,
+    aclsparseDnMatDescr_t matC,
+    aclDataType computeType,
+    aclsparseSpMMOpAlg_t alg,
+    void *buffer);
+
+/**
+ * @brief 销毁 SpMMOp 描述符并释放其管理的 host 资源。
+ *        descr 为 nullptr 时直接返回 SUCCESS（幂等语义）。
+ */
+aclsparseStatus_t aclsparseSpMMOp_destroyDescr(aclsparseSpMMOpDescr_t descr);
+
+/**
+ * @brief 基于 descr 创建执行计划。
+ *        NPU 侧 identity epilogue: epilogueLTOBuffer 必须为 NULL，否则返回 NOT_SUPPORTED。
+ */
+aclsparseStatus_t aclsparseSpMMOp_createPlan(
+    aclsparseHandle_t handle,
+    aclsparseSpMMOpDescr_t descr,        // 非 const：对标 cuSPARSE，createPlan 可修改 descr
+    aclsparseSpMMOpPlan_t *plan,
+    const void *epilogueLTOBuffer,
+    size_t epilogueLTOBufferSize);
+
+/**
+ * @brief 销毁 SpMMOp 执行计划。
+ *        plan 为 nullptr 时直接返回 SUCCESS（幂等语义）。
+ */
+aclsparseStatus_t aclsparseSpMMOp_destroyPlan(aclsparseSpMMOpPlan_t plan);
+
+/**
+ * @brief 将 epilogue 模块中 __constant__ 变量设置为指定数据。
+ *        NPU 侧 identity epilogue 不使用此接口，直接返回 SUCCESS。
+ */
+aclsparseStatus_t aclsparseSpMMOp_setGlobalUserData(
+    aclsparseHandle_t handle,
+    aclsparseSpMMOpPlan_t plan,
+    const char *epilogueDataName,
+    void *epilogueData,
+    size_t epilogueDataSize);
+
+/**
+ * @brief 执行稀疏矩阵-稠密矩阵乘法：C = alpha * op(A) * op(B) + beta * C
+ *        matB/matC 在 execute 阶段传入（可跨多次 execute 更换）。
+ *        支持 FP32 / FP16（A/B/C dtype 一致，FP32 累加）。
+ *        支持 opB ∈ {NON_TRANSPOSE, TRANSPOSE}，B/C 独立支持 ROW/COL 主序。
+ *        异步执行，同步由调用方通过 stream 负责。
+ */
+aclsparseStatus_t aclsparseSpMMOp(
+    aclsparseHandle_t handle,
+    aclsparseSpMMOpPlan_t plan,
+    const void *alpha,
+    const void *beta,
+    aclsparseConstDnMatDescr_t matB,
+    aclsparseDnMatDescr_t matC);
 
 // ============================================================================
 // Generic API: aclsparseScatter
