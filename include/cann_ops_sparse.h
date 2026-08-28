@@ -1983,6 +1983,14 @@ aclsparseStatus_t aclsparseCreateConstCoo(aclsparseConstSpMatDescr_t *spMatDescr
     aclsparseIndexType_t cooIdxType, aclsparseIndexBase_t idxBase,
     aclDataType valueType);
 
+aclsparseStatus_t aclsparseCooGet(aclsparseSpMatDescr_t spMatDescr, int64_t *rows, int64_t *cols, int64_t *nnz,
+    void **cooRowInd, void **cooColInd, void **cooValues, aclsparseIndexType_t *cooIdxType,
+    aclsparseIndexBase_t *idxBase, aclDataType *valueType);
+
+aclsparseStatus_t aclsparseConstCooGet(aclsparseConstSpMatDescr_t spMatDescr, int64_t *rows, int64_t *cols,
+    int64_t *nnz, const void **cooRowInd, const void **cooColInd, const void **cooValues,
+    aclsparseIndexType_t *cooIdxType, aclsparseIndexBase_t *idxBase, aclDataType *valueType);
+
 aclsparseStatus_t aclsparseCreateSlicedEll(aclsparseSpMatDescr_t *spMatDescr,
     int64_t rows, int64_t cols, int64_t nnz, int64_t sliceNnz, int64_t numSlices,
     void *sellSlicePtr, void *sellColInd, void *sellValues,

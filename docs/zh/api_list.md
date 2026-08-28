@@ -32,6 +32,10 @@
 | [aclsparseGather](#aclsparsegather) | 从稠密向量中按稀疏索引收集元素 |
 | [aclsparseCreateCsr](#aclsparsecreatecsr) | 创建CSR格式稀疏矩阵 |
 | [aclsparseCreateCsc](#aclsparsecreatecsc) | 创建CSC格式稀疏矩阵（**暂未支持**） |
+| [aclsparseCreateCoo](#aclsparsecreatecoo) | 创建COO格式稀疏矩阵 |
+| [aclsparseCreateConstCoo](#aclsparsecreateconstcoo) | 创建只读(const)COO格式稀疏矩阵 |
+| [aclsparseCooGet](#aclsparsecooget) | 获取COO稀疏矩阵描述符的全部字段 |
+| [aclsparseConstCooGet](#aclsparseconstcooget) | 获取只读(const)COO稀疏矩阵描述符的全部字段 |
 | [aclsparseDestroySpMat](#aclsparsedestroyspmat) | 销毁稀疏矩阵对象 |
 | [aclsparseSpMatGetFormat](#aclsparsespmatgetformat) | 获取稀疏矩阵的存储格式 |
 | [aclsparseSpMatGetValues](#aclsparsespmatgetvalues) | 获取稀疏矩阵描述符的 values 指针 |
@@ -580,6 +584,170 @@ aclsparseStatus_t aclsparseCreateCsc(
 
 ---
 
+### aclsparseCreateCoo
+
+```c
+aclsparseStatus_t aclsparseCreateCoo(
+    aclsparseSpMatDescr_t *spMatDescr,
+    int64_t rows,
+    int64_t cols,
+    int64_t nnz,
+    void *cooRowInd,
+    void *cooColInd,
+    void *cooValues,
+    aclsparseIndexType_t cooIdxType,
+    aclsparseIndexBase_t idxBase,
+    aclDataType valueType
+);
+```
+
+**功能**：创建一个 COO（Coordinate）格式的稀疏矩阵。
+
+> **索引类型支持**：COO 描述符支持 `ACL_SPARSE_INDEX_32I` 与 `ACL_SPARSE_INDEX_64I`，cooIdxType 同时约束行/列索引。CooGet 为纯 host 访问器，不涉及 NPU 计算，故两种索引类型均接受（与 cuSPARSE cusparseCreateCoo 一致）。
+
+**参数说明**：
+
+- `spMatDescr`（IN/OUT）：HOST，稀疏矩阵描述符。
+- `rows`（IN）：HOST，矩阵的行数。
+- `cols`（IN）：HOST，矩阵的列数。
+- `nnz`（IN）：HOST，矩阵的非零元素个数。
+- `cooRowInd`（IN）：DEVICE，行索引数组，长度为 `nnz`。
+- `cooColInd`（IN）：DEVICE，列索引数组，长度为 `nnz`。
+- `cooValues`（IN）：DEVICE，非零元素值数组，长度为 `nnz`。
+- `cooIdxType`（IN）：HOST，行/列索引的数据类型。
+- `idxBase`（IN）：HOST，索引的基值。
+- `valueType`（IN）：HOST，非零元素的数据类型。
+
+**返回值**：
+
+- `ACL_SPARSE_STATUS_SUCCESS`：成功
+- `ACL_SPARSE_STATUS_INVALID_VALUE`：`spMatDescr` 为空指针，或 `rows` / `cols` / `nnz` 为负
+- 其他值：失败
+
+---
+
+### aclsparseCreateConstCoo
+
+```c
+aclsparseStatus_t aclsparseCreateConstCoo(
+    aclsparseConstSpMatDescr_t *spMatDescr,
+    int64_t rows,
+    int64_t cols,
+    int64_t nnz,
+    const void *cooRowInd,
+    const void *cooColInd,
+    const void *cooValues,
+    aclsparseIndexType_t cooIdxType,
+    aclsparseIndexBase_t idxBase,
+    aclDataType valueType
+);
+```
+
+**功能**：创建一个只读(const)COO 格式的稀疏矩阵，是 `aclsparseCreateCoo` 的 const 变体：数据指针为 `const`，构造出的描述符为 `aclsparseConstSpMatDescr_t`，只能传给接收 const 形参的接口。索引类型支持同 `aclsparseCreateCoo`。
+
+**参数说明**：
+
+- `spMatDescr`（IN/OUT）：HOST，只读(const)稀疏矩阵描述符。
+- `rows`（IN）：HOST，矩阵的行数。
+- `cols`（IN）：HOST，矩阵的列数。
+- `nnz`（IN）：HOST，矩阵的非零元素个数。
+- `cooRowInd`（IN）：DEVICE，行索引数组，长度为 `nnz`。
+- `cooColInd`（IN）：DEVICE，列索引数组，长度为 `nnz`。
+- `cooValues`（IN）：DEVICE，非零元素值数组，长度为 `nnz`。
+- `cooIdxType`（IN）：HOST，行/列索引的数据类型。
+- `idxBase`（IN）：HOST，索引的基值。
+- `valueType`（IN）：HOST，非零元素的数据类型。
+
+**返回值**：
+
+- `ACL_SPARSE_STATUS_SUCCESS`：成功
+- `ACL_SPARSE_STATUS_INVALID_VALUE`：`spMatDescr` 为空指针，或 `rows` / `cols` / `nnz` 为负
+- 其他值：失败
+
+---
+
+### aclsparseCooGet
+
+```c
+aclsparseStatus_t aclsparseCooGet(
+    aclsparseSpMatDescr_t spMatDescr,
+    int64_t *rows,
+    int64_t *cols,
+    int64_t *nnz,
+    void **cooRowInd,
+    void **cooColInd,
+    void **cooValues,
+    aclsparseIndexType_t *cooIdxType,
+    aclsparseIndexBase_t *idxBase,
+    aclDataType *valueType
+);
+```
+
+**功能**：获取 COO 稀疏矩阵描述符的全部字段。输出参数允许为 `nullptr`，此时仅返回请求的字段。
+
+**参数说明**：
+
+- `spMatDescr`（IN）：HOST，COO 稀疏矩阵描述符。
+- `rows`（OUT）：HOST，矩阵的行数。
+- `cols`（OUT）：HOST，矩阵的列数。
+- `nnz`（OUT）：HOST，矩阵的非零元素个数。
+- `cooRowInd`（OUT）：DEVICE，行索引数组指针。
+- `cooColInd`（OUT）：DEVICE，列索引数组指针。
+- `cooValues`（OUT）：DEVICE，非零元素值数组指针。
+- `cooIdxType`（OUT）：HOST，行/列索引的数据类型。
+- `idxBase`（OUT）：HOST，索引的基值。
+- `valueType`（OUT）：HOST，非零元素的数据类型。
+
+**返回值**：
+
+- `ACL_SPARSE_STATUS_SUCCESS`：成功
+- `ACL_SPARSE_STATUS_INVALID_VALUE`：`spMatDescr` 为空指针
+- `ACL_SPARSE_STATUS_MATRIX_TYPE_NOT_SUPPORTED`：描述符非 COO 格式
+- 其他值：失败
+
+---
+
+### aclsparseConstCooGet
+
+```c
+aclsparseStatus_t aclsparseConstCooGet(
+    aclsparseConstSpMatDescr_t spMatDescr,
+    int64_t *rows,
+    int64_t *cols,
+    int64_t *nnz,
+    const void **cooRowInd,
+    const void **cooColInd,
+    const void **cooValues,
+    aclsparseIndexType_t *cooIdxType,
+    aclsparseIndexBase_t *idxBase,
+    aclDataType *valueType
+);
+```
+
+**功能**：获取只读(const)COO 稀疏矩阵描述符的全部字段，是 `aclsparseCooGet` 的 const 变体：描述符为 `aclsparseConstSpMatDescr_t`，读回的设备指针为 `const void**`。输出参数允许为 `nullptr`，此时仅返回请求的字段。
+
+**参数说明**：
+
+- `spMatDescr`（IN）：HOST，只读(const)COO 稀疏矩阵描述符。
+- `rows`（OUT）：HOST，矩阵的行数。
+- `cols`（OUT）：HOST，矩阵的列数。
+- `nnz`（OUT）：HOST，矩阵的非零元素个数。
+- `cooRowInd`（OUT）：DEVICE，行索引数组指针。
+- `cooColInd`（OUT）：DEVICE，列索引数组指针。
+- `cooValues`（OUT）：DEVICE，非零元素值数组指针。
+- `cooIdxType`（OUT）：HOST，行/列索引的数据类型。
+- `idxBase`（OUT）：HOST，索引的基值。
+- `valueType`（OUT）：HOST，非零元素的数据类型。
+
+**返回值**：
+
+- `ACL_SPARSE_STATUS_SUCCESS`：成功
+- `ACL_SPARSE_STATUS_INVALID_VALUE`：`spMatDescr` 为空指针
+- `ACL_SPARSE_STATUS_MATRIX_TYPE_NOT_SUPPORTED`：描述符非 COO 格式
+- 其他值：失败
+
+---
+
 ### aclsparseDestroySpMat
 
 ```c
@@ -717,6 +885,14 @@ aclsparseStatus_t aclsparseCreateConstDnMat(aclsparseConstDnMatDescr_t *dnMatDes
 
 aclsparseStatus_t aclsparseConstSpMatGetValues(aclsparseConstSpMatDescr_t spMatDescr,
     const void **values);
+
+aclsparseStatus_t aclsparseCreateConstCoo(aclsparseConstSpMatDescr_t *spMatDescr, int64_t rows, int64_t cols, int64_t nnz,
+    const void *cooRowInd, const void *cooColInd, const void *cooValues, aclsparseIndexType_t cooIdxType,
+    aclsparseIndexBase_t idxBase, aclDataType valueType);
+
+aclsparseStatus_t aclsparseConstCooGet(aclsparseConstSpMatDescr_t spMatDescr, int64_t *rows, int64_t *cols,
+    int64_t *nnz, const void **cooRowInd, const void **cooColInd, const void **cooValues,
+    aclsparseIndexType_t *cooIdxType, aclsparseIndexBase_t *idxBase, aclDataType *valueType);
 ```
 
 > **支持状态**：`aclsparseCreateConstCsc` 暂未支持。调用返回 `ACL_SPARSE_STATUS_NOT_SUPPORTED`。
