@@ -97,7 +97,7 @@ target_link_libraries(${_target} PRIVATE
 
 # ---- Copy CSV next to the binary so the test loads it by relative path ----
 set(_csv_file "${CMAKE_CURRENT_SOURCE_DIR}/${_src_arch}/prune_test.csv")
-if(EXISTS ${_csv_file})
+if(EXISTS ${_csv_file} AND TARGET ${_target})
     add_custom_command(TARGET ${_target} POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy ${_csv_file} $<TARGET_FILE_DIR:${_target}>/prune_test.csv
         COMMENT "Copying prune_test.csv to build dir"

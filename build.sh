@@ -109,7 +109,23 @@ if [ "${RUN_TEST}" == "ON" ] && [ -z "${BUILD_OPS}" ]; then
         [ -d "$d" ] || continue
         name=$(basename "$d")
         if [ -f "${d}/CMakeLists.txt" ]; then
-            TEST_OP_LIST+=("$name")
+            has_sub=0
+            for d2 in "${d}"*/; do
+                [ -d "$d2" ] || continue
+                if [ -f "${d2}/CMakeLists.txt" ]; then
+                    has_sub=1
+                    TEST_OP_LIST+=("$(basename "$d2")")
+                fi
+            done
+            [ "$has_sub" -eq 0 ] && TEST_OP_LIST+=("$name")
+        else
+            for d2 in "${d}"*/; do
+                [ -d "$d2" ] || continue
+                name2=$(basename "$d2")
+                if [ -f "${d2}/CMakeLists.txt" ]; then
+                    TEST_OP_LIST+=("$name2")
+                fi
+            done
         fi
     done
     shopt -u nullglob
@@ -118,6 +134,32 @@ if [ "${RUN_TEST}" == "ON" ] && [ -z "${BUILD_OPS}" ]; then
         exit 1
     fi
     BUILD_OPS=$(printf '%s\n' "${TEST_OP_LIST[@]}" | sort | paste -sd, -)
+fi
+
+# 展开 --ops 里的组目录为叶子算子（如 --ops=sparseLt → matmulDescriptorInit,matmulPlanInit）
+# 组目录定义：test/<name>/ 下存在含 CMakeLists.txt 的子目录；否则按普通算子保留。
+# 通用逻辑，不限定具体组名/算子名，新增组目录自动生效。
+if [ -n "${BUILD_OPS}" ]; then
+    IFS=',' read -ra _ops_arr <<< "${BUILD_OPS}"
+    _expanded=""
+    shopt -s nullglob
+    for _op in "${_ops_arr[@]}"; do
+        if [ -d "${BASE_PATH}/test/${_op}" ]; then
+            _has_leaf=0
+            for _d2 in "${BASE_PATH}/test/${_op}"/*/; do
+                if [ -f "${_d2}CMakeLists.txt" ]; then
+                    _leaf=$(basename "${_d2}")
+                    _expanded="${_expanded:+${_expanded},}${_leaf}"
+                    _has_leaf=1
+                fi
+            done
+            [ "$_has_leaf" -eq 0 ] && _expanded="${_expanded:+${_expanded},}${_op}"
+        else
+            _expanded="${_expanded:+${_expanded},}${_op}"
+        fi
+    done
+    shopt -u nullglob
+    BUILD_OPS="${_expanded}"
 fi
 
 echo "BUILD_OPS=${BUILD_OPS}, RUN_TEST=${RUN_TEST}, ENABLE_PACKAGE=${ENABLE_PACKAGE}"
@@ -166,8 +208,8 @@ fi
 
 if [ -n "${BUILD_OPS}" ]; then
     # 将逗号分隔转换为 CMake 列表格式（分号分隔）
-    TEST_NAMES_CMAKE="${BUILD_OPS//,/;}"
-    CMAKE_OPTIONS="${CMAKE_OPTIONS} -DBUILD_TEST=ON -DTEST_NAMES=${TEST_NAMES_CMAKE}"
+    OP_LIST_CMAKE="${BUILD_OPS//,/;}"
+    CMAKE_OPTIONS="${CMAKE_OPTIONS} -DBUILD_TEST=ON -DOP_LIST=${OP_LIST_CMAKE}"
 fi
 
 if [ "${ENABLE_PACKAGE}" == "TRUE" ]; then
@@ -215,6 +257,10 @@ if [ "${RUN_TEST}" == "ON" ]; then
         fi
 
         TEST_BIN="${BUILD_DIR}/test/${op}/${op}_test"
+        if [ ! -f "${TEST_BIN}" ]; then
+            found=$(find "${BUILD_DIR}/test" -name "${op}_test" -type f 2>/dev/null | head -1)
+            [ -n "$found" ] && TEST_BIN="$found"
+        fi
         echo ""
         echo "========== Running ${op}_test =========="
         if [ ! -f "${TEST_BIN}" ]; then

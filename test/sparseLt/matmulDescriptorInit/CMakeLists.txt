@@ -18,6 +18,13 @@
 # - EXTRA_INCLUDES sparseLt/matmul_descriptor：使测试可 include aclsparselt_*_internal.h（白盒字段验证）。
 # - 链接 ${OPS_SPARSELT}（libops_sparseLt.so，接口实现在该库内）。
 # - operator 名取 matmulDescriptorInit（与 test.cpp/test.csv 文件名前缀一致）。
+if(NOT ENABLE_SPARSELT)
+    message(STATUS "[test/matmulDescriptorInit] sparseLt disabled, skipping test")
+    file(APPEND ${CMAKE_BINARY_DIR}/test/skipped_tests.list
+        "matmulDescriptorInit|sparseLt disabled (no kernel sources for SOC=${SOC_VERSION})\n")
+    return()
+endif()
+
 ops_sparse_add_gtest_tests(matmulDescriptorInit ${OPS_SPARSELT}
     NO_SRC_DIR
     EXTRA_INCLUDES ${CMAKE_SOURCE_DIR}/sparseLt/matmul_descriptor)

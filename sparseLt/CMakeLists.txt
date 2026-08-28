@@ -65,6 +65,14 @@ else()
                     "sparseLt library will be skipped")
 endif()
 
+# No kernel sources for current SOC arch → host code references kernel launch
+# functions that would be undefined at link time; disable sparseLt entirely.
+if(NOT SPARSELT_KERNEL_SRCS)
+    set(ENABLE_SPARSELT FALSE)
+    message(STATUS "[sparseLt] No kernel sources for SOC=${SOC_VERSION} (arch=${SOC_ARCH_DIRS}), "
+                   "skipping sparseLt library")
+endif()
+
 if(NOT ENABLE_SPARSELT)
     # 清空源文件列表，使根 CMakeLists.txt 的 if(ALL_SPARSELT_SRC_FILES) 跳过库构建
     set(SPARSELT_HOST_SRCS "")

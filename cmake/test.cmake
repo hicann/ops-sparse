@@ -17,6 +17,13 @@ else()
     set(_ops_sparse_libc_sec "${ASCENDCL_PATH}/libc_sec.so")
 endif()
 
+# Profiling library (needed by sparseLt kernel launch functions on arch35)
+if(DEFINED ENV{EAGER_LIBRARY_PATH} AND NOT "$ENV{EAGER_LIBRARY_PATH}" STREQUAL "")
+    set(_ops_sparse_ascendc_runtime_lib "$ENV{EAGER_LIBRARY_PATH}/libascendc_runtime.a")
+else()
+    set(_ops_sparse_ascendc_runtime_lib "${ASCENDCL_PATH}/libascendc_runtime.a")
+endif()
+
 # Register operator test from test/${operator}/${arch_dir}/${operator}_test.cpp.
 # Picks the first matching arch dir in SOC_ARCH_DIRS; skips if none found.
 function(ops_sparse_add_test operator link_lib)
@@ -52,13 +59,26 @@ function(ops_sparse_add_test operator link_lib)
         ${CMAKE_SOURCE_DIR}/sparse/${operator}/${_src_arch}
         ${CMAKE_SOURCE_DIR}/sparse/common
         ${CMAKE_SOURCE_DIR}/test/frame
+        ${ASCEND_CANN_PACKAGE_PATH}/${CMAKE_SYSTEM_PROCESSOR}-linux/include
         $ENV{LINUX_INCLUDE_PATH}
     )
 
+    target_link_directories(${target} PRIVATE
+        ${ASCEND_CANN_PACKAGE_PATH}/${CMAKE_SYSTEM_PROCESSOR}-linux/lib64
+        ${ASCEND_CANN_PACKAGE_PATH}/lib64
+    )
     target_link_libraries(${target} PRIVATE
+        "-Wl,--start-group"
         ${link_lib}
+        ${_ops_sparse_ascendc_runtime_lib}
         ${_ops_sparse_ascendcl_lib}
         ${_ops_sparse_libc_sec}
+        ascendcl
+        tiling_api
+        platform
+        unified_dlog
+        mmpa
+        "-Wl,--end-group"
     )
 
     if(TEST_USE_EIGEN)
@@ -184,6 +204,7 @@ function(ops_sparse_add_gtest_tests operator link_lib)
         ${CMAKE_SOURCE_DIR}/test/frame
         ${CMAKE_CURRENT_SOURCE_DIR}
         ${_base_dir}
+        ${ASCEND_CANN_PACKAGE_PATH}/${CMAKE_SYSTEM_PROCESSOR}-linux/include
         $ENV{LINUX_INCLUDE_PATH}
         ${GTEST_INCLUDE_DIRS}
         ${ARG_EXTRA_INCLUDES}
@@ -197,10 +218,22 @@ function(ops_sparse_add_gtest_tests operator link_lib)
         )
     endif()
 
+    target_link_directories(${target} PRIVATE
+        ${ASCEND_CANN_PACKAGE_PATH}/${CMAKE_SYSTEM_PROCESSOR}-linux/lib64
+        ${ASCEND_CANN_PACKAGE_PATH}/lib64
+    )
     target_link_libraries(${target} PRIVATE
+        "-Wl,--start-group"
         ${link_lib}
+        ${_ops_sparse_ascendc_runtime_lib}
         ${_ops_sparse_ascendcl_lib}
         ${_ops_sparse_libc_sec}
+        ascendcl
+        tiling_api
+        platform
+        unified_dlog
+        mmpa
+        "-Wl,--end-group"
         ${GTEST_LIBRARIES}
         pthread
     )

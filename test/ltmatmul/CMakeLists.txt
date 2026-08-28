@@ -104,7 +104,7 @@ target_link_libraries(${_target} PRIVATE
 
 # ---- Copy CSV file next to the binary so tests load it by relative path ----
 set(_csv_ltmatmul "${CMAKE_CURRENT_SOURCE_DIR}/${_src_arch}/ltmatmul_test.csv")
-if(EXISTS ${_csv_ltmatmul})
+if(EXISTS ${_csv_ltmatmul} AND TARGET ${_target})
     add_custom_command(TARGET ${_target} POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy ${_csv_ltmatmul} $<TARGET_FILE_DIR:${_target}>/ltmatmul_test.csv
         COMMENT "Copying ltmatmul_test.csv to build dir"

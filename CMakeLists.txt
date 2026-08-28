@@ -79,6 +79,7 @@ set(CMAKE_INSTALL_PREFIX "${CMAKE_CURRENT_LIST_DIR}/build_out" CACHE STRING "ins
 
 # 外部传参
 option(ENABLE_PACKAGE "Enable build package" OFF)
+set(OP_LIST "" CACHE STRING "Operator list to build (semicolon-separated, e.g. 'spmv;spmm')")
 
 # ========= 构建动态库 =========
 find_package(ASC REQUIRED)
@@ -117,11 +118,16 @@ if(ALL_SPARSELT_SRC_FILES)
     )
     target_link_directories(${OPS_SPARSELT} PRIVATE
         ${ASCEND_CANN_PACKAGE_PATH}/${CMAKE_SYSTEM_PROCESSOR}-linux/lib64
+        ${ASCEND_CANN_PACKAGE_PATH}/lib64
     )
     target_link_libraries(${OPS_SPARSELT} PRIVATE
         tiling_api
         platform
         ascendcl
+        ${ASCEND_CANN_PACKAGE_PATH}/lib64/libascendc_runtime.a
+        unified_dlog
+        mmpa
+        profapi
     )
 endif()
 

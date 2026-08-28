@@ -2,7 +2,7 @@
 
 ## 使用须知
 
-本指南旨在帮助您快速上手CANN和`ops-sparse`算子仓的使用。为方便快速了解算子开发全流程，将以**Spmv**算子为实践对象，其源文件位于`ops-sparse/src/spmv/arch22`（Ascend 910B 实现），具体操作流程如下：
+本指南旨在帮助您快速上手CANN和`ops-sparse`算子仓的使用。为方便快速了解算子开发全流程，将以**Spmv**算子为实践对象，其源文件位于`ops-sparse/sparse/spmv/arch22`（Ascend 910B 实现），具体操作流程如下：
 
 1. **[环境部署](zh/install/quick_install.md)**：完成软件包安装和源码下载，此处不再赘述。快速入门场景下，**推荐WebIDE或Docker环境**，安装操作简单。
 
@@ -13,6 +13,14 @@
 3. **[算子开发](#二算子开发)**：通过修改现有算子Kernel，体验开发、编译、验证的完整闭环。
 
 4. **[算子调试](#三算子调试)**：掌握算子打印和性能采集方法。
+
+## 环境准备
+
+**[环境部署](zh/install/quick_install.md)**：完成软件包安装和源码下载，此处不再赘述。快速入门场景下，**推荐WebIDE或Docker环境**，安装操作简单。
+
+> **说明**：当前WebIDE或Docker环境默认最新商发版CANN包；如需体验master分支最新能力，可手动安装CANN包，注意软件与源码版本配套。
+
+---
 
 ## 一、编译运行
 
@@ -57,19 +65,12 @@ bash build.sh --soc=ascend910b --ops=spmv --run
 预期输出：各测试用例精度比对通过，并最终打印汇总信息。
 
 ```txt
-========================================
-              Test Summary
-========================================
-Total cases  : ...
-Passed       : ...
-Failed       : 0
-Pass rate    : 100%
-========================================
 [PASS] spmv_test
 
 ========================================
 Test Summary:
   Passed: 1 - spmv
+  Skipped: 0 -
   Failed: 0 -
 ========================================
 ```
@@ -80,7 +81,7 @@ Test Summary:
 
 ### 1. 修改 Kernel
 
-打开 `src/spmv/arch22/kernels/spmv_kernel.h`，在 `Compute` 函数的 float 路径中，将 `alpha` 缩放临时改为 2 倍（**仅用于学习，勿合入**）：
+打开 `sparse/spmv/arch22/kernels/spmv_kernel.h`，在 `Compute` 函数的 float 路径中，将 `alpha` 缩放临时改为 2 倍（**仅用于学习，勿合入**）：
 
 ```cpp
 AscendC::Muls(floatTmpBuffer, floatTmpBuffer, this->alpha * 2.0f, 1);
@@ -105,7 +106,7 @@ bash build.sh --soc=ascend910b --ops=spmv --run
 
 算子如果出现执行失败、精度异常等问题，添加打印进行问题分析和定位。
 
-请在 `src/spmv/arch22/kernels/spmv_kernel.h`（或具体 dtype 对应的 `kernels/spmv_kernel_*.cpp`）中进行代码修改。
+请在 `sparse/spmv/arch22/kernels/spmv_kernel.h`（或具体 dtype 对应的 `kernels/spmv_kernel_*.cpp`）中进行代码修改。
 
 * **printf**
 
