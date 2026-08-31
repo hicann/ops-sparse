@@ -876,7 +876,7 @@ TEST_F(MatmulExceptionTest, WB_L2_44_MatANullBSparse) {
     SparseLtPlanGuard plan(handle.get(), md.get(), algSel.get());
 
     size_t wsSize = 0;
-    ASSERT_EQ(aclsparseLtMatmulGetWorkspaceSize(handle.get(), plan.cptr(), &wsSize),
+    ASSERT_EQ(aclsparseLtMatmulGetWorkspace(handle.get(), plan.cptr(), &wsSize),
               ACL_SPARSE_STATUS_SUCCESS);
     auto dWorkspace = sparse_test::DeviceBuffer::alloc(wsSize);
     auto dA = sparse_test::DeviceBuffer::alloc(8 * 8 * sizeof(float));

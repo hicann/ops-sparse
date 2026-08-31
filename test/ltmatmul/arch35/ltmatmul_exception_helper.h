@@ -112,7 +112,7 @@ struct MatmulExceptionCtx {
         dB = sparse_test::DeviceBuffer::copyFrom(hB.data(), kn * sizeof(float));
         dC = sparse_test::DeviceBuffer::copyFrom(hC.data(), mn * sizeof(float));
         dD = sparse_test::DeviceBuffer::alloc(mn * sizeof(float));
-        aclsparseStatus_t wsRet = aclsparseLtMatmulGetWorkspaceSize(handle.get(), plan.cptr(), &workspaceSize);
+        aclsparseStatus_t wsRet = aclsparseLtMatmulGetWorkspace(handle.get(), plan.cptr(), &workspaceSize);
         if (wsRet != ACL_SPARSE_STATUS_SUCCESS) {
             throw std::runtime_error("MatmulExceptionCtx: GetWorkspaceSize failed");
         }

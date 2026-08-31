@@ -401,7 +401,7 @@ inline bool SetupAndRunAlgMatmul(
 
     SparseLtPlanGuard plan(handle, matmulDesc, algSel);
 
-    auto wsRet = aclsparseLtMatmulGetWorkspaceSize(handle, plan.cptr(), &result.workspaceSize);
+    auto wsRet = aclsparseLtMatmulGetWorkspace(handle, plan.cptr(), &result.workspaceSize);
     if (wsRet != ACL_SPARSE_STATUS_SUCCESS) {
         std::cerr << "[NPU] MatmulGetWorkspaceSize failed: " << wsRet << std::endl;
         result.matmulRet = wsRet;

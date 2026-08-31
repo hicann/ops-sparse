@@ -332,7 +332,7 @@ inline bool PreparePlanAndWorkspace(MatmulNpuResult& result,
         handle.get(), algSel->cptr(),
         ACLSPARSELT_MATMUL_SPLIT_K_MODE, &result.gotSplitKMode, sizeof(int32_t));
     plan = std::make_unique<SparseLtPlanGuard>(handle.get(), matmulDesc.get(), algSel->get());
-    result.wsRet = aclsparseLtMatmulGetWorkspaceSize(handle.get(), plan->cptr(), &result.workspaceSize);
+    result.wsRet = aclsparseLtMatmulGetWorkspace(handle.get(), plan->cptr(), &result.workspaceSize);
     if (result.wsRet != ACL_SPARSE_STATUS_SUCCESS) { return false; }
     dWorkspace = (result.workspaceSize > 0)
         ? DeviceBuffer::alloc(result.workspaceSize) : DeviceBuffer{};

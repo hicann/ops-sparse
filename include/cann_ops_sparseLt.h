@@ -537,7 +537,7 @@ aclsparseStatus_t aclsparseLtMatmulAlgGetAttribute(
  *         ACL_SPARSE_STATUS_HANDLE_IS_NULLPTR handle 为空
  *         ACL_SPARSE_STATUS_INVALID_VALUE plan/workspaceSize 为空
  */
-aclsparseStatus_t aclsparseLtMatmulGetWorkspaceSize(
+aclsparseStatus_t aclsparseLtMatmulGetWorkspace(
     aclsparseLtConstHandle_t handle,
     aclsparseLtConstMatmulPlan_t* plan, size_t* workspaceSize);
 

@@ -274,7 +274,7 @@ int aclsparseLtAlgSetAttributeTest()
 
     // 10. 查询 workspace 大小并分配（splitK>1 时包含 temp 区）
     size_t workspaceSize = 0;
-    ret = aclsparseLtMatmulGetWorkspaceSize(&handle, &plan, &workspaceSize);
+    ret = aclsparseLtMatmulGetWorkspace(&handle, &plan, &workspaceSize);
     CHECK_RET(ret == ACL_SPARSE_STATUS_SUCCESS, LOG_PRINT("GetWorkspaceSize failed: %d\n", ret); return ret);
     LOG_PRINT("workspaceSize = %zu bytes (splitK=2 includes temp buffer)\n", workspaceSize);
     void *dWorkspace = nullptr;

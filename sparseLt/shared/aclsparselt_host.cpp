@@ -162,7 +162,7 @@ uint64_t get_ub_size()
     return (ubSize > 0) ? ubSize : static_cast<uint64_t>(248 * 1024);
 }
 
-extern "C" aclsparseStatus_t aclsparseLtMatmulGetWorkspaceSize(
+extern "C" aclsparseStatus_t aclsparseLtMatmulGetWorkspace(
     const aclsparseLtHandle_t* handle,
     aclsparseLtConstMatmulPlan_t* plan, size_t* workspaceSize)
 {

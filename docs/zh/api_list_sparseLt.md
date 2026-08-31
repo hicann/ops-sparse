@@ -17,8 +17,8 @@
 | [aclsparseLtDestroy](#aclsparseltdestroy) | 销毁 aclsparseLt 库句柄 |
 | [aclsparseLtGetErrorName](#aclsparseltgeterrorname) | 获取状态码对应的枚举名字符串 |
 | [aclsparseLtGetErrorString](#aclsparseltgeterrorstring) | 获取状态码对应的描述性字符串 |
-| [aclsparseLtGetVersion](#aclsparseltgetversion) | 获取 aclsparseLt 库版本号（**暂未支持**） |
-| [aclsparseLtGetProperty](#aclsparseltgetproperty) | 获取 aclsparseLt 库属性信息（**暂未支持**） |
+| [aclsparseLtGetVersion](#aclsparseltgetversion) | 获取 aclsparseLt 库版本号 |
+| [aclsparseLtGetProperty](#aclsparseltgetproperty) | 获取 aclsparseLt 库属性信息 |
 | [aclsparseLtDenseDescriptorInit](#aclsparseltdensedescriptorinit) | 初始化稠密矩阵描述符 |
 | [aclsparseLtStructuredDescriptorInit](#aclsparseltstructureddescriptorinit) | 初始化结构化稀疏矩阵描述符（2:4） |
 | [aclsparseLtMatDescriptorDestroy](#aclsparseltmatdescriptordestroy) | 销毁矩阵描述符 |
@@ -26,16 +26,16 @@
 | [aclsparseLtMatDescGetAttribute](#aclsparseltmatdescgetattribute) | 获取矩阵描述符属性（**暂未支持**） |
 | [aclsparseLtMatmulDescriptorInit](#aclsparseltmatmuldescriptorinit) | 初始化矩阵乘法描述符 |
 | [aclsparseLtMatmulDescriptorDestroy](#aclsparseltmatmuldescriptordestroy) | 销毁矩阵乘法描述符 |
-| [aclsparseLtMatmulDescSetAttribute](#aclsparseltmatmuldescsetattribute) | 设置 matmul 描述符属性（**暂未支持**） |
-| [aclsparseLtMatmulDescGetAttribute](#aclsparseltmatmuldescgetattribute) | 获取 matmul 描述符属性（**暂未支持**） |
+| [aclsparseLtMatmulDescSetAttribute](#aclsparseltmatmuldescsetattribute) | 设置 matmul 描述符属性 |
+| [aclsparseLtMatmulDescGetAttribute](#aclsparseltmatmuldescgetattribute) | 获取 matmul 描述符属性 |
 | [aclsparseLtMatmulAlgSelectionInit](#aclsparseltmatmulalgselectioninit) | 初始化 matmul 算法选择描述符 |
 | [aclsparseLtMatmulAlgSelectionDestroy](#aclsparseltmatmulalgselectiondestroy) | 销毁 matmul 算法选择描述符 |
-| [aclsparseLtMatmulAlgSetAttribute](#aclsparseltmatmulalgsetattribute) | 设置算法选择描述符属性（**暂未支持**） |
-| [aclsparseLtMatmulAlgGetAttribute](#aclsparseltmatmulalggetattribute) | 获取算法选择描述符属性（**暂未支持**） |
+| [aclsparseLtMatmulAlgSetAttribute](#aclsparseltmatmulalgsetattribute) | 设置算法选择描述符属性 |
+| [aclsparseLtMatmulAlgGetAttribute](#aclsparseltmatmulalggetattribute) | 获取算法选择描述符属性 |
 | [aclsparseLtMatmulPlanInit](#aclsparseltmatmulplaninit) | 初始化 matmul 执行计划 |
 | [aclsparseLtMatmulPlanDestroy](#aclsparseltmatmulplandestroy) | 销毁 matmul 执行计划 |
-| [aclsparseLtMatmulGetWorkspace](#aclsparseltmatmulgetworkspace) | 获取 matmul 所需 workspace 大小（**暂未支持**） |
-| [aclsparseLtMatmul](#aclsparseltmatmul) | 执行结构化稀疏矩阵乘法（**暂未支持**） |
+| [aclsparseLtMatmulGetWorkspace](#aclsparseltmatmulgetworkspace) | 获取 matmul 所需 workspace 大小 |
+| [aclsparseLtMatmul](#aclsparseltmatmul) | 执行结构化稀疏矩阵乘法 |
 | [aclsparseLtMatmulSearch](#aclsparseltmatmulsearch) | 搜索最优 matmul 算法（**暂未支持**） |
 | [aclsparseLtSpMMAPrune](#aclsparseltspmmaprune) | 对稠密矩阵执行 2:4 结构化稀疏剪枝 |
 | [aclsparseLtSpMMAPruneCheck](#aclsparseltspmmaprunecheck) | 校验稠密矩阵是否已满足 2:4 结构化稀疏约束（**暂未支持**） |
@@ -122,15 +122,13 @@ const char* aclsparseLtGetErrorString(aclsparseStatus_t status);
 
 ### aclsparseLtGetVersion
 
-> **支持状态**：暂未支持。当前版本尚未实现。
-
 ```c
 aclsparseStatus_t aclsparseLtGetVersion(
     aclsparseLtConstHandle_t handle,
     int* version);
 ```
 
-**功能**：获取 aclsparseLt 库的版本号。
+**功能**：获取 aclsparseLt 库的版本号。版本编码格式：MAJOR*10000 + MINOR*100 + PATCH（如 0.1.0 -> 100）。
 
 **参数说明**：
 
@@ -140,25 +138,24 @@ aclsparseStatus_t aclsparseLtGetVersion(
 **返回值**：
 
 - `ACL_SPARSE_STATUS_SUCCESS`：成功
+- `ACL_SPARSE_STATUS_HANDLE_IS_NULLPTR`：handle 为空指针
 - `ACL_SPARSE_STATUS_INVALID_VALUE`：version 为空指针
 
 ---
 
 ### aclsparseLtGetProperty
 
-> **支持状态**：暂未支持。当前版本尚未实现。
-
 ```c
 aclsparseStatus_t aclsparseLtGetProperty(
-    libraryPropertyType propertyType,
+    aclsparseLtLibraryPropertyType_t propertyType,
     int* value);
 ```
 
-**功能**：获取 aclsparseLt 库的属性信息（如主版本号、次版本号、补丁版本号）。
+**功能**：获取 aclsparseLt 库的属性信息（如主版本号、次版本号、补丁版本号）。根据 propertyType 返回版本号的 MAJOR / MINOR / PATCH 分量到 int* value。
 
 **参数说明**：
 
-- `propertyType`（IN）：HOST，请求的属性类型（如 `MAJOR_VERSION` / `MINOR_VERSION` / `PATCH_LEVEL`）。
+- `propertyType`（IN）：HOST，请求的属性类型（`ACLSPARSELT_MAJOR_VERSION` / `ACLSPARSELT_MINOR_VERSION` / `ACLSPARSELT_PATCH_LEVEL`）。
 - `value`（OUT）：HOST，返回请求属性的值。
 
 **返回值**：
@@ -387,64 +384,60 @@ aclsparseStatus_t aclsparseLtMatmulDescriptorDestroy(aclsparseLtMatmulDescriptor
 
 ### aclsparseLtMatmulDescSetAttribute
 
-> **支持状态**：暂未支持。当前版本尚未实现。
-
 ```c
 aclsparseStatus_t aclsparseLtMatmulDescSetAttribute(
     aclsparseLtConstHandle_t handle,
     aclsparseLtMatmulDescriptor_t* matmulDescr,
-    aclsparseLtMatmulDescAttribute_t attribute,
+    aclsparseLtMatmulDescAttribute_t matmulAttribute,
     const void* data,
     size_t dataSize);
 ```
 
-**功能**：设置 matmul 描述符的指定属性（如激活函数、偏置等）。
+**功能**：设置 matmul 描述符的指定属性（如向量缩放：ALPHA_VECTOR_SCALING / BETA_VECTOR_SCALING）。设置 BETA_VECTOR_SCALING=true 时隐含 ALPHA_VECTOR_SCALING=true（cuSPARSELt 语义）。
 
 **参数说明**：
 
 - `handle`（IN）：HOST，aclsparseLt 库句柄。
 - `matmulDescr`（IN/OUT）：HOST，matmul 描述符。
-- `attribute`（IN）：HOST，要设置的 matmul 描述符属性。
-- `data`（IN）：HOST，指向属性值的指针。
-- `dataSize`（IN）：HOST，属性值字节数，用于校验。
+- `matmulAttribute`（IN）：HOST，要设置的 matmul 描述符属性。
+- `data`（IN）：HOST，指向属性值的指针（int 类型）。
+- `dataSize`（IN）：HOST，属性值字节数，须等于 `sizeof(int)`，用于校验。
 
 **返回值**：
 
 - `ACL_SPARSE_STATUS_SUCCESS`：成功
 - `ACL_SPARSE_STATUS_HANDLE_IS_NULLPTR`：handle 为空指针
-- `ACL_SPARSE_STATUS_INVALID_VALUE`：matmulDescr 为空、attribute 非法、data 为空、dataSize 与属性不匹配
+- `ACL_SPARSE_STATUS_INVALID_VALUE`：matmulDescr 为空、matmulAttribute 非法、data 为空、dataSize 与属性不匹配
 - `ACL_SPARSE_STATUS_NOT_SUPPORTED`：该属性暂不支持
 
 ---
 
 ### aclsparseLtMatmulDescGetAttribute
 
-> **支持状态**：暂未支持。当前版本尚未实现。
-
 ```c
 aclsparseStatus_t aclsparseLtMatmulDescGetAttribute(
     aclsparseLtConstHandle_t handle,
     aclsparseLtConstMatmulDescriptor_t* matmulDescr,
-    aclsparseLtMatmulDescAttribute_t attribute,
+    aclsparseLtMatmulDescAttribute_t matmulAttribute,
     void* data,
     size_t dataSize);
 ```
 
-**功能**：获取 matmul 描述符的指定属性（如激活函数、偏置等）。
+**功能**：获取 matmul 描述符的指定属性（如向量缩放：ALPHA_VECTOR_SCALING / BETA_VECTOR_SCALING 的当前启用状态）。
 
 **参数说明**：
 
 - `handle`（IN）：HOST，aclsparseLt 库句柄。
 - `matmulDescr`（IN）：HOST，matmul 描述符。
-- `attribute`（IN）：HOST，要获取的 matmul 描述符属性。
-- `data`（OUT）：HOST，返回属性值的内存地址。
-- `dataSize`（IN）：HOST，属性值字节数，用于校验。
+- `matmulAttribute`（IN）：HOST，要获取的 matmul 描述符属性。
+- `data`（OUT）：HOST，返回属性值的内存地址（写入 int，1=启用，0=禁用）。
+- `dataSize`（IN）：HOST，属性值字节数，须等于 `sizeof(int)`，用于校验。
 
 **返回值**：
 
 - `ACL_SPARSE_STATUS_SUCCESS`：成功
 - `ACL_SPARSE_STATUS_HANDLE_IS_NULLPTR`：handle 为空指针
-- `ACL_SPARSE_STATUS_INVALID_VALUE`：matmulDescr 为空、attribute 非法、data 为空、dataSize 与属性不匹配
+- `ACL_SPARSE_STATUS_INVALID_VALUE`：matmulDescr 为空、matmulAttribute 非法、data 为空、dataSize 与属性不匹配
 - `ACL_SPARSE_STATUS_NOT_SUPPORTED`：该属性暂不支持
 
 ---
@@ -498,64 +491,62 @@ aclsparseStatus_t aclsparseLtMatmulAlgSelectionDestroy(aclsparseLtMatmulAlgSelec
 
 ### aclsparseLtMatmulAlgSetAttribute
 
-> **支持状态**：暂未支持。当前版本尚未实现。
-
 ```c
 aclsparseStatus_t aclsparseLtMatmulAlgSetAttribute(
     aclsparseLtConstHandle_t handle,
     aclsparseLtMatmulAlgSelection_t* algSelection,
-    aclsparseLtMatmulAlgAttribute_t attribute,
-    const void* data,
-    size_t dataSize);
+    aclsparseLtMatmulAlgAttribute_t attr,
+    const void* attrValue,
+    size_t attrValueSize);
 ```
 
-**功能**：设置算法选择描述符的指定属性（如算法配置 ID、搜索迭代次数、Split-K 参数等）。
+**功能**：设置算法选择描述符的指定属性（如算法配置 ID、splitK 切分因子、搜索迭代次数、Split-K 模式等）。须在 PlanInit 之前调用。ALG_CONFIG_MAX_ID 为只读属性，不可设置。
 
 **参数说明**：
 
 - `handle`（IN）：HOST，aclsparseLt 库句柄。
 - `algSelection`（IN/OUT）：HOST，算法选择描述符。
-- `attribute`（IN）：HOST，要设置的算法选择描述符属性。
-- `data`（IN）：HOST，指向属性值的指针。
-- `dataSize`（IN）：HOST，属性值字节数，用于校验。
+- `attr`（IN）：HOST，要设置的算法选择描述符属性。
+- `attrValue`（IN）：HOST，指向属性值的指针（int32_t 类型）。
+- `attrValueSize`（IN）：HOST，属性值字节数，须等于 `sizeof(int32_t)`，用于校验。
 
 **返回值**：
 
 - `ACL_SPARSE_STATUS_SUCCESS`：成功
 - `ACL_SPARSE_STATUS_HANDLE_IS_NULLPTR`：handle 为空指针
-- `ACL_SPARSE_STATUS_INVALID_VALUE`：algSelection 为空、attribute 非法、data 为空、dataSize 与属性不匹配
-- `ACL_SPARSE_STATUS_NOT_SUPPORTED`：该属性暂不支持
+- `ACL_SPARSE_STATUS_INVALID_VALUE`：algSelection 为空、attr 非法、attrValue 为空、attrValueSize 与属性不匹配或属性值非法
+- `ACL_SPARSE_STATUS_NOT_INITIALIZED`：algSelection 未初始化（已销毁）
+- `ACL_SPARSE_STATUS_NOT_SUPPORTED`：该属性暂不支持（如 ALG_CONFIG_MAX_ID 为只读）
 
 ---
 
 ### aclsparseLtMatmulAlgGetAttribute
 
-> **支持状态**：暂未支持。当前版本尚未实现。
-
 ```c
 aclsparseStatus_t aclsparseLtMatmulAlgGetAttribute(
     aclsparseLtConstHandle_t handle,
     aclsparseLtConstMatmulAlgSelection_t* algSelection,
-    aclsparseLtMatmulAlgAttribute_t attribute,
-    void* data,
-    size_t dataSize);
+    aclsparseLtMatmulAlgAttribute_t attr,
+    void* attrValue,
+    size_t attrValueSize);
 ```
 
-**功能**：获取算法选择描述符的指定属性（如算法配置 ID、搜索迭代次数、Split-K 参数等）。
+**功能**：获取算法选择描述符的指定属性（如算法配置 ID、搜索迭代次数、splitK 切分因子、Split-K 模式等）。
 
 **参数说明**：
 
 - `handle`（IN）：HOST，aclsparseLt 库句柄。
 - `algSelection`（IN）：HOST，算法选择描述符。
-- `attribute`（IN）：HOST，要获取的算法选择描述符属性。
-- `data`（OUT）：HOST，返回属性值的内存地址。
-- `dataSize`（IN）：HOST，属性值字节数，用于校验。
+- `attr`（IN）：HOST，要获取的算法选择描述符属性。
+- `attrValue`（OUT）：HOST，返回属性值的内存地址（int32_t 类型）。
+- `attrValueSize`（IN）：HOST，属性值字节数，须等于 `sizeof(int32_t)`，用于校验。
 
 **返回值**：
 
 - `ACL_SPARSE_STATUS_SUCCESS`：成功
 - `ACL_SPARSE_STATUS_HANDLE_IS_NULLPTR`：handle 为空指针
-- `ACL_SPARSE_STATUS_INVALID_VALUE`：algSelection 为空、attribute 非法、data 为空、dataSize 与属性不匹配
+- `ACL_SPARSE_STATUS_INVALID_VALUE`：algSelection 为空、attr 非法、attrValue 为空、attrValueSize 与属性不匹配
+- `ACL_SPARSE_STATUS_NOT_INITIALIZED`：algSelection 未初始化（已销毁）
 - `ACL_SPARSE_STATUS_NOT_SUPPORTED`：该属性暂不支持
 
 ---
@@ -609,8 +600,6 @@ aclsparseStatus_t aclsparseLtMatmulPlanDestroy(aclsparseLtMatmulPlan_t* plan);
 
 ### aclsparseLtMatmulGetWorkspace
 
-> **支持状态**：暂未支持。当前版本尚未实现。
-
 ```c
 aclsparseStatus_t aclsparseLtMatmulGetWorkspace(
     aclsparseLtConstHandle_t handle,
@@ -618,7 +607,7 @@ aclsparseStatus_t aclsparseLtMatmulGetWorkspace(
     size_t* workspaceSize);
 ```
 
-**功能**：查询执行 matmul 所需的 workspace 大小（字节）。
+**功能**：查询执行 matmul 所需的 workspace 大小（字节）。根据 PlanInit 阶段计算的 tiling 参数返回 workspace 字节数。调用方据此分配 Device 内存，再将指针传递给 aclsparseLtMatmul。workspaceSize 为 0 时无需分配。
 
 **参数说明**：
 
@@ -636,47 +625,45 @@ aclsparseStatus_t aclsparseLtMatmulGetWorkspace(
 
 ### aclsparseLtMatmul
 
-> **支持状态**：暂未支持。当前版本尚未实现。
-
 ```c
 aclsparseStatus_t aclsparseLtMatmul(
     aclsparseLtConstHandle_t handle,
     aclsparseLtConstMatmulPlan_t* plan,
     const void* alpha,
-    const void* d_A,
-    const void* d_B,
+    const void* matA,
+    const void* matB,
     const void* beta,
-    const void* d_C,
-    void* d_D,
+    const void* matC,
+    void* matD,
     void* workspace,
     aclrtStream* streams,
     int32_t numStreams);
 ```
 
-**功能**：执行结构化稀疏矩阵乘法，计算 `D = α · op(A) · op(B) + β · op(C)`（含可选的激活与偏置）。A、B 中有且仅有一个为结构化稀疏矩阵，须为 `aclsparseLtSpMMACompress` 的压缩输出。算子在指定 stream 上异步执行。
+**功能**：执行结构化稀疏矩阵乘法，计算 `D = α · op(A) · op(B) + β · op(C)`（含可选的激活与偏置）。A 须为已剪枝的矩阵（通过 `aclsparseLtSpMMAPrune` 产出）。当 matA 为 null 时，回退到 workspace 中的 A_pruned 区域（须已由 SpMMAPrune 填充）。alpha/beta 可为标量（float 指针）或设备端向量（启用 ALPHA_VECTOR_SCALING 时为 float[M] 数组指针）。算子在指定 stream 上异步执行，调用方须通过 aclrtSynchronizeStream 同步后读取 D。
 
 **参数说明**：
 
 - `handle`（IN）：HOST，aclsparseLt 库句柄。
 - `plan`（IN）：HOST，matmul 执行计划。
 - `alpha`（IN）：HOST/DEVICE，标量 α（`float` 类型指针）；标量时为 HOST 指针，向量缩放时为 DEVICE 指针。
-- `d_A`（IN）：DEVICE，矩阵 A 的指针（结构化稀疏或稠密）。
-- `d_B`（IN）：DEVICE，矩阵 B 的指针（结构化稀疏或稠密）。
+- `matA`（IN）：DEVICE，矩阵 A 的指针（结构化稀疏或稠密）。可为 nullptr（回退到 workspace A_pruned 区域）。
+- `matB`（IN）：DEVICE，矩阵 B 的指针（结构化稀疏或稠密）。
 - `beta`（IN）：HOST/DEVICE，标量 β（`float` 类型指针）；标量时为 HOST 指针，向量缩放时为 DEVICE 指针。
-- `d_C`（IN）：DEVICE，稠密矩阵 C 的指针。
-- `d_D`（OUT）：DEVICE，稠密矩阵 D 的输出指针。
-- `workspace`（IN）：DEVICE，workspace 指针。
+- `matC`（IN）：DEVICE，稠密矩阵 C 的指针（累加项）。
+- `matD`（OUT）：DEVICE，稠密矩阵 D 的输出指针（须预分配）。
+- `workspace`（IN）：DEVICE，workspace 指针（大小由 GetWorkspaceSize 查询）。
 - `streams`（IN）：HOST，指向 ACL stream 数组的指针。
-- `numStreams`（IN）：HOST，`streams` 数组中的 stream 数量。
+- `numStreams`（IN）：HOST，`streams` 数组中的 stream 数量（须 > 0）。
 
 **返回值**：
 
 - `ACL_SPARSE_STATUS_SUCCESS`：成功
 - `ACL_SPARSE_STATUS_HANDLE_IS_NULLPTR`：handle 为空指针
 - `ACL_SPARSE_STATUS_INVALID_VALUE`：plan 为空、矩阵指针为空
+- `ACL_SPARSE_STATUS_INSUFFICIENT_RESOURCES`：workspace 为空但计划需要
 - `ACL_SPARSE_STATUS_NOT_SUPPORTED`：不支持的数据类型组合或操作
-- `ACL_SPARSE_STATUS_EXECUTION_FAILED`：kernel 执行失败
-- `ACL_SPARSE_STATUS_INSUFFICIENT_RESOURCES`：资源不足
+- `ACL_SPARSE_STATUS_EXECUTION_FAILED`：kernel 执行或 aclrt 调用失败
 
 ---
 
@@ -878,6 +865,7 @@ aclsparseStatus_t aclsparseLtSpMMACompress(
 | 枚举值 | 说明 |
 |--------|------|
 | `ACL_SPARSE_LT_SPARSITY_50_PERCENT` | 2:4 结构化稀疏（50% 稀疏度） |
+| `ACL_SPARSE_LT_SPARSITY_NONE` | 稠密矩阵（用于 dense×dense 路径，标识非结构化稀疏矩阵） |
 
 ### aclsparseComputeType_t
 
@@ -906,6 +894,47 @@ matmul 算法模式枚举：
 | `ACLSPARSELT_PRUNE_SPMMA_TILE` | 逐 tile 剪枝，以 tile 为单位枚举所有满足 2:4 约束的有效配置，选 L1-norm 最大的配置 |
 | `ACLSPARSELT_PRUNE_SPMMA_STRIP` | 逐分组剪枝，每组独立选择绝对值最大的元素，不跨组优化 |
 
+### aclsparseLtLibraryPropertyType_t
+
+库属性类型枚举（用于 `aclsparseLtGetProperty`）：
+
+| 枚举值 | 说明 |
+|--------|------|
+| `ACLSPARSELT_MAJOR_VERSION` | 主版本号 |
+| `ACLSPARSELT_MINOR_VERSION` | 次版本号 |
+| `ACLSPARSELT_PATCH_LEVEL` | 补丁版本号 |
+
+### aclsparseLtMatmulAlgAttribute_t
+
+matmul 算法选择属性枚举（用于 `aclsparseLtMatmulAlgSetAttribute` / `aclsparseLtMatmulAlgGetAttribute`）：
+
+| 枚举值 | 说明 |
+|--------|------|
+| `ACLSPARSELT_MATMUL_ALG_CONFIG_ID` | 算法配置 ID（0 或 1），影响 cube tiling |
+| `ACLSPARSELT_MATMUL_SEARCH_ITERATIONS` | 搜索迭代次数（默认 5） |
+| `ACLSPARSELT_MATMUL_SPLIT_K` | Split-K 切分因子，取值范围 [1, K] |
+| `ACLSPARSELT_MATMUL_SPLIT_K_MODE` | Split-K 模式（`ACLSPARSELT_SPLIT_K_MODE_ONE_KERNEL` / `ACLSPARSELT_SPLIT_K_MODE_TWO_KERNELS`） |
+| `ACLSPARSELT_MATMUL_ALG_CONFIG_MAX_ID` | 只读：返回算法配置 ID 上限（返回 2） |
+| `ACLSPARSELT_MATMUL_SPLIT_K_BUFFERS` | Split-K 缓冲区数，取值范围 [0, splitK-1] |
+
+### aclsparseLtMatmulDescAttribute_t
+
+matmul 描述符属性枚举（用于 `aclsparseLtMatmulDescSetAttribute` / `aclsparseLtMatmulDescGetAttribute`）：
+
+| 枚举值 | 说明 |
+|--------|------|
+| `ACLSPARSELT_MATMUL_ALPHA_VECTOR_SCALING` | alpha 向量缩放，启用时 alpha 为 Device float[M] 数组指针 |
+| `ACLSPARSELT_MATMUL_BETA_VECTOR_SCALING` | beta 向量缩放，启用时隐含 alpha 向量缩放，beta 为 Device float[M] 数组指针 |
+
+### aclsparseLtSplitKMode_t
+
+Split-K 模式枚举：
+
+| 枚举值 | 说明 |
+|--------|------|
+| `ACLSPARSELT_SPLIT_K_MODE_ONE_KERNEL` | 融合单 kernel 路径，effectiveSplitK=1，GEMM+reduction 在单次 launch 中完成 |
+| `ACLSPARSELT_SPLIT_K_MODE_TWO_KERNELS` | 两 kernel 路径，matmul kernel + epilogue kernel，splitK 增加并行度 |
+
 ### 公共枚举
 
 以下枚举为 aclsparse 与 aclsparseLt 共用，定义于 `cann_ops_sparse.h`，详细说明请参考 [api_list.md 枚举说明](./api_list.md#枚举说明)：
@@ -928,7 +957,7 @@ aclsparseLt 的完整工作流分为初始化、描述符构建、计划构建�
 6. 调用 `aclsparseLtMatmulAlgSelectionInit` 构建算法选择描述符。
 7. 调用 `aclsparseLtMatmulPlanInit` 构建执行计划。
 8. 调用 `aclsparseLtMatmulGetWorkspace` 查询所需 workspace 大小并分配设备内存。
-9. 调用 `aclsparseLtMatmul` 执行结构化稀疏矩阵乘法；或调用 `aclsparseLtMatmulSearch` 自动搜索最优算法。
+9. 调用 `aclsparseLtMatmul` 执行结构化稀疏矩阵乘法（`aclsparseLtMatmulSearch` 暂未支持）。
 10. 按依赖逆序销毁执行计划、算法选择描述符、Matmul 描述符、矩阵描述符，最后调用 `aclsparseLtDestroy` 释放库句柄。
 
 ---
@@ -975,9 +1004,9 @@ int aclsparseLtExample()
         dA, dAPruned, ACLSPARSELT_PRUNE_SPMMA_STRIP, stream);
     aclrtSynchronizeStream(stream);  // 算子内部不同步，调用方负责同步
 
-    // --- 以下步骤当前版本暂未支持 ---
+    // --- 以下步骤 5 暂未支持 ---
 
-    // 5.（可选）压缩稀疏矩阵
+    // 5.（可选）压缩稀疏矩阵（暂未支持）
     // size_t compressedSize = 0;
     // aclsparseLtSpMMACompressedSize(&handle, &matmulDesc, &compressedSize);
     // void *dACompressed = nullptr;
@@ -992,16 +1021,17 @@ int aclsparseLtExample()
     aclsparseLtMatmulPlanInit(&handle, &plan, &matmulDesc, &algSelection);
 
     // 8. 获取 workspace 大小并分配
-    // size_t workspaceSize = 0;
-    // aclsparseLtMatmulGetWorkspace(&handle, &plan, &workspaceSize);
-    // void *workspace = nullptr;
-    // aclrtMalloc(&workspace, workspaceSize, ACL_MEM_MALLOC_HUGE_FIRST);
+    size_t workspaceSize = 0;
+    aclsparseLtMatmulGetWorkspace(&handle, &plan, &workspaceSize);
+    void *workspace = nullptr;
+    aclrtMalloc(&workspace, workspaceSize, ACL_MEM_MALLOC_HUGE_FIRST);
 
     // 9. 执行结构化稀疏矩阵乘法
-    // float alpha = 1.0f, beta = 0.0f;
-    // aclrtStream streams[] = {stream};
-    // aclsparseLtMatmul(&handle, &plan, &alpha, dAPruned, dB, &beta, dC, dD,
-    //     workspace, streams, 1);
+    float alpha = 1.0f, beta = 0.0f;
+    aclrtStream streams[] = {stream};
+    aclsparseLtMatmul(&handle, &plan, &alpha, dAPruned, dB, &beta, dC, dD,
+        workspace, streams, 1);
+    aclrtSynchronizeStream(stream);  // 算子内部不同步，调用方负责同步
 
     // 10. 清理资源（按依赖逆序销毁）
     aclsparseLtMatmulPlanDestroy(&plan);

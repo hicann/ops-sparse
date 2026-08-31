@@ -257,12 +257,12 @@ aclsparseStatus_t aclsparseLtMatmulPlanInit(
 | matmulDescr | 输入 | aclsparseLtConstMatmulDescriptor_t* | Matmul 描述符，Host 内存 |
 | algSelection | 输入 | aclsparseLtConstMatmulAlgSelection_t* | 算法选择描述符，Host 内存 |
 
-#### aclsparseLtMatmulGetWorkspaceSize
+#### aclsparseLtMatmulGetWorkspace
 
 查询 Matmul 所需 workspace 大小（字节）。
 
 ```cpp
-aclsparseStatus_t aclsparseLtMatmulGetWorkspaceSize(
+aclsparseStatus_t aclsparseLtMatmulGetWorkspace(
     aclsparseLtConstHandle_t handle,
     aclsparseLtConstMatmulPlan_t* plan, size_t* workspaceSize);
 ```
@@ -404,7 +404,7 @@ C 矩阵（累加项）在 INT8 路径下须为 INT8（`matC.valueType = ACL_INT
 3. **Matmul 描述符**：`aclsparseLtMatmulDescriptorInit`。
 4. **算法选择**：`aclsparseLtMatmulAlgSelectionInit` + `aclsparseLtMatmulAlgSetAttribute`（可选，设置 algConfigId/splitK）。
 5. **计划**：`aclsparseLtMatmulPlanInit`。
-6. **workspace**：`aclsparseLtMatmulGetWorkspaceSize` 查询大小并分配 Device 内存。
+6. **workspace**：`aclsparseLtMatmulGetWorkspace` 查询大小并分配 Device 内存。
 7. **剪枝**：`aclsparseLtSpMMAPrune` 将 A 剪枝为 A_pruned（详见 [prune/README.md](../prune/README.md)）。
 8. **执行**：`aclsparseLtMatmul` 执行 `D = alpha * A_pruned * B + beta * C`。
 9. **销毁**：按逆序销毁所有描述符与计划。
@@ -515,12 +515,12 @@ int aclsparseLtMatmulTest()
     CHECK_RET(ret == ACL_SPARSE_STATUS_SUCCESS, LOG_PRINT("PlanInit failed: %d\n", ret); return ret);
 
     // 8. 查询 workspace 大小并分配
-    //    注意：aclsparseLtMatmulGetWorkspaceSize / aclsparseLtSpMMAPrune / aclsparseLtMatmul
+    //    注意：aclsparseLtMatmulGetWorkspace / aclsparseLtSpMMAPrune / aclsparseLtMatmul
     //    的描述符/计划参数类型为 aclsparseLtConstXxx_t*（即 const struct Xxx**），
     //    而局部变量声明为 aclsparseLtXxx_t（即 struct Xxx*），取地址后为 struct Xxx**。
     //    C++ 不允许 T** 到 const T** 的隐式转换，需通过 const_cast 显式转换。
     size_t workspaceSize = 0;
-    ret = aclsparseLtMatmulGetWorkspaceSize(&handle, const_cast<aclsparseLtConstMatmulPlan_t*>(&plan), &workspaceSize);
+    ret = aclsparseLtMatmulGetWorkspace(&handle, const_cast<aclsparseLtConstMatmulPlan_t*>(&plan), &workspaceSize);
     CHECK_RET(ret == ACL_SPARSE_STATUS_SUCCESS, LOG_PRINT("GetWorkspaceSize failed: %d\n", ret); return ret);
     LOG_PRINT("workspaceSize = %zu bytes\n", workspaceSize);
     void *dWorkspace = nullptr;
