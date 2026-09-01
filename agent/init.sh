@@ -12,7 +12,7 @@
 # CANNBot Agent Workspace Initialization Script
 #
 # CANNBot:   https://gitcode.com/cann/cannbot-skills
-# This file: https://gitcode.com/cann/cannbot-skills/blob/main/plugins-community/cuda2ascend/example/init.sh
+# This file: https://gitcode.com/cann/cannbot-skills/blob/main/plugins-official/ops-direct-invoke/example/init.sh
 
 set -e
 
@@ -32,7 +32,7 @@ show_quick_start() {
 # Configuration
 # ============================================================
 CANNBOT_URL="https://gitcode.com/cann/cannbot-skills.git"
-PLUGIN_NAME="cuda2ascend"
+PLUGIN_NAME="ops-direct-invoke"
 
 # ============================================================
 # Terminal output helpers
@@ -56,8 +56,8 @@ step() { echo -e "${DIM}$*${NC}"; }
 # Resolve base plugin init.sh path from SKILLS_REPO (no clone here).
 # Echoes the path if found, empty otherwise.
 resolve_base_init() {
-    if [ -n "${SKILLS_REPO:-}" ] && [ -f "${SKILLS_REPO}/plugins-community/${PLUGIN_NAME}/init.sh" ]; then
-        echo "${SKILLS_REPO}/plugins-community/${PLUGIN_NAME}/init.sh"
+    if [ -n "${SKILLS_REPO:-}" ] && [ -f "${SKILLS_REPO}/plugins-official/${PLUGIN_NAME}/init.sh" ]; then
+        echo "${SKILLS_REPO}/plugins-official/${PLUGIN_NAME}/init.sh"
     fi
 }
 
@@ -242,7 +242,7 @@ echo ""
 # ============================================================
 # Step 2: Invoke base plugin init.sh
 # ============================================================
-PLUGIN_INIT="$SKILLS_REPO/plugins-community/${PLUGIN_NAME}/init.sh"
+PLUGIN_INIT="$SKILLS_REPO/plugins-official/${PLUGIN_NAME}/init.sh"
 
 if [ ! -f "$PLUGIN_INIT" ]; then
     err "Plugin init.sh not found at: $PLUGIN_INIT"
