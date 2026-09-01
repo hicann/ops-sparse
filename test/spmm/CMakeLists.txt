@@ -37,5 +37,7 @@ elseif(SOC_VERSION_LOWER MATCHES "^ascend910_93" OR SOC_VERSION_LOWER MATCHES "^
     )
 else()
     message(STATUS "[test/spmm] SOC=${SOC_VERSION} not supported, skipping spmm_test")
+    file(APPEND ${CMAKE_BINARY_DIR}/test/skipped_tests.list
+        "spmm|SOC not supported (${SOC_VERSION})\n")
     return()
 endif()
