@@ -40,8 +40,8 @@ C_out = (alpha * X * Y^T + beta * C) ∘ spy(C)
 #### 产品支持情况
 
 - Ascend 950PR / Ascend 950DT：支持
-- Atlas A3 训练系列产品 / Atlas A3 推理系列产品：不支持
-- Atlas A2 训练系列产品 / Atlas A2 推理系列产品：不支持
+- Atlas A3 训练系列产品 / Atlas A3 推理系列产品：支持
+- Atlas A2 训练系列产品 / Atlas A2 推理系列产品：支持
 
 #### 函数原型
 
@@ -111,8 +111,8 @@ aclsparseStatus_t aclsparseSDDMMBufferSize(
 #### 产品支持情况
 
 - Ascend 950PR / Ascend 950DT：支持
-- Atlas A3 训练系列产品 / Atlas A3 推理系列产品：不支持
-- Atlas A2 训练系列产品 / Atlas A2 推理系列产品：不支持
+- Atlas A3 训练系列产品 / Atlas A3 推理系列产品：支持
+- Atlas A2 训练系列产品 / Atlas A2 推理系列产品：支持
 
 #### 函数原型
 
@@ -161,8 +161,8 @@ aclsparseStatus_t aclsparseSDDMMPreprocess(
 #### 产品支持情况
 
 - Ascend 950PR / Ascend 950DT：支持
-- Atlas A3 训练系列产品 / Atlas A3 推理系列产品：不支持
-- Atlas A2 训练系列产品 / Atlas A2 推理系列产品：不支持
+- Atlas A3 训练系列产品 / Atlas A3 推理系列产品：支持
+- Atlas A2 训练系列产品 / Atlas A2 推理系列产品：支持
 
 #### 函数原型
 
@@ -470,3 +470,5 @@ SDDMM 算子精度验证采用框架 MIXED_TOLERANCE 模式（`test/frame/verify
 ## 支持芯片
 
 - Ascend 950PR / Ascend 950DT（架构 arch35 / DAV_3510）
+- Atlas A3 训练系列产品 / Atlas A3 推理系列产品：支持
+- Ascend 910B（架构 arch22 / DAV_2201）：对应 Atlas A2 训练系列产品 / Atlas A2 推理系列产品
