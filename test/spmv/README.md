@@ -23,7 +23,7 @@ $$
 ## 目录结构介绍
 
 ```
-src/spmv/arch22/
+sparse/spmv/arch22/
 ├── kernels/                           // 各类型独立编译单元（每 TU 一个 kernel）
 │   ├── spmv_kernel.h                 // 模板类 + DEFINE 宏
 │   ├── spmv_kernel_f32.cpp           // <float, float, float>

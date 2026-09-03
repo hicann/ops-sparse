@@ -16,6 +16,7 @@
 #include "aclsparse_handle_internal.h"
 #include "scatter.h"
 #include "scatter_kernel.h"
+#include <limits>
 
 // ---------------------------------------------------------------------------
 // Scatter execution  (cuSPARSE mode: no D2H, no dedup, no sort)
@@ -51,6 +52,15 @@ extern "C" aclsparseStatus_t aclsparseScatter(
     // nnz == 0: nothing to scatter, y unchanged
     if (nnz == 0) {
         return ACL_SPARSE_STATUS_SUCCESS;
+    }
+
+    // All downstream partition fields and the kernel tiling use uint32_t.
+    constexpr uint64_t kScatterNnzUpperLimit =
+        static_cast<uint64_t>(std::numeric_limits<uint32_t>::max());
+    if (static_cast<uint64_t>(nnz) > kScatterNnzUpperLimit) {
+        OP_LOGE("aclsparse", "aclsparseScatter: nnz=%llu exceeds UINT32_MAX, not supported",
+                static_cast<unsigned long long>(nnz));
+        return ACL_SPARSE_STATUS_NOT_SUPPORTED;
     }
 
     // 入参安全校验（合并）：arch22 kernel 按 float 读取 values、ZERO-base 直接索引

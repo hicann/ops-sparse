@@ -28,6 +28,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <memory>
 #include <new>
 
 #include "log/log.h"
@@ -544,6 +545,7 @@ aclsparseStatus_t aclsparseSpMVOp_bufferSize(
 // 预处理 kernel 在 device 上完成 rowOffsets 读取、按 nnz 降序排序以及
 // bin_edge 负载均衡切分。kernel 与后续 SpMVOp 共用同一 stream，stream
 // 的 FIFO 语义保证预处理先于计算完成，无需 aclrtSynchronizeStream。
+// newDescr 为借用指针，生命周期和失败路径清理由调用方统一管理。
 static aclsparseStatus_t CreateDescrPreprocessAlg2(
     aclsparseHandle_t handle, aclsparseSpMVOpDescr *newDescr, void *buffer)
 {
@@ -552,7 +554,6 @@ static aclsparseStatus_t CreateDescrPreprocessAlg2(
     uint32_t useBlocks = 0, rpb = 0;
     aclsparseStatus_t splitSt = ComputeSpmvOpBlockSplits(mInt, useBlocks, rpb);
     if (splitSt != ACL_SPARSE_STATUS_SUCCESS) {
-        delete newDescr;
         return splitSt;
     }
     newDescr->alg2NumBlocks = useBlocks;
@@ -619,30 +620,29 @@ aclsparseStatus_t aclsparseSpMVOp_createDescr(
                 static_cast<unsigned long long>(matInner->rows));
         return ACL_SPARSE_STATUS_NOT_SUPPORTED;
     }
-    auto *newDescr = new (std::nothrow) aclsparseSpMVOpDescr;
-    if (newDescr == nullptr) {
+    auto *rawDescr = new (std::nothrow) aclsparseSpMVOpDescr;
+    if (rawDescr == nullptr) {
         OP_LOGE(kTag, "createDescr: alloc failed");
         return ACL_SPARSE_STATUS_ALLOC_FAILED;
     }
-    st = InitSpMVOpDescrFromSpMat(newDescr, matInner);
+    std::unique_ptr<aclsparseSpMVOpDescr> newDescr(rawDescr);
+    st = InitSpMVOpDescrFromSpMat(newDescr.get(), matInner);
     if (st != ACL_SPARSE_STATUS_SUCCESS) {
-        delete newDescr;
         return st;
     }
     newDescr->alg = (alg == ACL_SPARSE_SPMVOP_ALG_DEFAULT) ? ACL_SPARSE_SPMVOP_ALG1 : alg;
     if (newDescr->alg == ACL_SPARSE_SPMVOP_ALG2 && buffer != nullptr) {
-        st = CreateDescrPreprocessAlg2(handle, newDescr, buffer);
+        st = CreateDescrPreprocessAlg2(handle, newDescr.get(), buffer);
         if (st != ACL_SPARSE_STATUS_SUCCESS) {
-            delete newDescr;
             return st;
         }
     }
     newDescr->userBuffer = (newDescr->alg == ACL_SPARSE_SPMVOP_ALG2) ? buffer : nullptr;
-    *descr = reinterpret_cast<aclsparseSpMVOpDescr_t>(newDescr);
     OP_LOGI(kTag, "createDescr: m=%llu, nnz=%llu, alg=%d",
             static_cast<unsigned long long>(newDescr->m),
             static_cast<unsigned long long>(newDescr->nnz),
             static_cast<int>(newDescr->alg));
+    *descr = reinterpret_cast<aclsparseSpMVOpDescr_t>(newDescr.release());
     return ACL_SPARSE_STATUS_SUCCESS;
 }
 

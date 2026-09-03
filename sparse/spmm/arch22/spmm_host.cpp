@@ -16,6 +16,7 @@
 #include "spmm.h"
 #include "spmm_csr_mat.h"
 #include <iostream>
+#include <limits>
 #include <new>
 #include <mutex>
 
@@ -162,6 +163,16 @@ static aclsparseStatus_t ValidateSpmmInputs(const aclsparseSpMatDescr *matA,
         return ACL_SPARSE_STATUS_NOT_SUPPORTED;
     }
     if (!IsSupportedSpmmAlg(alg)) {
+        return ACL_SPARSE_STATUS_NOT_SUPPORTED;
+    }
+    // arch22 预处理使用 int32_t 存储行号和偏移，M/K/N/nnz 在后续处理中还会
+    // 窄化为 uint32_t 类型的 Tiling 字段，因此在类型转换前拒绝不支持的形状。
+    constexpr uint64_t kSpmmArch22DimensionUpperLimit =
+        static_cast<uint64_t>(std::numeric_limits<int32_t>::max());
+    if (matA->rows > kSpmmArch22DimensionUpperLimit ||
+        matA->cols > kSpmmArch22DimensionUpperLimit ||
+        static_cast<uint64_t>(matB->cols) > kSpmmArch22DimensionUpperLimit ||
+        matA->nnz > kSpmmArch22DimensionUpperLimit) {
         return ACL_SPARSE_STATUS_NOT_SUPPORTED;
     }
     return ACL_SPARSE_STATUS_SUCCESS;

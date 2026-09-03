@@ -26,12 +26,12 @@ ops-sparse 仓库中的 SpGEMM (Sparse General Matrix-Matrix Multiplication) 算
 | <term>Atlas A3 训练系列产品/Atlas A3 推理系列产品</term>       |    ✗    |
 | <term>Atlas A2 训练系列产品/Atlas A2 推理系列产品</term>       |    ✗    |
 
-> SpGEMM 当前版本在 Ascend 950PR/950DT 平台交付，源码位于 `src/spgemm/arch35/`，与 SOC 架构映射保持一致。非 `ascend950*` 平台编译时会跳过 `spgemm_test`。
+> SpGEMM 当前版本在 Ascend 950PR/950DT 平台交付，源码位于 `sparse/spgemm/arch35/`，与 SOC 架构映射保持一致。非 `ascend950*` 平台编译时会跳过 `spgemm_test`。
 
 ## 目录结构介绍
 
 ```txt
-src/spgemm/arch35/
+sparse/spgemm/arch35/
 ├── spgemm_host.cpp       // Host 侧 API 实现（3-stage + 7-interface）与 launch 调度
 ├── spgemm_csr_mat.cpp    // CSR 矩阵预处理（行重排、分桶、sorted 校验）
 ├── spgemm_csr_mat.h      // CSR 辅助函数声明

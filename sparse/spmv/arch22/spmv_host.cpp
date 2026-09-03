@@ -38,6 +38,28 @@ extern "C" void spmv_kernel_do(
 // -------------------------------------------------------------------
 namespace {
 
+    bool IsSupportedSpmvDtypeCombo(aclDataType computeType,
+                                   aclDataType valType,
+                                   aclDataType outType)
+    {
+        if (computeType == ACL_INT32) {
+            return valType == ACL_INT32 && outType == ACL_INT32;
+        }
+        if (computeType != ACL_FLOAT) {
+            return false;
+        }
+        if (valType == ACL_FLOAT) {
+            return outType == ACL_FLOAT;
+        }
+        if (valType == ACL_FLOAT16) {
+            return outType == ACL_FLOAT16 || outType == ACL_FLOAT;
+        }
+        if (valType == ACL_BF16) {
+            return outType == ACL_BF16 || outType == ACL_FLOAT;
+        }
+        return valType == ACL_INT32 && outType == ACL_FLOAT;
+    }
+
     /**
      * @brief 获取 UB 容量下允许的最大单行长（非零元个数）
      */
@@ -178,6 +200,20 @@ extern "C" {
                   LOG_PRINT("[ERROR] aclsparseSpMV: opA conjugate not supported yet\n");
                   return ACL_SPARSE_STATUS_NOT_SUPPORTED);
 
+        // 分发器仅包含七种 Kernel 实例。在访问设备前校验完整的
+        //（计算类型、输入值类型、输出类型）组合，避免不支持的组合误入其他类型的 Kernel。
+        auto valType = matInner->valueType;
+        auto outType = yInner->valueType;
+        CHECK_RET(xInner->valueType == valType,
+                  LOG_PRINT("[ERROR] aclsparseSpMV: matrix value type %d and vecX type %d must match\n",
+                            valType, xInner->valueType);
+                  return ACL_SPARSE_STATUS_NOT_SUPPORTED);
+        CHECK_RET(IsSupportedSpmvDtypeCombo(computeType, valType, outType),
+                  LOG_PRINT("[ERROR] aclsparseSpMV: unsupported dtype combination "
+                            "computeType=%d valType=%d outType=%d\n",
+                            computeType, valType, outType);
+                  return ACL_SPARSE_STATUS_NOT_SUPPORTED);
+
         // ==================== Alpha / Beta ====================
         // alpha/beta 类型必须与 computeType 一致（任务书要求），调用方负责保证
         float alphaFloat = 1.0f;
@@ -261,17 +297,6 @@ extern "C" {
         size_t yByteSize = (opA == ACL_SPARSE_OP_TRANSPOSE ? cols : rows) * elemSize;
 
         // ==================== 启动内核 ====================
-        // ValT 在 kernel 中同时用于 csrValGm 与 xVecGm（见 spmv_kernel.h），
-        // 因此矩阵非零值类型须取自稀疏矩阵描述符，且与稠密向量 x 的类型一致。
-        auto valType = matInner->valueType;
-        auto outType = yInner->valueType;
-        CHECK_RET(xInner->valueType == valType,
-                  LOG_PRINT("[ERROR] aclsparseSpMV: matrix value type %d and vecX type %d must match\n",
-                            valType, xInner->valueType);
-                  return ACL_SPARSE_STATUS_NOT_SUPPORTED);
-        CHECK_RET(computeType != ACL_INT32 || (valType == ACL_INT32 && outType == ACL_INT32),
-                  LOG_PRINT("[ERROR] aclsparseSpMV: computeType INT32 requires valType and outType INT32\n");
-                  return ACL_SPARSE_STATUS_NOT_SUPPORTED);
         bool trans = (opA == ACL_SPARSE_OP_TRANSPOSE);
 
         int32_t cType, vType, oType;

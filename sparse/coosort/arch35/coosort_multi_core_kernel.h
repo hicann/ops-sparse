@@ -214,7 +214,6 @@ __aicore__ inline void CoosortMultiCoreSort::P1Sort(uint32_t tn, int64_t off)
     P1Out(tn, off, tr);
     iR_.FreeTensor(rL);
     iC_.FreeTensor(cL);
-    o1_.FreeTensor(tr);
 }
 
 __aicore__ inline void CoosortMultiCoreSort::P1In(uint32_t tn, int64_t off)
@@ -272,6 +271,7 @@ __aicore__ inline void CoosortMultiCoreSort::P1Srt(LocalTensor<int32_t> rL, Loca
 
 __aicore__ inline void CoosortMultiCoreSort::P1Out(uint32_t tn, int64_t off, LocalTensor<int32_t> tr)
 {
+    // P1Out 接管从 o1_ 分配的 Tensor，并在完成 EnQue/DeQue 流程后释放。
     o1_.EnQue(tr);
     LocalTensor<int32_t> o = o1_.DeQue<int32_t>();
     DataCopyExtParams cp{1, static_cast<uint32_t>(tn * kTrpl * sizeof(int32_t)), 0, 0, 0};

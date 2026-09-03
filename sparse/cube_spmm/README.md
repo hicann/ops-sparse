@@ -10,7 +10,7 @@ C = alpha * A * B + beta * C
 
 其中：
 
-- $A$ 为稀疏矩阵，输入形态为 COO，经 `aclsparseCubeSpmmPreprocess` 预处理后转换为 BCSR 格式（`row_ptr` 为 `int64_t`，`col_ref` 与 `core_info` 为 `int32_t`，`val` 为 float16）。
+- $A$ 为稀疏矩阵，输入形态为 COO，经 `aclsparseCubeSpmmPreprocess` 预处理后转换为 BCSR 格式（`rwPtr` 为 `int64_t`，`colRef` 与 `coreInfo` 为 `int32_t`，`vals` 为 float16）。
 - $B$ 为稠密矩阵，数据类型为 `ACL_FLOAT16`，形状为 $[K, N]$，当前仅支持 $N$ 为 16 的倍数。
 - $C$ 为输出矩阵，数据类型为 `ACL_FLOAT`，形状为 $[M, N]$。
 - `computeType` 固定为 `ACL_FLOAT`。

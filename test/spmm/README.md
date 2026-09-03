@@ -14,12 +14,12 @@ ops-sparse 仓库中的 SPMM (Sparse Matrix-Dense Matrix Multiplication) 算子�
 | <term>Atlas A3 训练系列产品/Atlas A3 推理系列产品</term>       |    ✗    |
 | <term>Atlas A2 训练系列产品/Atlas A2 推理系列产品</term>       |    ✗    |
 
-> SPMM 当前版本在 Ascend 950PR/950DT 平台交付，源码位于 `src/spmm/arch35/`，与 SOC 架构映射保持一致。非 `ascend950*` 平台编译时会跳过 `spmm_test`。
+> SPMM 当前版本在 Ascend 950PR/950DT 平台交付，源码位于 `sparse/spmm/arch35/`，与 SOC 架构映射保持一致。非 `ascend950*` 平台编译时会跳过 `spmm_test`。
 
 ## 目录结构介绍
 
 ```txt
-src/spmm/arch35/
+sparse/spmm/arch35/
 ├── spmm_host.cpp       // Host 侧 API 实现与 launch 调度
 ├── spmm_csr_mat.cpp    // CSR 矩阵预处理（行重排、分桶）
 ├── spmm_kernel.cpp     // Kernel 侧 SIMT 计算实现
