@@ -2,6 +2,7 @@
 
 ## 🔥Latest News
 
+- [2026/09] ops-sparse 相关[开源任务](https://www.hiascend.com/activities/task-center?activeCategory=Cann)已发布，欢迎开发者参与，共同完善 CANN 稀疏算子能力。
 - [2026/06] 新增稀疏矩阵-稠密矩阵乘法（SpMM）算子实现。
 - [2026/05] ops-sparse项目上线，提供稀疏矩阵计算的API以及优化的稀疏矩阵向量乘法实现。
 
