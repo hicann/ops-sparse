@@ -13,6 +13,7 @@
 #ifndef TEST_MATMUL_PARAM_H_
 #define TEST_MATMUL_PARAM_H_
 
+#include <cfloat>
 #include <sstream>
 #include <string>
 
@@ -49,9 +50,9 @@ struct MatmulParam : public SparseTestParamBase {
     float beta = 0.0f;
     std::string transA;         // "true" / "false"
     std::string transB;         // "true" / "false"
-    int32_t alg_config_id = 0;
-    int32_t split_k = 1;
-    int32_t split_k_mode = 0;   // 0=ONE_KERNEL, 1=TWO_KERNELS
+    int32_t algConfigId = 0;
+    int32_t splitK = 1;
+    int32_t splitKMode = 0;   // 0=ONE_KERNEL, 1=TWO_KERNELS
     std::string prune_alg;      // STRIP / TILE / -
     int32_t alpha_vector_scaling = 0;
     int32_t beta_vector_scaling = 0;
@@ -62,6 +63,16 @@ struct MatmulParam : public SparseTestParamBase {
     std::string note;
     std::string order;
     std::string sparse_side;    // A / B (default A)
+
+    // ----- Epilogue fields (backward-compatible, defaults preserve v1 behavior) -----
+    int32_t biasEnabled = 0;               // 0=off, 1=on (per-row broadcast bias)
+    int64_t biasStride = 0;                // batch bias stride (elems), 0=shared across batches
+    int32_t activationType = 0;            // 0=none, 1=ReLU, 2=GeLU, 3=GELU_SCALING only (implies GeLU, F1)
+    float reluUpperBound = FLT_MAX;        // FLT_MAX
+    float reluThreshold = 0.0f;
+    float geluScaling = 1.0f;
+    int32_t numBatches = 1;                // >=1; 1=single batch
+    int64_t batchStride = 0;               // matrix batch stride (elems), 0=single batch
 
     // Convenience accessors
     bool isFp32() const { return dtype == "FP32"; }
@@ -78,7 +89,50 @@ struct MatmulParam : public SparseTestParamBase {
     bool isSparseA() const { return sparse_side != "B"; }
     bool isTilePrune() const { return prune_alg == "TILE"; }
     bool isStripPrune() const { return prune_alg == "STRIP" || prune_alg.empty(); }
-    bool isTwoKernels() const { return split_k_mode == 1; }
+    bool isTwoKernels() const { return splitKMode == 1; }
+    // Epilogue accessors
+    bool hasBias() const { return biasEnabled == 1; }
+    bool hasActivation() const { return activationType != 0; }
+    bool isRelu() const { return activationType == 1; }
+    bool isGelu() const { return activationType == 2; }
+    bool hasEpilogue() const { return hasBias() || hasActivation(); }
+    bool hasBatch() const { return numBatches > 1; }
+    bool biasStrideShared() const { return biasStride == 0; }
+
+    // fillEpilogueFields: parse epilogue CSV columns.
+    void fillEpilogueFields(const csv_map& row) {
+        biasEnabled        = parseInt(row, "bias_enabled");
+        biasStride         = static_cast<int64_t>(parseInt(row, "bias_stride"));
+        activationType     = parseInt(row, "activation_type");
+        reluUpperBound     = parseFloat(row, "relu_upper_bound");
+        reluThreshold      = parseFloat(row, "relu_threshold");
+        geluScaling        = parseFloat(row, "gelu_scaling");
+        numBatches         = parseInt(row, "num_batches");
+        batchStride        = static_cast<int64_t>(parseInt(row, "batch_stride"));
+    }
+
+    // applyFieldDefaults: set defaults for absent/empty fields.
+    void applyFieldDefaults() {
+        if (matrix_type.empty()) { matrix_type = "sparse×dense"; }
+        if (transA.empty()) { transA = "false"; }
+        if (transB.empty()) { transB = "false"; }
+        if (order.empty()) { order = "row"; }
+        if (sparse_side.empty()) { sparse_side = "A"; }
+        if (prune_alg.empty() && isSparsePath()) { prune_alg = "STRIP"; }
+        if (prune_alg.empty()) { prune_alg = "-"; }
+        if (output_dtype.empty()) { output_dtype = "-"; }
+        if (range_low == 0.0f && range_high == 0.0f) {
+            range_low = -1.0f;
+            range_high = 1.0f;
+        }
+        if (numBatches == 0) { numBatches = 1; }
+        if (reluUpperBound == 0.0f && activationType != 1) {
+            reluUpperBound = FLT_MAX;
+        }
+        if (geluScaling == 0.0f && activationType != 2 && activationType != 3) {
+            geluScaling = 1.0f;
+        }
+    }
 
     void fillCustom(const csv_map& row) override {
         case_id         = parseInt(row, "case_id");
@@ -92,9 +146,9 @@ struct MatmulParam : public SparseTestParamBase {
         beta            = parseFloat(row, "beta");
         transA          = parseString(row, "transA");
         transB          = parseString(row, "transB");
-        alg_config_id   = parseInt(row, "alg_config_id");
-        split_k         = parseInt(row, "split_k");
-        split_k_mode    = parseInt(row, "split_k_mode");
+        algConfigId     = parseInt(row, "alg_config_id");
+        splitK           = parseInt(row, "split_k");
+        splitKMode       = parseInt(row, "split_k_mode");
         prune_alg       = parseString(row, "prune_alg");
         alpha_vector_scaling = parseInt(row, "alpha_vector_scaling");
         beta_vector_scaling  = parseInt(row, "beta_vector_scaling");
@@ -104,19 +158,8 @@ struct MatmulParam : public SparseTestParamBase {
         note            = parseString(row, "note");
         order           = parseString(row, "order");
         sparse_side     = parseString(row, "sparse_side");
-        // Defaults
-        if (matrix_type.empty()) { matrix_type = "sparse×dense"; }
-        if (transA.empty()) { transA = "false"; }
-        if (transB.empty()) { transB = "false"; }
-        if (order.empty()) { order = "row"; }
-        if (sparse_side.empty()) { sparse_side = "A"; }
-        if (prune_alg.empty() && isSparsePath()) { prune_alg = "STRIP"; }
-        if (prune_alg.empty()) { prune_alg = "-"; }
-        if (output_dtype.empty()) { output_dtype = "-"; }
-        if (range_low == 0.0f && range_high == 0.0f) {
-            range_low = -1.0f;
-            range_high = 1.0f;
-        }
+        fillEpilogueFields(row);
+        applyFieldDefaults();
     }
 
     std::string caseId() const override {
@@ -131,13 +174,17 @@ inline void PrintTo(const MatmulParam& p, std::ostream* os) {
         << "x" << p.n << " " << p.matrix_type
         << " out=" << p.output_dtype
         << " a=" << p.alpha << " b=" << p.beta
-        << " splitk" << p.split_k << " mode" << p.split_k_mode
+        << " splitk" << p.splitK << " mode" << p.splitKMode
         << " " << (p.isTilePrune() ? "TILE" : "STRIP")
         << " tA=" << (p.isTransA() ? "T" : "N")
         << " tB=" << (p.isTransB() ? "T" : "N")
         << " side=" << (p.isSparseA() ? "A" : "B")
         << " alphaVec=" << p.alpha_vector_scaling
-        << " betaVec=" << p.beta_vector_scaling << ")";
+        << " betaVec=" << p.beta_vector_scaling
+        << " bias=" << p.biasEnabled
+        << " act=" << p.activationType
+        << " batch=" << p.numBatches
+        << ")";
 }
 
 }  // namespace sparse_test

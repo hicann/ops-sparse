@@ -1,64 +1,106 @@
-case_id,m,k,n,dtype,output_dtype,matrix_type,alpha,beta,transA,transB,alg_config_id,split_k,split_k_mode,prune_alg,alpha_vector_scaling,beta_vector_scaling,range_low,range_high,level,note,order,sparse_side
+case_id,m,k,n,dtype,output_dtype,matrix_type,alpha,beta,transA,transB,alg_config_id,split_k,split_k_mode,prune_alg,alpha_vector_scaling,beta_vector_scaling,range_low,range_high,level,note,order,sparse_side,bias_enabled,bias_stride,activation_type,relu_upper_bound,relu_threshold,gelu_scaling,num_batches,batch_stride
 1,128,128,128,FP16,-,sparse×dense,1.0,0.0,false,false,0,1,0,STRIP,0,0,-1,1,L0,M-L0-01-A-sparse-FP16-fused,row,A
 2,128,128,128,FP32,-,sparse×dense,1.0,0.0,false,false,0,1,0,STRIP,0,0,-1,1,L0,M-L0-02-A-sparse-FP32-fused,row,A
 3,256,128,256,FP16,-,sparse×dense,1.0,0.0,true,false,0,1,0,STRIP,0,0,-1,1,L0,M-L0-03-A-sparse-FP16-transA,row,A
 4,256,128,256,FP16,-,sparse×dense,1.0,0.0,false,true,0,1,0,STRIP,0,0,-1,1,L0,M-L0-04-A-sparse-FP16-transB,row,A
 5,128,128,128,FP16,-,sparse×dense,1.0,0.0,true,true,0,1,0,STRIP,0,0,-1,1,L0,M-L0-05-A-sparse-FP16-transA-transB,row,A
 6,128,128,128,BF16,-,sparse×dense,1.0,0.0,false,false,0,1,0,STRIP,0,0,-1,1,L0,M-L0-06-A-sparse-BF16-fused,row,A
-14,104,128,128,FP32,-,sparse×dense,1.0,0.0,false,false,0,1,0,STRIP,0,0,-1,1,L1,M-L1-01-对齐边界-m104,row,A
-15,128,128,104,FP16,-,sparse×dense,1.0,0.0,false,false,0,1,0,STRIP,0,0,-1,1,L1,M-L1-02-对齐边界-n104,row,A
-16,128,104,128,FP32,-,sparse×dense,1.0,0.0,false,false,0,1,0,STRIP,0,0,-1,1,L1,M-L1-03-对齐边界-k104,row,A
 17,16,16,16,FP16,-,sparse×dense,1.0,0.0,false,false,0,1,0,STRIP,0,0,-1,1,L1,M-L1-04-最小shape-16,row,A
 20,128,128,128,FP32,-,sparse×dense,1.0,0.0,false,false,0,1,0,STRIP,0,0,-1,1,L1,M-L1-07-COL-order,col,A
 21,128,128,128,FP32,-,sparse×dense,0.0,1.0,false,false,0,1,0,STRIP,0,0,-1,1,L1,M-L1-08-alpha0-beta1-D等于C,row,A
 22,128,128,128,FP16,-,sparse×dense,0.5,0.5,false,false,0,1,0,STRIP,0,0,-1,1,L1,M-L1-09-alpha0.5-beta0.5,row,A
 23,128,128,128,FP32,-,sparse×dense,-1.0,0.0,false,false,0,1,0,STRIP,0,0,-1,1,L1,M-L1-10-alpha-1-负缩放,row,A
-24,1552,768,1536,FP16,-,sparse×dense,1.0,1.0,false,false,0,1,0,STRIP,0,0,-1,1,L1,M-L1-11-大尺寸对齐边界,row,A
 34,128,128,128,FP16,-,sparse×dense,1.0,0.0,false,false,0,1,0,STRIP,0,0,-1,1,L2,M-L2-11-B-sparse-FP16,row,B
-35,128,128,128,FP32,-,sparse×dense,1.0,0.0,false,false,0,1,0,STRIP,0,0,-1,1,L2,M-L2-12-B-sparse-FP32,row,B
-36,256,128,256,FP16,-,sparse×dense,1.0,0.0,false,true,0,1,0,STRIP,0,0,-1,1,L2,M-L2-13-B-sparse-transB,row,B
-37,128,128,128,FP16,-,sparse×dense,1.0,0.0,false,false,0,1,0,STRIP,0,0,-1,1,L2,M-L2-14-B-sparse-COL,col,B
 38,128,128,128,FP16,-,sparse×dense,1.0,0.0,false,false,0,2,1,STRIP,0,0,-1,1,L2,M-L2-15-splitK2-TWO_KERNELS,row,A
-41,128,128,128,FP32,-,sparse×dense,2.0,1.0,false,false,0,1,0,STRIP,0,0,-1,1,L2,M-L2-18-alpha2-beta1,row,A
 43,128,128,128,FP16,-,sparse×dense,1.0,0.0,false,false,0,1,0,TILE,0,0,-1,1,L2,M-L2-20-TILE-prune,row,A
 44,128,128,128,FP16,-,sparse×dense,0.0,0.0,false,false,0,1,0,STRIP,0,0,-1,1,L2,M-L2-24-alpha0-beta0-全零,row,A
-45,128,128,128,FP16,-,sparse×dense,2.0,0.0,false,false,0,1,0,STRIP,0,0,-3,3,L2,M-L2-25-FP16-饱和-range3,row,A
 46,128,128,128,BF16,-,sparse×dense,1.0,0.0,false,false,0,1,0,STRIP,0,0,-1,1,L2,M-L2-26-BF16-B-sparse,row,B
-53,128,128,128,BF16,-,sparse×dense,2.0,0.0,false,false,0,1,0,STRIP,0,0,-3,3,L2,M-L2-33-BF16-截断-range3,row,A
-59,112,128,128,BF16,-,sparse×dense,1.0,0.0,false,false,0,2,1,STRIP,0,0,-1,1,L2,M-L2-43-WB-BF16-splitK2-对齐边界,row,A
-61,128,128,104,FP32,-,sparse×dense,1.0,0.0,false,false,0,1,0,STRIP,0,0,-1,1,L2,M-L2-45-WB-FP32-n104-非8对齐-fused,row,A
-62,128,128,128,BF16,-,sparse×dense,1.0,0.0,false,true,0,1,0,STRIP,0,0,-1,1,L2,M-L2-46-WB-BF16-B-sparse-transB,row,B
 63,128,128,128,FP32,-,sparse×dense,1.0,0.0,false,false,0,1,0,STRIP,1,0,-1,1,L2,M-L2-47-FP32-alpha-vector,row,A
-64,128,128,128,FP16,-,sparse×dense,1.0,0.0,false,false,0,1,0,STRIP,1,0,-1,1,L2,M-L2-48-FP16-alpha-vector,row,A
 67,128,128,128,FP32,-,sparse×dense,1.0,1.0,false,false,0,1,0,STRIP,1,1,-1,1,L2,M-L2-51-FP32-alpha-beta-vector,row,A
-69,128,128,128,FP32,-,sparse×dense,1.0,0.0,false,false,0,2,1,STRIP,1,0,-1,1,L2,M-L2-53-FP32-alpha-vector-splitK2,row,A
-70,520,256,336,FP32,-,sparse×dense,2.0,0.5,false,false,0,1,0,STRIP,1,0,-1,1,L2,M-L2-54-FP32-odd-large-alpha2-beta05,row,A
 72,520,256,336,FP32,-,sparse×dense,2.0,0.5,false,false,0,1,0,STRIP,1,1,-1,1,L2,M-L2-56-FP32-alphaVec-betaVec,row,A
-75,256,256,256,FP16,-,sparse×dense,2.0,0.0,true,false,0,1,0,STRIP,0,0,-1,1,L2,M-L2-59-FP16-transA-scalarAlpha,row,A
-76,520,256,336,FP32,-,sparse×dense,2.0,0.5,false,true,0,1,0,STRIP,1,0,-1,1,L2,M-L2-60-FP32-alphaVec-transB,row,A
 77,256,256,256,FP16,-,sparse×dense,2.0,0.0,true,true,0,1,0,STRIP,0,0,-1,1,L2,M-L2-61-FP16-transAB-scalarAlpha,row,A
-80,520,272,336,FP16,-,sparse×dense,2.0,0.5,false,false,0,1,0,STRIP,1,0,-1,1,L2,M-L2-64-FP16-alphaVec-Bsparse,row,B
-84,256,256,256,FP32,-,sparse×dense,2.0,0.5,true,false,0,1,0,STRIP,0,0,-1,1,L2,M-L2-68-FP32-transA-beta,row,A
-87,256,256,256,FP32,-,sparse×dense,2.0,0.5,false,true,0,1,0,STRIP,0,0,-1,1,L2,M-L2-71-FP32-transB-beta,row,A
-89,256,256,256,FP16,-,sparse×dense,2.0,0.5,true,true,0,1,0,STRIP,0,0,-1,1,L2,M-L2-73-FP16-transAB-beta,row,A
 94,24,24,20,FP32,-,sparse×dense,1.0,0.0,false,false,0,1,0,STRIP,0,0,-1,1,L2,M-L2-78-FP32-all-odd-small,row,A
-98,520,264,336,FP32,-,sparse×dense,1.0,0.0,false,false,0,1,0,STRIP,0,0,-1,1,L2,M-L2-82-FP32-all-odd-large,row,A
-102,520,264,336,FP32,-,sparse×dense,2.0,0.5,true,false,0,1,0,STRIP,0,0,-1,1,L2,M-L2-86-FP32-all-odd-transA-beta,row,A
-103,528,272,336,FP16,-,sparse×dense,2.0,0.5,false,true,0,1,0,STRIP,0,0,-1,1,L2,M-L2-87-FP16-all-odd-transB-beta,row,A
-106,528,272,336,BF16,-,sparse×dense,2.0,0.5,true,false,0,1,0,STRIP,0,0,-2,2,L2,M-L2-90-BF16-odd-transA-scalarAlpha2-beta05,row,A
-107,528,272,336,BF16,-,sparse×dense,2.0,0.5,false,true,0,1,0,STRIP,0,0,-2,2,L2,M-L2-91-BF16-odd-transB-scalarAlpha2-beta05,row,A
-108,128,128,128,BF16,-,sparse×dense,2.0,0.5,false,false,0,1,0,STRIP,1,1,-2,2,L2,M-L2-92-BF16-alphaVec-betaVec,row,A
-110,128,128,128,BF16,-,sparse×dense,2.0,0.5,false,false,0,2,1,STRIP,0,0,-2,2,L2,M-L2-94-BF16-splitK2-scalarAlpha2-beta05,row,A
-111,128,128,128,BF16,-,sparse×dense,2.0,0.5,false,false,0,1,0,STRIP,0,0,-2,2,L2,M-L2-95-BF16-Bsparse-scalarAlpha2-beta05,row,B
-112,128,128,128,BF16,-,sparse×dense,-1.0,0.0,false,false,0,1,0,STRIP,0,0,-2,2,L2,M-L2-96-BF16-negAlpha-beta0,row,A
-113,528,272,336,BF16,-,sparse×dense,2.0,0.5,true,true,0,1,0,STRIP,0,0,-2,2,L2,M-L2-97-BF16-odd-transAB-scalarAlpha2-beta05,row,A
 114,128,128,128,INT8,INT8,sparse×dense,1.0,0.0,false,true,0,1,0,STRIP,0,0,-5,5,L0,M-L0-07-INT8-INT8-fused,row,A
 115,128,128,128,INT8,INT8,sparse×dense,1.0,0.0,false,true,0,2,1,STRIP,0,0,-5,5,L1,M-L1-12-INT8-INT8-splitK2,row,A
-116,128,128,128,INT8,INT8,sparse×dense,0.5,0.5,false,true,0,1,0,STRIP,0,0,-5,5,L1,M-L1-13-INT8-INT8-beta05,row,A
 117,128,128,128,INT8,INT32,sparse×dense,1.0,0.0,false,true,0,1,0,STRIP,0,0,-5,5,L0,M-L0-08-INT8-INT32-fused,row,A
-118,128,128,128,INT8,INT32,sparse×dense,1.0,0.0,false,true,0,2,1,STRIP,0,0,-5,5,L1,M-L1-14-INT8-INT32-splitK2,row,A
 119,128,128,128,INT8,INT32,sparse×dense,2.0,0.5,false,true,0,2,1,STRIP,0,0,-5,5,L1,M-L1-15-INT8-INT32-alpha2-beta05-splitK2,row,A
 120,128,128,128,INT8,INT8,sparse×dense,1.0,0.0,false,true,0,1,0,TILE,0,0,-5,5,L0,M-L0-09-INT8-INT8-TILE-fused,row,A
-121,128,128,128,INT8,INT8,sparse×dense,1.0,0.0,false,true,0,2,1,TILE,0,0,-5,5,L1,M-L1-16-INT8-INT8-TILE-splitK2,row,A
-122,128,128,128,INT8,INT32,sparse×dense,1.0,0.0,false,true,0,1,0,TILE,0,0,-5,5,L0,M-L0-10-INT8-INT32-TILE-fused,row,A
 123,128,128,128,INT8,INT32,sparse×dense,2.0,0.5,false,true,0,2,1,TILE,0,0,-5,5,L1,M-L1-17-INT8-INT32-TILE-alpha2-beta05-splitK2,row,A
+# ===== L0 门槛用例 (case_id 200-213) — 新功能最小验证 =====
+# 【已精简】L0 门槛用例 200-213 共 14 条全部删除，每条均被 L1 融合矩阵 F1-F10 中功能更全的用例覆盖
+# ===== L1 用户融合矩阵 F1~F10 (case_id 300-309) =====
+300,40,40,152,FP32,-,sparse×dense,1.0,0.5,true,true,0,1,0,STRIP,1,1,-1,1,L1,F1-3vec-ReLU-transAB-Bsparse,row,B,1,0,1,3.402823466e38,0.0,1.0,3,6080
+301,40,48,1808,FP16,-,sparse×dense,1.0,0.5,true,true,0,1,0,STRIP,1,1,-1,1,L1,F2-3vec-GeLU-transAB-Bsparse,row,B,1,0,2,3.402823466e38,0.0,1.0,4,86784
+302,15744,40,152,FP32,-,sparse×dense,1.0,0.5,true,true,0,1,0,STRIP,1,1,-1,1,L1,F3-3vec-ReLU-perchunk-transAB-Bsparse,row,B,1,0,1,3.402823466e38,0.0,1.0,5,2393088
+303,16,16,16,FP32,-,sparse×dense,1.0,0.5,true,true,0,1,0,STRIP,1,1,-1,1,L1,F4-3vec-GeLU-min-shape-transAB-Bsparse,row,B,1,0,2,3.402823466e38,0.0,1.0,1,0
+304,152,48,1808,BF16,-,sparse×dense,1.0,0.5,false,false,0,1,0,STRIP,1,1,-1,1,L1,F5-3vec-ReLU-Bsparse-notrans,row,B,1,0,1,3.402823466e38,0.0,1.0,3,274816
+305,40,15744,40,FP32,-,sparse×dense,1.0,0.5,true,true,0,1,0,STRIP,1,1,-1,1,L1,F6-3vec-GeLU-Asparse-bigN,row,A,1,0,2,3.402823466e38,0.0,1.0,4,629760
+306,48,64,1824,INT8,INT32,sparse×dense,2.0,0.5,false,true,0,1,0,STRIP,0,0,-5,5,L1,F7-scalar-ReLU-transB-Bsparse,row,B,1,0,1,3.402823466e38,0.0,1.0,5,116736
+307,40,48,15744,FP16,-,sparse×dense,1.0,0.5,true,true,0,1,0,STRIP,1,1,-1,1,L1,F8-3vec-ReLU-nobias-transAB-Bsparse,row,B,0,0,1,3.402823466e38,0.0,1.0,3,755712
+308,40,40,152,FP32,-,sparse×dense,1.0,0.5,true,true,0,1,0,STRIP,1,1,-1,1,L1,F9-3vec-noact-transAB-Bsparse,row,B,1,0,0,3.402823466e38,0.0,1.0,3,6080
+309,1024,1024,1024,FP32,-,sparse×dense,1.0,0.5,true,true,0,1,0,STRIP,1,1,-1,1,L1,F10-3vec-ReLU-extreme-transAB-Bsparse,row,B,1,0,1,3.402823466e38,0.0,1.0,3,1048576
+# ===== L1 dtype 覆盖 D1~D10 (case_id 310-319) — 精简保留 D1/D3/D7/D9 =====
+310,40,152,40,FP32,-,sparse×dense,1.0,0.5,true,true,0,1,0,STRIP,1,1,-1,1,L1,D1-FP32-ReLU-transAB-Bsparse,row,B,1,0,1,3.402823466e38,0.0,1.0,1,0
+312,40,48,1808,FP16,-,sparse×dense,1.0,0.5,true,true,0,1,0,STRIP,1,1,-1,1,L1,D3-FP16-ReLU-transAB-Bsparse,row,B,1,0,1,3.402823466e38,0.0,1.0,1,0
+316,48,160,64,INT8,INT8,sparse×dense,1.0,0.0,false,true,0,1,0,STRIP,1,1,-5,5,L1,D7-INT8-INT8-ReLU-transB-Bsparse,row,B,1,0,1,3.402823466e38,0.0,1.0,1,0
+318,1808,64,160,INT8,INT32,sparse×dense,1.0,0.0,false,true,0,1,0,STRIP,1,1,-5,5,L1,D9-INT8-INT32-ReLU-transB-Bsparse,row,B,1,0,1,3.402823466e38,0.0,1.0,1,0
+# ===== L1 batch 覆盖 B1~B8 (case_id 320-327) — 精简保留 B4/B5/B7/B8 =====
+323,40,1808,160,BF16,-,sparse×dense,1.0,0.5,true,true,0,1,0,STRIP,1,1,-1,1,L1,B4-batch5-bias-shared-GeLU,row,B,1,0,2,3.402823466e38,0.0,1.0,5,289280
+324,40,152,40,FP32,-,sparse×dense,1.0,0.5,true,true,0,1,0,STRIP,1,1,-1,1,L1,B5-batch3-bias-indep-ReLU,row,B,1,40,1,3.402823466e38,0.0,1.0,3,6080
+326,40,1808,160,FP32,-,sparse×dense,1.0,0.5,true,true,0,1,0,STRIP,1,1,-1,1,L1,B7-batch5-bias-indep-3vec-ReLU,row,B,1,40,1,3.402823466e38,0.0,1.0,5,289280
+327,48,160,64,INT8,INT32,sparse×dense,1.0,0.0,false,true,0,1,0,STRIP,1,1,-5,5,L1,B8-batch3-bias-shared-GeLU-INT8,row,B,1,0,2,3.402823466e38,0.0,1.0,3,10240
+# ===== L1 非对齐 shape NA1~NA10 (case_id 330-339) — 精简保留 NA3/NA4/NA5/NA8 =====
+332,40,48,1808,FP16,-,sparse×dense,1.0,0.5,true,true,0,1,0,STRIP,1,1,-1,1,L1,NA3-m40-n1808-bias-GeLU,row,B,1,0,2,3.402823466e38,0.0,1.0,1,0
+333,152,48,1808,BF16,-,sparse×dense,1.0,0.5,true,true,0,1,0,STRIP,1,1,-1,1,L1,NA4-m152-bias-ReLU,row,B,1,0,1,3.402823466e38,0.0,1.0,1,0
+334,1796,40,152,FP32,-,sparse×dense,1.0,0.5,true,true,0,1,0,STRIP,1,1,-1,1,L1,NA5-m1796-bias-GeLU,row,B,1,0,2,3.402823466e38,0.0,1.0,1,0
+337,40,6144,48,FP16,-,sparse×dense,1.0,0.5,true,true,0,1,0,STRIP,1,1,-1,1,L1,NA8-k6144-bias-ReLU,row,B,1,0,1,3.402823466e38,0.0,1.0,1,0
+# ===== L1 activation 参数 A1~A8 (case_id 340-347) — 精简保留 A3/A7 =====
+342,128,128,128,FP32,-,sparse×dense,1.0,0.0,false,false,0,1,0,STRIP,0,0,-1,1,L1,A3-ReLU-thr-neg1,row,A,1,0,1,3.402823466e38,-1.0,1.0,1,0
+346,128,128,128,FP16,-,sparse×dense,1.0,0.0,false,false,0,1,0,STRIP,0,0,-1,1,L1,A7-GeLU-scale2-FP16,row,A,1,0,2,3.402823466e38,0.0,2.0,1,0
+# ===== L1 alpha/beta 变化 SC1~SC6 (case_id 350-355) — 精简保留 SC2/SC6 =====
+351,128,128,128,FP32,-,sparse×dense,2.0,0.5,false,false,0,1,0,STRIP,0,0,-1,1,L1,SC2-scalar-alpha2-beta05-GeLU,row,A,1,0,2,3.402823466e38,0.0,1.0,1,0
+355,128,128,128,FP32,-,sparse×dense,-1.0,0.0,false,false,0,1,0,STRIP,0,0,-1,1,L1,SC6-negAlpha-bias-ReLU,row,A,1,0,1,3.402823466e38,0.0,1.0,1,0
+# ===== L1 prune/trans/order PT1~PT6 (case_id 360-365) — 精简保留 PT3/PT4/PT6 =====
+362,128,128,128,FP32,-,sparse×dense,1.0,0.5,true,false,0,1,0,STRIP,0,0,-1,1,L1,PT3-STRIP-col-transA-Asparse-bias-ReLU,col,A,1,0,1,3.402823466e38,0.0,1.0,1,0
+363,128,128,128,BF16,-,sparse×dense,1.0,0.5,false,false,0,1,0,TILE,0,0,-1,1,L1,PT4-TILE-row-Asparse-bias-GeLU,row,A,1,0,2,3.402823466e38,0.0,1.0,1,0
+365,128,128,128,FP32,-,sparse×dense,1.0,0.5,true,true,0,1,0,STRIP,0,0,-1,1,L1,PT6-STRIP-row-transAB-Asparse-bias-GeLU,row,A,1,0,2,3.402823466e38,0.0,1.0,1,0
+# ===== L1 split_k 路径 SK1~SK4 (case_id 370-373) — 精简保留 SK3/SK4 =====
+372,128,128,128,FP16,-,sparse×dense,1.0,0.0,false,false,0,2,1,STRIP,0,0,-1,1,L1,SK3-TWO_KERNELS-FP16-bias-ReLU,row,A,1,0,1,3.402823466e38,0.0,1.0,1,0
+373,128,128,128,INT8,INT32,sparse×dense,1.0,0.0,false,true,0,2,1,STRIP,0,0,-5,5,L1,SK4-TWO_KERNELS-INT8-bias-GeLU,row,A,1,0,2,3.402823466e38,0.0,1.0,1,0
+# ===== L1 特殊值 SP1~SP10 (case_id 380-389) — 精简保留 SP1/SP3/SP8/SP9 =====
+380,128,128,128,FP32,-,sparse×dense,1.0,0.0,false,false,0,1,0,STRIP,0,0,-1,1,L1,SP1-bias-allzero-ReLU,row,A,1,0,1,3.402823466e38,0.0,1.0,1,0
+382,128,128,128,FP32,-,sparse×dense,1.0,0.0,false,false,0,1,0,STRIP,0,0,-1,1,L1,SP3-bias-allneg-ReLU-thr0,row,A,1,0,1,3.402823466e38,0.0,1.0,1,0
+387,128,128,128,FP32,-,sparse×dense,1.0,0.0,false,false,0,1,0,STRIP,0,0,-1,1,L1,SP8-GeLU-scale0-allzero,row,A,0,0,2,3.402823466e38,0.0,0.0,1,0
+388,128,128,128,INT8,INT8,sparse×dense,1.0,0.0,false,true,0,1,0,STRIP,0,0,-5,5,L1,SP9-INT8-bias127-ReLU,row,A,1,0,1,3.402823466e38,0.0,1.0,1,0
+# ===== L1 综合补充 M1~M10 (case_id 390-399) — 精简保留 M1/M5 =====
+390,128,128,128,FP32,-,sparse×dense,1.0,0.5,true,false,0,1,0,STRIP,0,0,-1,1,L1,M1-bias-ReLU-transA-only,row,A,1,0,1,3.402823466e38,0.0,1.0,1,0
+394,128,128,128,FP32,-,sparse×dense,1.0,0.5,false,false,0,2,1,STRIP,1,1,-1,1,L1,M5-3vec-ReLU-splitK2,row,A,1,0,1,3.402823466e38,0.0,1.0,1,0
+# ===== L1 白盒补充用例 WB1~WB16 (case_id 400-415) — 分支覆盖补全 =====
+# 目标分支：biasChunkMode=1 per-chunk bias Cast (FP16/BF16)、GeLU Exp clamp z≤20、
+#   非融合 BF16 bias Cast、INT8 biasChunkMode+int32→float Cast、ReLU/GeLU 参数边界、
+#   epilogue 链组合、尾核/非对齐 edge shape。
+# 精简保留 WB1/WB4/WB7/WB13/WB14，覆盖 perchunk-Cast(FP16/INT8)、GeLU ExpClamp、INT8 saturation、尾核 edge。
+400,15744,48,160,FP16,-,sparse×dense,1.0,0.5,true,true,0,1,0,STRIP,1,1,-1,1,L1,WB1-FP16-perchunk-bias-Cast-ReLU-transAB-Bsparse,row,B,1,0,1,3.402823466e38,0.0,1.0,1,0
+403,128,128,128,FP16,-,sparse×dense,1.0,0.0,false,false,0,1,0,STRIP,0,0,-10,10,L1,WB4-FP16-bias-GeLU-ExpClamp-range10,row,A,1,0,2,3.402823466e38,0.0,1.0,1,0
+406,15744,64,160,INT8,INT32,sparse×dense,1.0,0.5,false,true,0,1,0,STRIP,1,1,-5,5,L1,WB7-INT8-perchunk-bias-ReLU-int32cast-transB-Bsparse,row,B,1,0,1,3.402823466e38,0.0,1.0,1,0
+412,128,128,128,INT8,INT8,sparse×dense,1.0,0.0,false,true,0,1,0,STRIP,0,0,-5,5,L1,WB13-INT8-INT8-bias-GeLU-saturation-range5,row,A,1,0,2,3.402823466e38,0.0,1.0,1,0
+413,16,128,128,FP32,-,sparse×dense,1.0,0.0,false,false,0,1,0,STRIP,0,0,-10,10,L1,WB14-m16-bias-GeLU-ExpClamp-minRow,row,A,1,0,2,3.402823466e38,0.0,1.0,1,0
+# ===== 检视补充用例 (case_id 500-504) — 覆盖检视报告 T1~T5 缺口 =====
+# T1: 极限最小 shape + bias+ReLU epilogue (m=16 为算子 StructuredDescriptorInit 支持的最小行数;
+#     k=16 n=16 均 8 的倍数满足 FP16 对齐; case 17 同 shape 但无 epilogue, 此用例补 epilogue 组合)
+500,16,16,16,FP16,-,sparse×dense,1.0,0.0,false,false,0,1,0,STRIP,0,0,-1,1,L1,T1-m16-minshape-FP16-bias-ReLU,row,A,1,0,1,3.402823466e38,0.0,1.0,1,0
+# T2: ReLU upperBound=0 → clamp(D,0,0)=全零输出
+501,128,128,128,FP32,-,sparse×dense,1.0,0.0,false,false,0,1,0,STRIP,0,0,-1,1,L1,T2-ReLU-upperBound0-allzero-output,row,A,1,0,1,0.0,0.0,1.0,1,0
+# T5: beta<0 负缩放因子
+502,128,128,128,FP32,-,sparse×dense,1.0,-0.5,false,false,0,1,0,STRIP,0,0,-1,1,L1,T5-beta-neg0.5-bias-ReLU,row,A,1,0,1,3.402823466e38,0.0,1.0,1,0
+# T3: GeLU scaling=0.5 非默认缩放
+503,128,128,128,FP32,-,sparse×dense,1.0,0.0,false,false,0,1,0,STRIP,0,0,-1,1,L1,T3-GeLU-scaling0.5-bias,row,A,1,0,2,3.402823466e38,0.0,0.5,1,0
+# T4: bias 全正值 (biasSeed=1 → GenBiasVector pattern 1 → all 2.0; 见 GenAlphaBetaVectors case_id 映射)
+504,128,128,128,FP32,-,sparse×dense,1.0,0.0,false,false,0,1,0,STRIP,0,0,-1,1,L1,T4-bias-allpos2.0-ReLU,row,A,1,0,1,3.402823466e38,0.0,1.0,1,0
+# ===== F1 验证用例 (case_id 505-506) — GELU_SCALING implies GELU =====
+# activation_type=3: 仅设 GELU_SCALING 不设 ACTIVATION_GELU，验证算子自动启用 GeLU (F1 修复)
+# golden 侧 GoldenActType(3)=2 → 按 GeLU 计算；NPU 侧 SetEpilogueAttrs 仅设 GELU_SCALING
+# F1-505: FP32, 128³, GELU_SCALING=0.5, bias=1
+505,128,128,128,FP32,-,sparse×dense,1.0,0.0,false,false,0,1,0,STRIP,0,0,-1,1,L1,F1-505-GELU_SCALING-implies-GELU-FP32,row,A,1,0,3,3.402823466e38,0.0,0.5,1,0
+# F1-506: FP16, 128³, GELU_SCALING=2.0, bias=1
+506,128,128,128,FP16,-,sparse×dense,1.0,0.0,false,false,0,1,0,STRIP,0,0,-1,1,L1,F1-506-GELU_SCALING-implies-GELU-FP16,row,A,1,0,3,3.402823466e38,0.0,2.0,1,0

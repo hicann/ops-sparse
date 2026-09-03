@@ -1,7 +1,7 @@
 /**
  * ----------------------------------------------------------------------------------------------------------
  * Copyright (c) 2026 Huawei Technologies Co., Ltd.
- * This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+ * This program is free software; you can redistribute it and/or modify it under the terms and conditions of
  * CANN Open Software License Agreement Version 2.0 (the "License").
  * Please refer to the License for details. You may not use this file in compliance with the License.
  * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
@@ -32,6 +32,7 @@
 
 
 #include <cstdint>
+#include <cfloat>
 
 #ifndef __gm__
 #define __gm__
@@ -134,7 +135,7 @@ typedef struct AclsparseltTilingData {
     // Consumed by the prune kernel to dispatch between TILE and STRIP paths.
     // Default 0 (TILE) when zero-initialized; prune host explicitly sets this.
     int32_t pruneAlg;
-    // [TRANSPOSE] sparseTrans/transB flags: 1 = op(A)/op(B) is transpose.
+    // sparseTrans/transB flags: 1 = op(A)/op(B) is transpose.
     // sparseTrans is consumed by the prune kernel to read the physical (k,m) layout
     // and produce A_pruned as (m,k) row-major. transB is consumed by the matmul
     // kernel to declare the GM B tensor as (n,k) and transpose during CopyGM2L1.
@@ -158,6 +159,27 @@ typedef struct AclsparseltTilingData {
     int64_t tilingOffset;
     int64_t aPrunedOffset;
     int64_t tempResultOffset;
+    // —— bias + activation epilogue 字段（追加在末尾，向后兼容）——
+    uint64_t biasDevPtr;       // bias device 指针，0=无 bias
+    int64_t  biasStride;       // batch 间 bias 步长，0=广播
+    int32_t  activationType;   // 0=无, 1=ReLU, 2=GeLU（统一编码，替代分离的 relu/gelu）
+    float    reluUpperBound;   // 默认 FLT_MAX
+    float    reluThreshold;    // 默认 0.0f
+    float    geluScaling;      // 默认 1.0f
+    int32_t  biasChunkMode;    // 0=全量加载, 1=per-chunk 降级（UB 超限时）
+    // —— batch 字段（追加在末尾，向后兼容）——
+    int32_t  numBatches;       // batch 数量，默认 1
+    int64_t  batchStrideA;     // A 的 batch 步长（元素数）
+    int64_t  batchStrideB;     // B 的 batch 步长
+    int64_t  batchStrideC;     // C 的 batch 步长
+    int64_t  batchStrideD;     // D 的 batch 步长
+    // Prune trans path chunk size (columns per chunk).
+    // Computed by host based on UB capacity. When m > chunkM, the trans path
+    // splits the m-dimension into chunks of chunkM columns each. When m <= chunkM,
+    // single chunk (= m), behavior unchanged from original. chunkM is aligned to
+    // 32B/elemSize so that alignedChunkM == chunkM (exact UB row stride).
+    // 0 = not set (non-trans paths or default); kernel treats 0 as "use m".
+    int32_t  chunkM;
 } AclsparseltTilingData;
 
 
@@ -201,6 +223,21 @@ __aicore__ inline AclsparseltTilingData splt_load_tiling(GM_ADDR tilingGm)
     td.tilingOffset = gmTd->tilingOffset;
     td.aPrunedOffset = gmTd->aPrunedOffset;
     td.tempResultOffset = gmTd->tempResultOffset;
+    // bias + activation 字段
+    td.biasDevPtr = gmTd->biasDevPtr;
+    td.biasStride = gmTd->biasStride;
+    td.activationType = gmTd->activationType;
+    td.reluUpperBound = gmTd->reluUpperBound;
+    td.reluThreshold = gmTd->reluThreshold;
+    td.geluScaling = gmTd->geluScaling;
+    td.biasChunkMode = gmTd->biasChunkMode;
+    // batch 字段
+    td.numBatches = gmTd->numBatches;
+    td.batchStrideA = gmTd->batchStrideA;
+    td.batchStrideB = gmTd->batchStrideB;
+    td.batchStrideC = gmTd->batchStrideC;
+    td.batchStrideD = gmTd->batchStrideD;
+    td.chunkM = gmTd->chunkM;
     return td;
 }
 #endif // __CCE_AICORE__
@@ -404,13 +441,16 @@ struct WsLayout {
     int64_t totalBytes;
 };
 
-inline WsLayout compute_ws_layout(int32_t m, int32_t n, int32_t k, int32_t splitK, int32_t dataType)
+inline WsLayout compute_ws_layout(int32_t m, int32_t n, int32_t k, int32_t splitK,
+                                  int32_t dataType, int32_t numBatches)
 {
     // v2: four-branch elemSize (FP32=4, INT8=1, INT32=4, FP16/BF16=2).
     const int64_t elemSize =
         (dataType == SPLT_DTYPE_FP32) ? SPLT_FP32_BYTES :
         (dataType == SPLT_DTYPE_INT8) ? SPLT_INT8_BYTES :
         (dataType == SPLT_DTYPE_INT32) ? SPLT_FP32_BYTES : SPLT_HALF_BYTES;  // FP16/BF16
+    // numBatches 至少为 1（防御性，fill_tiling_dims 保证 >= 1）
+    const int64_t batches = (numBatches > 0) ? static_cast<int64_t>(numBatches) : 1;
     WsLayout w;
     w.tilingOff = SPLT_WS_HEADER_BYTES;
     w.aPrunedOff = align_up(w.tilingOff + sizeof(AclsparseltTilingData), SPLT_WS_ALIGN);
@@ -425,7 +465,8 @@ inline WsLayout compute_ws_layout(int32_t m, int32_t n, int32_t k, int32_t split
     if (splitK == 1) {
         w.totalBytes = w.tempOff;
     } else {
-        w.totalBytes = align_up(w.tempOff + static_cast<int64_t>(splitK) * static_cast<int64_t>(m) *
+        // temp buffer 须包含所有 batch 的部分和
+        w.totalBytes = align_up(w.tempOff + batches * static_cast<int64_t>(splitK) * static_cast<int64_t>(m) *
                                 static_cast<int64_t>(n) * SPLT_FP32_BYTES, SPLT_WS_ALIGN);
     }
     // A_pruned buffer is always allocated here because compute_ws_layout
@@ -527,11 +568,20 @@ inline void fill_sparse_tiling_dims(AclsparseltTilingData& td,
         td.pruneAlongRow = ((isSparseA ? transA : transB) != isRowOrder) ? 1 : 0;
     }
     td.sparseTrans = transA ? 1 : 0;
-    // sparse path: prune transposes A, matmul must not.
-    if (hasStructuredSparsity) {
+    // A-sparse: prune transposes A, matmul must not.
+    // B-sparse: A is dense (not pruned), matmul must handle transA via sparseTrans.
+    if (hasStructuredSparsity && isSparseA) {
         td.sparseTrans = 0;
     }
-    td.transB = transB ? 1 : 0;
+    // B-sparse: prune always outputs B_pruned in (k, n) row-major layout
+    // (TransRowOrder path transposes during prune; AlongRow/AlongCol paths
+    // read B in (k,n) and output (k,n) unchanged). The matmul must treat
+    // B_pruned as NDExt(k, n) — no additional transpose.
+    if (hasStructuredSparsity && !isSparseA) {
+        td.transB = 0;
+    } else {
+        td.transB = transB ? 1 : 0;
+    }
 }
 
 // Fill tiling dimension fields (shared by PlanInit).
@@ -583,6 +633,53 @@ inline AlgAttrValues query_alg_attributes(aclsparseLtConstHandle_t handle,
     return v;
 }
 
+/**
+ * @brief 填充 bias + activation 默认值到 tiling data。
+ * prepare_matmul_pointers 会用 descriptor 实际值覆盖这些默认值。
+ */
+inline void fill_bias_activation_defaults(AclsparseltTilingData& td)
+{
+    td.biasDevPtr = 0;           // 默认无 bias
+    td.biasStride = 0;
+    td.activationType = 0;      // 默认无 activation
+    td.reluUpperBound = FLT_MAX;
+    td.reluThreshold = 0.0f;
+    td.geluScaling = 1.0f;
+    td.biasChunkMode = 0;       // 默认全量加载（下方根据 UB 预算计算降级标志）
+}
+
+/**
+ * @brief 计算 biasChunkMode 降级标志。
+ *
+ * 三向量全量加载 + tile buffer 超 UB 时降级为 per-chunk。
+ * 仅融合路径（splitK==1）需要降级（非融合路径 CHUNK=256 固定小 buffer，不超限）。
+ */
+inline void compute_bias_chunk_mode(AclsparseltTilingData& td,
+                                     const aclsparseLtMatmulDescriptor* md,
+                                     int32_t dt, const CubeTiling& ct, int32_t m)
+{
+    const bool biasEnabled = (md->biasPointer != nullptr);
+    const bool needVecScale = (td.alphaVectorScaling == 1 || td.betaVectorScaling == 1);
+    if (biasEnabled && needVecScale && td.splitK == 1) {
+        const uint64_t ubSize = get_ub_size();
+        const uint64_t maxTileBytes =
+            2 * static_cast<uint64_t>(ct.baseM) * static_cast<uint64_t>(ct.baseN) * sizeof(float)
+            + 2048;  // accBuf + dFp32Buf + small bufs
+        // biasVecBuf (FP32) + biasLoadBuf (FP16/BF16 only, not FP32/INT8)
+        const bool needBiasLoadBuf = (dt != SPLT_DTYPE_FP32 && dt != SPLT_DTYPE_INT8);
+        const uint64_t vecBytes =
+            (td.alphaVectorScaling ? static_cast<uint64_t>(m) * 4 : 0) +
+            (td.betaVectorScaling ? static_cast<uint64_t>(m) * 4 : 0) +
+            (biasEnabled ? static_cast<uint64_t>(m) * 4 : 0) +
+            (biasEnabled && needBiasLoadBuf
+                ? static_cast<uint64_t>(m) * static_cast<uint64_t>(SPLT_HALF_BYTES)
+                : 0);
+        if (vecBytes + maxTileBytes > ubSize) {
+            td.biasChunkMode = 1;
+        }
+    }
+}
+
 inline void fill_tiling_dims(AclsparseltTilingData& td,
                              aclsparseLtConstHandle_t handle,
                              const aclsparseLtMatmulDescriptor* md,
@@ -608,15 +705,30 @@ inline void fill_tiling_dims(AclsparseltTilingData& td,
     td.coreNum = static_cast<int32_t>(coreNum);
     const int32_t m = md_m(md);
     const int32_t n = md_n(md);
+    // 从 mat descriptor 读取 batch 配置（SetAttribute 在 PlanInit 之前调用）
+    const int32_t numBatches = (md->matA != nullptr && md->matA->numBatches > 0) ? md->matA->numBatches : 1;
+    td.numBatches = numBatches;
+    td.batchStrideA = (md->matA != nullptr) ? md->matA->batchStride : 0;
+    td.batchStrideB = (md->matB != nullptr) ? md->matB->batchStride : 0;
+    td.batchStrideC = (md->matC != nullptr) ? md->matC->batchStride : 0;
+    td.batchStrideD = (md->matD != nullptr) ? md->matD->batchStride : 0;
     const int64_t totalMNTiles = static_cast<int64_t>((m + ct.baseM - 1) / ct.baseM) *
                                   static_cast<int64_t>((n + ct.baseN - 1) / ct.baseN);
-    const int64_t totalTiles = totalMNTiles * static_cast<int64_t>(td.splitK);
-    td.usedCoreNum = (totalTiles < static_cast<int64_t>(coreNum)) ? static_cast<int32_t>(totalTiles)
-                                                                   : static_cast<int32_t>(coreNum);
+    // usedCoreNum 基于 per-batch tile 数（不含 numBatches）。
+    // batch 循环在 kernel 内部，每个 block 处理所有 batch 的同一组 tile。
+    // 此前 totalTiles 乘以 numBatches 导致 usedCoreNum 被放大，多余 block 在
+    // 每 batch 的 tile 循环中空转（rawBlockId >= totalTiles 直接 continue）。
+    // 改为 per-batch tile 数后，核数与 kernel 侧 totalTiles 一致，无空转。
+    const int64_t perBatchTotalTiles = totalMNTiles * static_cast<int64_t>(td.splitK);
+    td.usedCoreNum = (perBatchTotalTiles < static_cast<int64_t>(coreNum))
+                         ? static_cast<int32_t>(perBatchTotalTiles)
+                         : static_cast<int32_t>(coreNum);
     if (td.usedCoreNum <= 0) { td.usedCoreNum = 1; }
     td.tilingOffset = wsl.tilingOff;
     td.aPrunedOffset = wsl.aPrunedOff;
     td.tempResultOffset = wsl.tempOff;
+    fill_bias_activation_defaults(td);
+    compute_bias_chunk_mode(td, md, dt, ct, m);
 }
 
 #endif // __CCE_AICORE__

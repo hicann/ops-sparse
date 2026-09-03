@@ -108,10 +108,62 @@ inline bool IsValidOpLayoutCombination(aclsparseOrder_t orderA, aclsparseOrder_t
 }
 
 /**
+ * @brief 校验结构化稀疏位置约束。
+ *
+ * matA 与 matB 有且仅有一个为 structured；matC/matD 须为 dense。
+ */
+inline aclsparseStatus_t ValidateSparsePosition(
+    const aclsparseLtMatDescriptor* descA,
+    const aclsparseLtMatDescriptor* descB,
+    const aclsparseLtMatDescriptor* descC,
+    const aclsparseLtMatDescriptor* descD)
+{
+    if (descA->isStructured == descB->isStructured) {
+        return ACL_SPARSE_STATUS_INVALID_VALUE;
+    }
+    if (descC->isStructured || descD->isStructured) {
+        return ACL_SPARSE_STATUS_INVALID_VALUE;
+    }
+    return ACL_SPARSE_STATUS_SUCCESS;
+}
+
+/**
+ * @brief 校验 C/D 一致性约束：相同 ld 和 order。
+ */
+inline aclsparseStatus_t ValidateCDConsistency(
+    const aclsparseLtMatDescriptor* descC,
+    const aclsparseLtMatDescriptor* descD)
+{
+    if (descC->ld != descD->ld || descC->order != descD->order) {
+        return ACL_SPARSE_STATUS_INVALID_VALUE;
+    }
+    return ACL_SPARSE_STATUS_SUCCESS;
+}
+
+/**
+ * @brief 校验 A/B/C/D 四个矩阵的 numBatches 一致性。
+ */
+inline aclsparseStatus_t ValidateBatchConsistency(
+    const aclsparseLtMatDescriptor* descA,
+    const aclsparseLtMatDescriptor* descB,
+    const aclsparseLtMatDescriptor* descC,
+    const aclsparseLtMatDescriptor* descD)
+{
+    const int32_t nbA = (descA->numBatches > 0) ? descA->numBatches : 1;
+    const int32_t nbB = (descB->numBatches > 0) ? descB->numBatches : 1;
+    const int32_t nbC = (descC->numBatches > 0) ? descC->numBatches : 1;
+    const int32_t nbD = (descD->numBatches > 0) ? descD->numBatches : 1;
+    if (nbA != nbB || nbA != nbC || nbA != nbD) {
+        return ACL_SPARSE_STATUS_INVALID_VALUE;
+    }
+    return ACL_SPARSE_STATUS_SUCCESS;
+}
+
+/**
  * @brief 校验 matmul 描述符的参数与约束。
  *
  * 校验顺序：mat nullptr → opA/opB 枚举 → computeType 枚举 → 结构化稀疏位置 →
- *           C/D 一致性 → 操作布局组合 → 维度上下限。
+ *           C/D 一致性 → batch 一致性 → 操作布局组合 → 维度上下限。
  * 所有校验在内存分配之前完成。
  */
 aclsparseStatus_t ValidateMatmulDescriptorParams(
@@ -138,18 +190,15 @@ aclsparseStatus_t ValidateMatmulDescriptorParams(
     const aclsparseLtMatDescriptor* descC = ToInternalConst(matC);
     const aclsparseLtMatDescriptor* descD = ToInternalConst(matD);
 
-    // 结构化稀疏位置约束：matA 与 matB 有且仅有一个为 structured
-    if (descA->isStructured == descB->isStructured) {
-        return ACL_SPARSE_STATUS_INVALID_VALUE;
-    }
-    // matC/matD 须为 dense（非 structured）
-    if (descC->isStructured || descD->isStructured) {
-        return ACL_SPARSE_STATUS_INVALID_VALUE;
-    }
-    // C/D 一致性约束：相同 ld 和 order
-    if (descC->ld != descD->ld || descC->order != descD->order) {
-        return ACL_SPARSE_STATUS_INVALID_VALUE;
-    }
+    aclsparseStatus_t st = ValidateSparsePosition(descA, descB, descC, descD);
+    if (st != ACL_SPARSE_STATUS_SUCCESS) { return st; }
+
+    st = ValidateCDConsistency(descC, descD);
+    if (st != ACL_SPARSE_STATUS_SUCCESS) { return st; }
+
+    st = ValidateBatchConsistency(descA, descB, descC, descD);
+    if (st != ACL_SPARSE_STATUS_SUCCESS) { return st; }
+
     // 操作与布局组合约束（仅 INT8/FP8/FP4 类型，以 matA.valueType 为准）
     if (IsLowPrecisionType(descA->valueType)) {
         if (!IsValidOpLayoutCombination(descA->order, descB->order, opA, opB)) {

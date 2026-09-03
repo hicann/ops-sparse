@@ -13,7 +13,31 @@
 #ifndef TEST_MATMUL_NPU_WRAPPER_H_
 #define TEST_MATMUL_NPU_WRAPPER_H_
 
+#include <cfloat>
+
 #include "ltmatmul_test_utils.h"  // NpuDtypeTrait, RAII guards, AlgSetAttributeNpu chain
+
+// =============================================================================
+// LT_TEST_NPU_EPILOGUE_ENABLED: compile-time gate for bias/activation
+// SetAttribute calls on the NPU side.
+//
+// The operator side (feat/bias-activation-epilogue) has extended
+// aclsparseLtMatmulDescAttribute_t with BIAS_POINTER(2), BIAS_STRIDE(3),
+// ACTIVATION_RELU(4), ACTIVATION_RELU_UPPERBOUND(5), ACTIVATION_RELU_THRESHOLD(6),
+// ACTIVATION_GELU(7), ACTIVATION_GELU_SCALING(8). So epilogue (stage 1:
+// bias + activation) is enabled by default.
+//
+// LT_TEST_NPU_BATCH_ENABLED: gate for stage-2 batch attributes (NUM_BATCHES,
+// BATCH_STRIDE on MatDesc). The operator side has implemented batch support
+// (aclsparseLtMatDescSetAttribute with ACLSPARSELT_MAT_NUM_BATCHES /
+//  ACLSPARSELT_MAT_BATCH_STRIDE); batch cases now run the full NPU path.
+// =============================================================================
+#ifndef LT_TEST_NPU_EPILOGUE_ENABLED
+#define LT_TEST_NPU_EPILOGUE_ENABLED 1
+#endif
+#ifndef LT_TEST_NPU_BATCH_ENABLED
+#define LT_TEST_NPU_BATCH_ENABLED 1
+#endif
 
 // =============================================================================
 // Matmul NPU wrapper for the ltmatmul test binary.
@@ -63,7 +87,15 @@ struct MatmulNpuResult {
     size_t workspaceSize = 0;
     double npuMs = 0.0;
     std::vector<int8_t> npuPrunedA;
+    // Epilogue SetAttribute return codes (always SUCCESS when epilogue disabled
+    // or LT_TEST_NPU_EPILOGUE_ENABLED==0).
+    aclsparseStatus_t biasSetRet = ACL_SPARSE_STATUS_SUCCESS;
+    aclsparseStatus_t actSetRet = ACL_SPARSE_STATUS_SUCCESS;
+    aclsparseStatus_t batchSetRet = ACL_SPARSE_STATUS_SUCCESS;
+    bool epilogueApplied = false;  // true iff NPU actually applied bias/activation
 };
+
+#include "ltmatmul_npu_epilogue.h"  // EpilogueBuffers, SetEpilogueAttrs
 
 // -----------------------------------------------------------------------------
 // Set alg attributes including split_k_mode (v2 extension).
@@ -95,7 +127,7 @@ inline bool SetMatmulAlgAttributes(aclsparseLtConstHandle_t handle,
 // -----------------------------------------------------------------------------
 // Vector scaling: set attributes on matmul descriptor + copy vectors to device.
 // Extracted from RunMatmulChain / RunMatmulBSparseChainWithTrans
-// [codecheck: duplicate code].
+// to eliminate duplicate code.
 // -----------------------------------------------------------------------------
 struct VecScalingBuffers {
     sparse_test::DeviceBuffer dAlphaVec;
@@ -129,9 +161,79 @@ inline VecScalingBuffers SetVecScalingAttrs(aclsparseLtConstHandle_t handle,
 }
 
 // -----------------------------------------------------------------------------
+// SetBatchAttrsOnMatDesc: set NUM_BATCHES + BATCH_STRIDE on a matrix descriptor.
+//
+// Must be called BEFORE aclsparseLtMatmulDescriptorInit (which performs the
+// A/B/C/D numBatches consistency check). All four matrices must share the same
+// numBatches; batch_stride may differ per-matrix but the test uses a single
+// stride from the CSV for all four.
+//
+// When LT_TEST_NPU_BATCH_ENABLED==0 or num_batches<=1, this is a no-op.
+// -----------------------------------------------------------------------------
+inline aclsparseStatus_t SetBatchAttrsOnMatDesc(aclsparseLtConstHandle_t handle,
+    aclsparseLtMatDescriptor_t* matDesc, int32_t num_batches, int64_t batch_stride)
+{
+#if LT_TEST_NPU_BATCH_ENABLED
+    if (num_batches <= 1) { return ACL_SPARSE_STATUS_SUCCESS; }
+    aclsparseStatus_t st = aclsparseLtMatDescSetAttribute(handle, matDesc,
+        ACLSPARSELT_MAT_NUM_BATCHES, &num_batches, sizeof(int32_t));
+    if (st != ACL_SPARSE_STATUS_SUCCESS) { return st; }
+    if (batch_stride > 0) {
+        st = aclsparseLtMatDescSetAttribute(handle, matDesc,
+            ACLSPARSELT_MAT_BATCH_STRIDE, &batch_stride, sizeof(int64_t));
+    }
+    return st;
+#else
+    (void)handle; (void)matDesc; (void)num_batches; (void)batch_stride;
+    return ACL_SPARSE_STATUS_SUCCESS;
+#endif
+}
+
+// Convenience: set batch attrs on all four matrix descriptors + record result.
+inline void SetBatchAttrsOnAllMatDescs(aclsparseLtConstHandle_t handle,
+    aclsparseLtMatDescriptor_t* matA, aclsparseLtMatDescriptor_t* matB,
+    aclsparseLtMatDescriptor_t* matC, aclsparseLtMatDescriptor_t* matD,
+    int32_t num_batches, int64_t batch_stride, MatmulNpuResult& result)
+{
+#if LT_TEST_NPU_BATCH_ENABLED
+    if (num_batches <= 1) {
+        result.batchSetRet = ACL_SPARSE_STATUS_SUCCESS;
+        return;
+    }
+    aclsparseStatus_t st = ACL_SPARSE_STATUS_SUCCESS;
+    st = SetBatchAttrsOnMatDesc(handle, matA, num_batches, batch_stride);
+    if (st != ACL_SPARSE_STATUS_SUCCESS) { result.batchSetRet = st; return; }
+    st = SetBatchAttrsOnMatDesc(handle, matB, num_batches, batch_stride);
+    if (st != ACL_SPARSE_STATUS_SUCCESS) { result.batchSetRet = st; return; }
+    st = SetBatchAttrsOnMatDesc(handle, matC, num_batches, batch_stride);
+    if (st != ACL_SPARSE_STATUS_SUCCESS) { result.batchSetRet = st; return; }
+    st = SetBatchAttrsOnMatDesc(handle, matD, num_batches, batch_stride);
+    result.batchSetRet = st;
+#else
+    (void)handle; (void)matA; (void)matB; (void)matC; (void)matD;
+    (void)num_batches; (void)batch_stride;
+    result.batchSetRet = ACL_SPARSE_STATUS_SUCCESS;
+#endif
+}
+
+// -----------------------------------------------------------------------------
+// BatchTotalElems: compute total element count for batch-strided buffers.
+// When num_batches>1 and batch_stride>0, each matrix buffer is
+// num_batches * batch_stride elements (with padding between batches).
+// Otherwise, single-batch element count.
+// -----------------------------------------------------------------------------
+inline size_t BatchTotalElems(size_t singleBatchElems, int32_t num_batches, int64_t batch_stride)
+{
+    if (num_batches > 1 && batch_stride > 0) {
+        return static_cast<size_t>(num_batches) * static_cast<size_t>(batch_stride);
+    }
+    return singleBatchElems;
+}
+
+// -----------------------------------------------------------------------------
 // Execute matmul + sync + record timing + copy D back to host.
 // Extracted from RunMatmulChain / RunMatmulBSparseChainWithTrans
-// [codecheck: duplicate code].
+// to eliminate duplicate code.
 // -----------------------------------------------------------------------------
 template <typename OutT>
 inline void ExecMatmulAndCopyResult(MatmulNpuResult& result,
@@ -167,377 +269,7 @@ inline void ExecMatmulAndCopyResult(MatmulNpuResult& result,
     dD.copyToHost(hD.data(), mn * kOutElt);
 }
 
-// -----------------------------------------------------------------------------
-// MatmulChainCtx: aggregated context for RunMatmulChain (descriptors + buffers).
-// Uses unique_ptr for RAII guards since they have no default constructor.
-// Extracted from RunMatmulChain to reduce NBNC.
-// -----------------------------------------------------------------------------
-struct MatmulChainCtx {
-    sparse_test::SparseLtHandleGuard handle;
-    std::unique_ptr<sparse_test::SparseLtMatDescGuard> matAStructured;
-    std::unique_ptr<sparse_test::SparseLtDnMatDescGuard> matADense;
-    std::unique_ptr<sparse_test::SparseLtMatDescGuard> matBStructured;
-    std::unique_ptr<sparse_test::SparseLtDnMatDescGuard> matBDense;
-    std::unique_ptr<sparse_test::SparseLtDnMatDescGuard> matC;
-    std::unique_ptr<sparse_test::SparseLtDnMatDescGuard> matD;
-    std::unique_ptr<sparse_test::SparseLtMatmulDescGuard> matmulDesc;
-    sparse_test::DeviceBuffer dA, dB, dC, dD;
-    size_t mk = 0;
-};
-
-// -----------------------------------------------------------------------------
-// MatmulBSparseCtx: aggregated context for RunMatmulBSparseChainWithTrans.
-// -----------------------------------------------------------------------------
-struct MatmulBSparseCtx {
-    sparse_test::SparseLtHandleGuard handle;
-    std::unique_ptr<sparse_test::SparseLtDnMatDescGuard> matA;
-    std::unique_ptr<sparse_test::SparseLtMatDescGuard> matB;
-    std::unique_ptr<sparse_test::SparseLtDnMatDescGuard> matC;
-    std::unique_ptr<sparse_test::SparseLtDnMatDescGuard> matD;
-    std::unique_ptr<sparse_test::SparseLtMatmulDescGuard> matmulDesc;
-    sparse_test::DeviceBuffer dA, dB, dC, dD;
-    size_t kn = 0;
-};
-
-// -----------------------------------------------------------------------------
-// PrepareMatmulChainBuffers: compute physical layout + allocate device buffers.
-// Extracted from PrepareMatmulChainContext to reduce NBNC.
-// -----------------------------------------------------------------------------
-template <typename InT, typename OutT>
-inline void PrepareMatmulChainBuffers(
-    int32_t m, int32_t k, int32_t n,
-    const std::vector<InT>& hA, const std::vector<InT>& hB, const std::vector<InT>& hC,
-    aclsparseOrder_t order, aclsparseOperation_t opA, aclsparseOperation_t opB,
-    MatmulChainCtx& ctx,
-    int64_t& physRowsA, int64_t& physColsA, int64_t& aLd,
-    int64_t& bPhysRows, int64_t& bPhysCols, int64_t& bLd)
-{
-    using namespace sparse_test;
-    constexpr size_t kInElt = NpuDtypeTrait<InT>::kEltSize;
-    constexpr size_t kOutElt = NpuDtypeTrait<OutT>::kEltSize;
-    const bool transA = (opA == ACL_SPARSE_OP_TRANSPOSE);
-    const bool transB = (opB == ACL_SPARSE_OP_TRANSPOSE);
-    ctx.mk = static_cast<size_t>(m) * k;
-    const size_t kn = static_cast<size_t>(k) * n;
-    const size_t mn = static_cast<size_t>(m) * n;
-    std::vector<InT> hA_phys = PreparePhysicalA<InT>(hA, m, k, transA, order, aLd);
-    std::vector<InT> hB_phys = PreparePhysicalB<InT>(hB, k, n, transB);
-    physRowsA = transA ? static_cast<int64_t>(k) : static_cast<int64_t>(m);
-    physColsA = transA ? static_cast<int64_t>(m) : static_cast<int64_t>(k);
-    const size_t aPhysSize = (order == ACL_SPARSE_ORDER_COL)
-        ? static_cast<size_t>(physColsA) * static_cast<size_t>(aLd)
-        : static_cast<size_t>(physRowsA) * static_cast<size_t>(aLd);
-    const size_t bPhysSize = transB ? static_cast<size_t>(n) * k : kn;
-    ctx.dA = DeviceBuffer::copyFrom(hA_phys.data(), aPhysSize * kInElt);
-    ctx.dB = DeviceBuffer::copyFrom(hB_phys.data(), bPhysSize * kInElt);
-    ctx.dC = DeviceBuffer::copyFrom(hC.data(), mn * kInElt);
-    ctx.dD = DeviceBuffer::alloc(mn * kOutElt);
-    bPhysRows = transB ? static_cast<int64_t>(n) : static_cast<int64_t>(k);
-    bPhysCols = transB ? static_cast<int64_t>(k) : static_cast<int64_t>(n);
-    bLd = transB ? static_cast<int64_t>(k) : static_cast<int64_t>(n);
-}
-
-// -----------------------------------------------------------------------------
-// CreateMatmulABDescriptors: create matA/matB descriptors based on path
-// (dense*dense / A-sparse / B-sparse). Extracted from PrepareMatmulChainContext.
-// -----------------------------------------------------------------------------
-template <typename InT>
-inline void CreateMatmulABDescriptors(
-    MatmulChainCtx& ctx, bool isDensePath, bool isSparseA,
-    aclsparseOrder_t order, int64_t physRowsA, int64_t physColsA, int64_t aLd,
-    int64_t bPhysRows, int64_t bPhysCols, int64_t bLd,
-    aclsparseLtMatDescriptor_t& matADesc, aclsparseLtMatDescriptor_t& matBDesc)
-{
-    using namespace sparse_test;
-    constexpr aclDataType kInDtype = NpuDtypeTrait<InT>::kAclDtype;
-    if (isDensePath) {
-        ctx.matADense = std::make_unique<SparseLtDnMatDescGuard>(
-            ctx.handle.get(), physRowsA, physColsA, aLd, 16, kInDtype, order);
-        matADesc = ctx.matADense->get();
-        ctx.matBDense = std::make_unique<SparseLtDnMatDescGuard>(
-            ctx.handle.get(), bPhysRows, bPhysCols, bLd, 16, kInDtype, ACL_SPARSE_ORDER_ROW);
-        matBDesc = ctx.matBDense->get();
-    } else if (isSparseA) {
-        ctx.matAStructured = std::make_unique<SparseLtMatDescGuard>(
-            ctx.handle.get(), physRowsA, physColsA, aLd, 16, kInDtype, order,
-            ACL_SPARSE_LT_SPARSITY_50_PERCENT);
-        matADesc = ctx.matAStructured->get();
-        ctx.matBDense = std::make_unique<SparseLtDnMatDescGuard>(
-            ctx.handle.get(), bPhysRows, bPhysCols, bLd, 16, kInDtype, ACL_SPARSE_ORDER_ROW);
-        matBDesc = ctx.matBDense->get();
-    } else {
-        ctx.matADense = std::make_unique<SparseLtDnMatDescGuard>(
-            ctx.handle.get(), physRowsA, physColsA, aLd, 16, kInDtype, order);
-        matADesc = ctx.matADense->get();
-        ctx.matBStructured = std::make_unique<SparseLtMatDescGuard>(
-            ctx.handle.get(), bPhysRows, bPhysCols, bLd, 16, kInDtype,
-            ACL_SPARSE_ORDER_ROW, ACL_SPARSE_LT_SPARSITY_50_PERCENT);
-        matBDesc = ctx.matBStructured->get();
-    }
-}
-
-// -----------------------------------------------------------------------------
-// PrepareMatmulChainContext: compute physical layout + allocate device buffers
-// + create descriptors + matmulDesc. Extracted from RunMatmulChain to reduce NBNC.
-// -----------------------------------------------------------------------------
-template <typename InT, typename OutT>
-inline void PrepareMatmulChainContext(
-    int32_t m, int32_t k, int32_t n,
-    const std::vector<InT>& hA, const std::vector<InT>& hB, const std::vector<InT>& hC,
-    aclsparseOrder_t order, aclsparseOperation_t opA, aclsparseOperation_t opB,
-    bool isSparseA, bool isDensePath, MatmulChainCtx& ctx)
-{
-    using namespace sparse_test;
-    constexpr aclDataType kInDtype = NpuDtypeTrait<InT>::kAclDtype;
-    constexpr aclDataType kOutDtype = NpuDtypeTrait<OutT>::kAclDtype;
-    constexpr aclsparseComputeType_t kComputeType = MatmulComputeTrait<InT>::kComputeType;
-    int64_t physRowsA = 0, physColsA = 0, aLd = 0, bPhysRows = 0, bPhysCols = 0, bLd = 0;
-    PrepareMatmulChainBuffers<InT, OutT>(m, k, n, hA, hB, hC, order, opA, opB,
-        ctx, physRowsA, physColsA, aLd, bPhysRows, bPhysCols, bLd);
-    aclsparseLtMatDescriptor_t matADesc = nullptr, matBDesc = nullptr;
-    CreateMatmulABDescriptors<InT>(ctx, isDensePath, isSparseA, order,
-        physRowsA, physColsA, aLd, bPhysRows, bPhysCols, bLd, matADesc, matBDesc);
-    ctx.matC = std::make_unique<SparseLtDnMatDescGuard>(ctx.handle.get(), m, n, n, 16, kInDtype, ACL_SPARSE_ORDER_ROW);
-    ctx.matD = std::make_unique<SparseLtDnMatDescGuard>(ctx.handle.get(), m, n, n, 16, kOutDtype, ACL_SPARSE_ORDER_ROW);
-    ctx.matmulDesc = std::make_unique<SparseLtMatmulDescGuard>(ctx.handle.get(), opA, opB,
-        matADesc, matBDesc, ctx.matC->get(), ctx.matD->get(), kComputeType);
-}
-
-// -----------------------------------------------------------------------------
-// PreparePlanAndWorkspace: create algSel + plan + workspace.
-// Extracted from RunMatmulChain/RunMatmulBSparseChainWithTrans to reduce NBNC.
-// -----------------------------------------------------------------------------
-inline bool PreparePlanAndWorkspace(MatmulNpuResult& result,
-    sparse_test::SparseLtHandleGuard& handle,
-    sparse_test::SparseLtMatmulDescGuard& matmulDesc,
-    int32_t alg_config_id, int32_t split_k, int32_t split_k_mode,
-    std::unique_ptr<sparse_test::SparseLtAlgSelectionGuard>& algSel,
-    std::unique_ptr<sparse_test::SparseLtPlanGuard>& plan,
-    sparse_test::DeviceBuffer& dWorkspace, void*& wsPtr)
-{
-    using namespace sparse_test;
-    algSel = std::make_unique<SparseLtAlgSelectionGuard>(handle.get(), matmulDesc.get(), ACL_SPARSE_LT_MATMUL_ALG_DEFAULT);
-    if (!SetMatmulAlgAttributes(handle.get(), algSel->get(),
-                                alg_config_id, split_k, split_k_mode, result)) {
-        return false;
-    }
-    // getAttr roundtrip verification: read back the values set by SetMatmulAlgAttributes.
-    result.algGetCfgRet = aclsparseLtMatmulAlgGetAttribute(
-        handle.get(), algSel->cptr(),
-        ACLSPARSELT_MATMUL_ALG_CONFIG_ID, &result.gotAlgConfigId, sizeof(int32_t));
-    result.algGetSplitRet = aclsparseLtMatmulAlgGetAttribute(
-        handle.get(), algSel->cptr(),
-        ACLSPARSELT_MATMUL_SPLIT_K, &result.gotSplitK, sizeof(int32_t));
-    result.algGetSplitKModeRet = aclsparseLtMatmulAlgGetAttribute(
-        handle.get(), algSel->cptr(),
-        ACLSPARSELT_MATMUL_SPLIT_K_MODE, &result.gotSplitKMode, sizeof(int32_t));
-    plan = std::make_unique<SparseLtPlanGuard>(handle.get(), matmulDesc.get(), algSel->get());
-    result.wsRet = aclsparseLtMatmulGetWorkspace(handle.get(), plan->cptr(), &result.workspaceSize);
-    if (result.wsRet != ACL_SPARSE_STATUS_SUCCESS) { return false; }
-    dWorkspace = (result.workspaceSize > 0)
-        ? DeviceBuffer::alloc(result.workspaceSize) : DeviceBuffer{};
-    wsPtr = (result.workspaceSize > 0) ? dWorkspace.get() : nullptr;
-    return true;
-}
-
-// -----------------------------------------------------------------------------
-// RunPruneForASparse: run prune on A-sparse path, update matAPtr + npuPrunedA.
-// Extracted from RunMatmulChain to reduce NBNC.
-// -----------------------------------------------------------------------------
-inline bool RunPruneForASparse(MatmulNpuResult& result,
-    aclsparseLtConstHandle_t handle, aclsparseLtConstMatmulDescriptor_t matmulDesc,
-    sparse_test::DeviceBuffer& dA, sparse_test::DeviceBuffer& dPruned,
-    size_t mk, size_t kInElt, aclsparseLtPruneAlg_t pruneAlg, void*& matAPtr)
-{
-    aclrtStream stream = 0;
-    dPruned = sparse_test::DeviceBuffer::alloc(mk * kInElt);
-    result.pruneRet = aclsparseLtSpMMAPrune(
-        handle, &matmulDesc, dA.get(), dPruned.get(), pruneAlg, stream);
-    if (result.pruneRet != ACL_SPARSE_STATUS_SUCCESS) { return false; }
-    result.syncRet = aclrtSynchronizeStream(stream);
-    if (result.syncRet != ACL_SUCCESS) {
-        result.pruneRet = ACL_SPARSE_STATUS_EXECUTION_FAILED;
-        return false;
-    }
-    result.npuPrunedA.resize(mk * kInElt);
-    result.memcpyRet = aclrtMemcpy(result.npuPrunedA.data(), mk * kInElt, dPruned.get(), mk * kInElt,
-                ACL_MEMCPY_DEVICE_TO_HOST);
-    if (result.memcpyRet != ACL_SUCCESS) {
-        result.pruneRet = ACL_SPARSE_STATUS_EXECUTION_FAILED;
-        return false;
-    }
-    matAPtr = dPruned.get();
-    return true;
-}
-
-// -----------------------------------------------------------------------------
-// [codecheck-dup] MatmulRunArgs: common parameters for matmul chain functions.
-// Extracted to eliminate duplicate parameter lists between RunMatmulChain,
-// RunMatmulBSparseChainWithTrans, and RunMatmulNpu.
-// -----------------------------------------------------------------------------
-template <typename InT, typename OutT>
-struct MatmulRunArgs {
-    int32_t m, k, n;
-    const std::vector<InT>& hA;
-    const std::vector<InT>& hB;
-    const std::vector<InT>& hC;
-    std::vector<OutT>& hD;
-    float alpha, beta;
-    int32_t alg_config_id, split_k, split_k_mode;
-    aclsparseOrder_t order;
-    aclsparseOperation_t opA, opB;
-    aclsparseLtPruneAlg_t pruneAlg;
-    int32_t alpha_vector_scaling;
-    int32_t beta_vector_scaling;
-    const std::vector<float>* alphaVec;
-    const std::vector<float>* betaVec;
-};
-
-// -----------------------------------------------------------------------------
-// Run matmul chain for A-sparse or dense*dense path.
-// (B-sparse path is handled separately by RunMatmulBSparseChainWithTrans
-//  because it needs proper transB buffer lifetime management.)
-// -----------------------------------------------------------------------------
-template <typename InT, typename OutT>
-inline MatmulNpuResult RunMatmulChain(
-    const MatmulRunArgs<InT, OutT>& args, bool isSparseA, bool isDensePath)
-{
-    using namespace sparse_test;
-    MatmulNpuResult result{};
-    constexpr size_t kInElt = NpuDtypeTrait<InT>::kEltSize, kOutElt = NpuDtypeTrait<OutT>::kEltSize;
-    const size_t mn = static_cast<size_t>(args.m) * args.n;
-    MatmulChainCtx ctx;
-    PrepareMatmulChainContext<InT, OutT>(args.m, args.k, args.n,
-                                         args.hA, args.hB, args.hC,
-                                         args.order, args.opA, args.opB,
-                                         isSparseA, isDensePath, ctx);
-    auto vecBufs = SetVecScalingAttrs(ctx.handle.get(), *ctx.matmulDesc, args.m,
-        args.alpha_vector_scaling, args.beta_vector_scaling, args.alphaVec, args.betaVec, result);
-    if (result.descSetRet != ACL_SPARSE_STATUS_SUCCESS) { return result; }
-    std::unique_ptr<SparseLtAlgSelectionGuard> algSel;
-    std::unique_ptr<SparseLtPlanGuard> plan;
-    DeviceBuffer dWorkspace, dPruned;
-    void* wsPtr = nullptr;
-    if (!PreparePlanAndWorkspace(result, ctx.handle, *ctx.matmulDesc, args.alg_config_id,
-                                 args.split_k, args.split_k_mode, algSel, plan, dWorkspace, wsPtr)) { return result; }
-    void* matAPtr = ctx.dA.get();
-    if (!isDensePath && isSparseA) {
-        if (!RunPruneForASparse(result, ctx.handle.get(), ctx.matmulDesc->get(),
-                ctx.dA, dPruned, ctx.mk, kInElt, args.pruneAlg, matAPtr)) { return result; }
-    }
-    ExecMatmulAndCopyResult<OutT>(result, ctx.handle.get(), plan->cptr(),
-        matAPtr, ctx.dB.get(), ctx.dC.get(), ctx.dD.get(), wsPtr, vecBufs, args.alpha, args.beta,
-        args.alpha_vector_scaling, args.beta_vector_scaling, ctx.dD, args.hD, mn, kOutElt);
-    return result;
-}
-
-// -----------------------------------------------------------------------------
-// PrepareBSparseChainContext: compute physical layout + allocate device buffers
-// + create B-sparse descriptors. Extracted from RunMatmulBSparseChainWithTrans.
-// -----------------------------------------------------------------------------
-template <typename InT, typename OutT>
-inline void PrepareBSparseChainContext(
-    int32_t m, int32_t k, int32_t n,
-    const std::vector<InT>& hA, const std::vector<InT>& hB, const std::vector<InT>& hC,
-    aclsparseOrder_t order, aclsparseOperation_t opA, aclsparseOperation_t opB,
-    MatmulBSparseCtx& ctx)
-{
-    using namespace sparse_test;
-    constexpr aclDataType kInDtype = NpuDtypeTrait<InT>::kAclDtype;
-    constexpr aclDataType kOutDtype = NpuDtypeTrait<OutT>::kAclDtype;
-    constexpr aclsparseComputeType_t kComputeType = MatmulComputeTrait<InT>::kComputeType;
-    constexpr size_t kInElt = NpuDtypeTrait<InT>::kEltSize;
-    constexpr size_t kOutElt = NpuDtypeTrait<OutT>::kEltSize;
-    const bool transA = (opA == ACL_SPARSE_OP_TRANSPOSE);
-    const bool transB = (opB == ACL_SPARSE_OP_TRANSPOSE);
-    const size_t mn = static_cast<size_t>(m) * n;
-    ctx.kn = static_cast<size_t>(k) * n;
-    int64_t aLd = 0, bLdOut = 0;
-    std::vector<InT> hA_phys = PreparePhysicalA<InT>(hA, m, k, transA, ACL_SPARSE_ORDER_ROW, aLd);
-    std::vector<InT> hB_phys = PreparePhysicalA<InT>(hB, k, n, transB, order, bLdOut);
-    const int64_t physRowsA = transA ? static_cast<int64_t>(k) : static_cast<int64_t>(m);
-    const int64_t physColsA = transA ? static_cast<int64_t>(m) : static_cast<int64_t>(k);
-    const size_t aPhysSize = static_cast<size_t>(physRowsA) * static_cast<size_t>(aLd);
-    const size_t bPhysSize = static_cast<size_t>(ctx.kn);
-    ctx.dA = DeviceBuffer::copyFrom(hA_phys.data(), aPhysSize * kInElt);
-    ctx.dB = DeviceBuffer::copyFrom(hB_phys.data(), bPhysSize * kInElt);
-    ctx.dC = DeviceBuffer::copyFrom(hC.data(), mn * kInElt);
-    ctx.dD = DeviceBuffer::alloc(mn * kOutElt);
-    const int64_t bPhysRows = transB ? static_cast<int64_t>(n) : static_cast<int64_t>(k);
-    const int64_t bPhysCols = transB ? static_cast<int64_t>(k) : static_cast<int64_t>(n);
-    ctx.matA = std::make_unique<SparseLtDnMatDescGuard>(ctx.handle.get(), physRowsA, physColsA, aLd, 16, kInDtype, ACL_SPARSE_ORDER_ROW);
-    ctx.matB = std::make_unique<SparseLtMatDescGuard>(ctx.handle.get(), bPhysRows, bPhysCols, bLdOut, 16, kInDtype,
-                                order, ACL_SPARSE_LT_SPARSITY_50_PERCENT);
-    ctx.matC = std::make_unique<SparseLtDnMatDescGuard>(ctx.handle.get(), m, n, n, 16, kInDtype, ACL_SPARSE_ORDER_ROW);
-    ctx.matD = std::make_unique<SparseLtDnMatDescGuard>(ctx.handle.get(), m, n, n, 16, kOutDtype, ACL_SPARSE_ORDER_ROW);
-    ctx.matmulDesc = std::make_unique<SparseLtMatmulDescGuard>(ctx.handle.get(), opA, opB,
-        ctx.matA->get(), ctx.matB->get(), ctx.matC->get(), ctx.matD->get(), kComputeType);
-}
-
-// -----------------------------------------------------------------------------
-// RunBSparsePruneAndTranspose: prune B + optional transB transpose.
-// Extracted from RunMatmulBSparseChainWithTrans to reduce NBNC.
-// -----------------------------------------------------------------------------
-template <typename InT>
-inline void RunBSparsePruneAndTranspose(MatmulNpuResult& result,
-    aclsparseLtConstHandle_t handle, aclsparseLtConstMatmulDescriptor_t matmulDesc,
-    sparse_test::DeviceBuffer& dB, sparse_test::DeviceBuffer& dBPruned,
-    sparse_test::DeviceBuffer& dBPrunedTransposed,
-    bool transB, int32_t k, int32_t n, size_t kn, size_t kInElt,
-    aclsparseLtPruneAlg_t pruneAlg, void*& matBPtr)
-{
-    using namespace sparse_test;
-    aclrtStream stream = 0;
-    dBPruned = DeviceBuffer::alloc(kn * kInElt);
-    result.pruneRet = aclsparseLtSpMMAPrune(
-        handle, &matmulDesc, dB.get(), dBPruned.get(), pruneAlg, stream);
-    if (result.pruneRet != ACL_SPARSE_STATUS_SUCCESS) { return; }
-    matBPtr = dBPruned.get();
-    if (transB) {
-        result.syncRet = aclrtSynchronizeStream(stream);
-        if (result.syncRet != ACL_SUCCESS) {
-            result.pruneRet = ACL_SPARSE_STATUS_EXECUTION_FAILED;
-            return;
-        }
-        dBPrunedTransposed = TransposeBPruned<InT>(stream, dBPruned, k, n, kn, kInElt);
-        matBPtr = dBPrunedTransposed.get();
-    }
-}
-
-// -----------------------------------------------------------------------------
-// B-sparse chain with transB support (proper buffer lifetime management).
-// -----------------------------------------------------------------------------
-template <typename InT, typename OutT>
-inline MatmulNpuResult RunMatmulBSparseChainWithTrans(
-    const MatmulRunArgs<InT, OutT>& args)
-{
-    using namespace sparse_test;
-    MatmulNpuResult result{};
-    constexpr size_t kInElt = NpuDtypeTrait<InT>::kEltSize, kOutElt = NpuDtypeTrait<OutT>::kEltSize;
-    const size_t mn = static_cast<size_t>(args.m) * args.n;
-    MatmulBSparseCtx ctx;
-    PrepareBSparseChainContext<InT, OutT>(args.m, args.k, args.n,
-                                          args.hA, args.hB, args.hC,
-                                          args.order, args.opA, args.opB, ctx);
-    auto vecBufs = SetVecScalingAttrs(ctx.handle.get(), *ctx.matmulDesc, args.m,
-        args.alpha_vector_scaling, args.beta_vector_scaling, args.alphaVec, args.betaVec, result);
-    if (result.descSetRet != ACL_SPARSE_STATUS_SUCCESS) { return result; }
-    std::unique_ptr<SparseLtAlgSelectionGuard> algSel;
-    std::unique_ptr<SparseLtPlanGuard> plan;
-    DeviceBuffer dWorkspace, dBPruned, dBPrunedTransposed;
-    void* wsPtr = nullptr;
-    if (!PreparePlanAndWorkspace(result, ctx.handle, *ctx.matmulDesc, args.alg_config_id,
-                                 args.split_k, args.split_k_mode, algSel, plan, dWorkspace, wsPtr)) { return result; }
-    const bool transB = (args.opB == ACL_SPARSE_OP_TRANSPOSE);
-    void* matBPtr = nullptr;
-    RunBSparsePruneAndTranspose<InT>(result, ctx.handle.get(), ctx.matmulDesc->get(),
-        ctx.dB, dBPruned, dBPrunedTransposed, transB, args.k, args.n, ctx.kn, kInElt, args.pruneAlg, matBPtr);
-    if (result.pruneRet != ACL_SPARSE_STATUS_SUCCESS) { return result; }
-    ExecMatmulAndCopyResult<OutT>(result, ctx.handle.get(), plan->cptr(),
-        ctx.dA.get(), matBPtr, ctx.dC.get(), ctx.dD.get(), wsPtr, vecBufs, args.alpha, args.beta,
-        args.alpha_vector_scaling, args.beta_vector_scaling, ctx.dD, args.hD, mn, kOutElt);
-    return result;
-}
+#include "ltmatmul_npu_chain.h"  // chain runners (ctx, prepare, prune, RunMatmulChain/BSparse)
 
 // -----------------------------------------------------------------------------
 // Dispatch: select chain based on path (sparse A-sparse / sparse B-sparse / dense).
@@ -548,7 +280,7 @@ inline MatmulNpuResult RunMatmulNpu(
     const std::vector<InT>& hA, const std::vector<InT>& hB, const std::vector<InT>& hC,
     std::vector<OutT>& hD,
     float alpha, float beta,
-    int32_t alg_config_id, int32_t split_k, int32_t split_k_mode,
+    int32_t algConfigId, int32_t splitK, int32_t splitKMode,
     bool isSparseA, bool isDensePath,
     aclsparseOrder_t order,
     aclsparseOperation_t opA, aclsparseOperation_t opB,
@@ -556,14 +288,36 @@ inline MatmulNpuResult RunMatmulNpu(
     int32_t alpha_vector_scaling = 0,
     int32_t beta_vector_scaling = 0,
     const std::vector<float>* alphaVec = nullptr,
-    const std::vector<float>* betaVec = nullptr)
+    const std::vector<float>* betaVec = nullptr,
+    // Epilogue (backward-compatible defaults: all-off).
+    int32_t biasEnabled = 0,
+    int64_t biasStride = 0,
+    int32_t activationType = 0,
+    float reluUpperBound = FLT_MAX,
+    float reluThreshold = 0.0f,
+    float geluScaling = 1.0f,
+    int32_t numBatches = 1,
+    int64_t batchStride = 0,
+    const std::vector<float>* biasVec = nullptr)
 {
     MatmulRunArgs<InT, OutT> args{
         m, k, n, hA, hB, hC, hD,
-        alpha, beta, alg_config_id, split_k, split_k_mode,
+        alpha, beta, algConfigId, splitK, splitKMode,
         order, opA, opB, pruneAlg,
         alpha_vector_scaling, beta_vector_scaling, alphaVec, betaVec
     };
+    args.biasEnabled = biasEnabled;
+    args.biasStride = biasStride;
+    args.activationType = activationType;
+    args.reluUpperBound = reluUpperBound;
+    args.reluThreshold = reluThreshold;
+    args.geluScaling = geluScaling;
+    args.numBatches = numBatches;
+    args.batchStride = batchStride;
+    args.biasVec = biasVec;
+    // bias dtype follows C dtype (FP16→FP16, BF16→BF16, INT8→FP32).
+    args.biasEltSize = sparse_test::BiasDtypeTrait<InT>::kBiasEltSize;
+    args.biasDtype = sparse_test::BiasDtypeTrait<InT>::kBiasAclDtype;
     if (isDensePath) {
         // Dense*dense: no prune, A=dense, B=dense.
         return RunMatmulChain<InT, OutT>(args, true, true);

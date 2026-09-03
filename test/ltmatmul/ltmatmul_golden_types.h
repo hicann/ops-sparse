@@ -92,7 +92,7 @@ inline void PruneInputA(const std::vector<float>& Af, std::vector<float>& A_prun
 // Loop ordering (i, p, j) is cache-friendly. Pruned-zero elements of A are
 // skipped (mathematically a no-op, doubles throughput for 50%-sparse matrix).
 //
-// [codecheck-dup] MatmulAccumulateFp32 extracted from the common (i,p,j)
+// MatmulAccumulateFp32 extracted from the common (i,p,j)
 // accumulation loop shared by MatmulAlphaBetaFp32 (scalar alpha/beta) and
 // MatmulAlphaBetaFp32Vec (per-row vector alpha/beta below).
 inline void MatmulAccumulateFp32(const std::vector<float>& A_pruned,
@@ -311,7 +311,7 @@ inline void MatmulPruneInputAWithAlg(const std::vector<float>& Af, std::vector<f
 // Per-row vector scaling FP32 matmul: alpha/beta are float[M] arrays.
 // D[i,j] = alphaVec[i] * acc[i,j] + betaVec[i] * C[i,j]
 //
-// [codecheck-dup] Reuses MatmulAccumulateFp32 for the common (i,p,j)
+// Reuses MatmulAccumulateFp32 for the common (i,p,j)
 // accumulation loop, eliminating duplication with MatmulAlphaBetaFp32.
 // -----------------------------------------------------------------------------
 inline void MatmulAlphaBetaFp32Vec(const std::vector<float>& A_pruned,
@@ -363,6 +363,123 @@ inline std::vector<float> GenScalingVector(int32_t m, uint32_t seed)
     std::uniform_real_distribution<float> dist(0.5f, 1.5f);
     std::vector<float> v(static_cast<size_t>(m));
     for (size_t i = 0; i < v.size(); ++i) { v[i] = dist(rng); }
+    return v;
+}
+
+// =============================================================================
+// Epilogue golden helpers (bias + activation), aligned with cuSPARSELt semantics.
+//
+// Formula: D = Activation(alpha · op(A_pruned) · op(B) + beta · C + bias)
+//   - bias: per-row broadcast (bias[i] added to every element of row i)
+//   - ReLU: D[i][j] = min(upperBound, max(threshold, D[i][j]))
+//   - GeLU: D[i][j] = gelu_scaling · x · sigmoid(√(8/π) · (x + 0.044715·x³))
+// All epilogue math runs in FP32 (even for FP16/BF16/INT8 outputs), per the
+// requirement doc §1 math definition. INT8 path rounds bias to INT32 first.
+// =============================================================================
+
+// Activation type enum (mirrors requirement doc §2.3.1).
+enum EpilogueActivationType {
+    EPILOGUE_ACT_NONE = 0,
+    EPILOGUE_ACT_RELU = 1,
+    EPILOGUE_ACT_GELU = 2,
+};
+
+// Step 5 (FP32 domain): per-row bias broadcast.
+// Df[i][j] += biasVec[i]  for all j in [0, n).
+// If biasVec is empty, this is a no-op (backward compatible).
+inline void ApplyBiasFp32(std::vector<float>& Df,
+                          const std::vector<float>& biasVec,
+                          int32_t m, int32_t n)
+{
+    if (biasVec.empty()) { return; }
+    for (int32_t i = 0; i < m; ++i) {
+        float b = biasVec[static_cast<size_t>(i)];
+        float* dRow = Df.data() + static_cast<int64_t>(i) * n;
+        for (int32_t j = 0; j < n; ++j) { dRow[j] += b; }
+    }
+}
+
+// Step 6 (FP32 domain): activation post-processing.
+//   ReLU: Df[i][j] = min(ub, max(thr, Df[i][j]))
+//   GeLU: Df[i][j] = gelu_scaling · x · sigmoid(√(8/π) · (x + 0.044715·x³))
+// actType==0 is a no-op (backward compatible).
+inline void ApplyActivationFp32(std::vector<float>& Df,
+                                 int32_t actType,
+                                 float reluUb, float reluThr,
+                                 float geluScale,
+                                 int32_t m, int32_t n)
+{
+    if (actType == EPILOGUE_ACT_NONE) { return; }
+    const size_t mn = static_cast<size_t>(m) * static_cast<size_t>(n);
+    if (actType == EPILOGUE_ACT_RELU) {
+        for (size_t i = 0; i < mn; ++i) {
+            float v = Df[i];
+            if (v < reluThr) { v = reluThr; }
+            if (v > reluUb) { v = reluUb; }
+            Df[i] = v;
+        }
+    } else if (actType == EPILOGUE_ACT_GELU) {
+        // GeLU (tanh approximation): 0.5·x·(1+tanh(√(2/π)·(x+0.044715·x³)))
+        // Requirement doc §1 uses sigmoid form: gelu_scaling · x · sigmoid(√(8/π)·(x+0.044715·x³))
+        // sigmoid(t) = 1/(1+e^{-t}); √(8/π) ≈ 1.5957691216057308f
+        constexpr float kSqrt8OverPi = 1.5957691216057308f;
+        const size_t total = mn;
+        for (size_t i = 0; i < total; ++i) {
+            float x = Df[i];
+            float x3 = x * x * x;
+            float t = kSqrt8OverPi * (x + 0.044715f * x3);
+            float sigmoid = 1.0f / (1.0f + std::exp(-t));
+            Df[i] = geluScale * x * sigmoid;
+        }
+    }
+}
+
+// Convenience: apply bias + activation in sequence (FP32 domain).
+inline void ApplyEpilogueFp32(std::vector<float>& Df,
+                              const std::vector<float>& biasVec,
+                              int32_t actType,
+                              float reluUb, float reluThr, float geluScale,
+                              int32_t m, int32_t n)
+{
+    ApplyBiasFp32(Df, biasVec, m, n);
+    ApplyActivationFp32(Df, actType, reluUb, reluThr, geluScale, m, n);
+}
+
+// -----------------------------------------------------------------------------
+// Helper: generate a per-row bias vector.
+// Special values controlled by biasSeed pattern:
+//   seed%10==0 → all-zero bias (tests bias no-op)
+//   seed%10==1 → all-positive bias (2.0)
+//   seed%10==2 → all-negative bias (-2.0)
+//   seed%10==3 → INT8 max bias (127.0, for INT8 path saturation test)
+//   seed%10==4 → INT8 min bias (-128.0)
+//   otherwise  → uniform random in [biasLow, biasHigh]
+// -----------------------------------------------------------------------------
+inline std::vector<float> GenBiasVector(int32_t m, uint32_t biasSeed,
+                                         float biasLow = -2.0f, float biasHigh = 2.0f)
+{
+    std::vector<float> v(static_cast<size_t>(m));
+    int pattern = static_cast<int>(biasSeed % 10u);
+    if (pattern == 0) {
+        // all-zero (SP1)
+        for (size_t i = 0; i < v.size(); ++i) { v[i] = 0.0f; }
+    } else if (pattern == 1) {
+        // all-positive (SP2)
+        for (size_t i = 0; i < v.size(); ++i) { v[i] = 2.0f; }
+    } else if (pattern == 2) {
+        // all-negative (SP3)
+        for (size_t i = 0; i < v.size(); ++i) { v[i] = -2.0f; }
+    } else if (pattern == 3) {
+        // INT8 max (SP9)
+        for (size_t i = 0; i < v.size(); ++i) { v[i] = 127.0f; }
+    } else if (pattern == 4) {
+        // INT8 min (SP10)
+        for (size_t i = 0; i < v.size(); ++i) { v[i] = -128.0f; }
+    } else {
+        std::mt19937 rng(biasSeed);
+        std::uniform_real_distribution<float> dist(biasLow, biasHigh);
+        for (size_t i = 0; i < v.size(); ++i) { v[i] = dist(rng); }
+    }
     return v;
 }
 

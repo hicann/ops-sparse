@@ -16,8 +16,7 @@
 // =============================================================================
 // Exception test helpers for aclsparseLtMatmul.
 //
-// Extracted from matmul_npu_wrapper.h to reduce header file size
-// [codecheck: oversized header].
+// Extracted from matmul_npu_wrapper.h to reduce header file size.
 //
 // Contents:
 //   - MatmulRawParams: raw matmul call params with injectable invalid values

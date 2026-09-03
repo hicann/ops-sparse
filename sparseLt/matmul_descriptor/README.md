@@ -5,12 +5,32 @@
 aclsparseLt 的 mat 描述符（MatDescriptor）与 matmul 描述符（MatmulDescriptor）类接口，用于创建和销毁矩阵乘法运算所需的描述符。本类接口所描述的矩阵乘法运算语义对应如下公式：
 
 ```
-D = α · op(A) · op(B) + β · op(C) + bias
+D = Activation(α · op(A) · op(B) + β · C + bias)
 ```
 
-公式中，A、B 为输入矩阵，C 为累加矩阵，D 为输出矩阵；op() 表示对矩阵施加的转置或非转置操作；α、β 为系数，bias 为偏置。
+公式中，A、B 为输入矩阵，C 为累加矩阵，D 为输出矩阵；op() 表示对矩阵施加的转置或非转置操作；α、β 为系数，bias 为偏置，Activation 为可选的激活函数（ReLU/GeLU）。epilogue 链依次执行：alpha 缩放 → beta·C 累加 → bias 逐行广播加 → activation → 类型转换写出。
 
-描述符用于在计算执行前，记录参与运算的矩阵特征：矩阵的形状、内存布局、数据类型、稀疏模式、操作类型（转置 / 非转置）和计算精度等。本类接口只负责描述符的创建与销毁，不执行任何数值计算，实际计算由后续的 matmul 计算接口完成。
+> **bias / activation / batch 传递方式**：bias、activation 与 batch 不是通过执行接口 `aclsparseLtMatmul` 的函数参数传递的，而是通过描述符属性设置接口预先配置到描述符中，执行时从描述符读取——这与 cuSPARSELt 的设计完全一致（`cusparseLtMatmul()` 函数签名同样不含 bias 参数）。具体而言：
+> - **bias 与 activation**：通过 `aclsparseLtMatmulDescSetAttribute` 设置到 matmul 描述符，须在 `aclsparseLtMatmulPlanInit` 之前完成。可设置的 matmul 描述符属性见下表。
+> - **batch**：通过 `aclsparseLtMatDescSetAttribute` 设置到 A/B/C/D 各 mat 描述符，须在 `aclsparseLtMatmulDescriptorInit` 之前完成。
+>
+> **matmul 描述符属性（epilogue 链配置）**：
+>
+> | 属性枚举 | 值类型 | 默认值 | 说明 |
+> |----------|--------|--------|------|
+> | ACLSPARSELT_MATMUL_ALPHA_VECTOR_SCALING | int | 0 | alpha 逐行向量缩放开关，0=禁用（标量模式），非 0=启用（alpha 为 Device float[M]） |
+> | ACLSPARSELT_MATMUL_BETA_VECTOR_SCALING | int | 0 | beta 逐行向量缩放开关，启用时隐含启用 ALPHA_VECTOR_SCALING |
+> | ACLSPARSELT_MATMUL_BIAS_POINTER | void* | NULL | bias 向量 Device 指针，长度 = m，dtype 与 C 相同（INT8 路径为 FP32）。NULL=不启用 bias |
+> | ACLSPARSELT_MATMUL_BIAS_STRIDE | int64_t | 0 | batch 间 bias 步长（元素数），0=所有 batch 共用同一 bias |
+> | ACLSPARSELT_MATMUL_ACTIVATION_RELU | int | 0 | ReLU 开关，0=禁用，非 0=启用。与 GeLU 互斥 |
+> | ACLSPARSELT_MATMUL_ACTIVATION_RELU_UPPERBOUND | float | FLT_MAX | ReLU 上界（min(upperBound, D)） |
+> | ACLSPARSELT_MATMUL_ACTIVATION_RELU_THRESHOLD | float | 0.0f | ReLU 阈值（max(threshold, D)） |
+> | ACLSPARSELT_MATMUL_ACTIVATION_GELU | int | 0 | GeLU 开关，0=禁用，非 0=启用。与 ReLU 互斥 |
+> | ACLSPARSELT_MATMUL_ACTIVATION_GELU_SCALING | float | 1.0f | GeLU 缩放系数，设置时隐含启用 GeLU |
+>
+> matmul 描述符属性的完整接口说明（函数原型、参数、约束）见 [matmul/README.md](../matmul/README.md) 的"Matmul 描述符属性设置 / 查询"章节，以及 [api_list_sparseLt.md](../../docs/zh/api_list_sparseLt.md) 中 `aclsparseLtMatmulDescSetAttribute` 段落。
+
+描述符用于在计算执行前，记录参与运算的矩阵特征：矩阵的形状、内存布局、数据类型、稀疏模式、操作类型（转置 / 非转置）和计算精度等。本类接口只负责描述符的创建与销毁（及属性设置与查询），不执行任何数值计算，实际计算由后续的 matmul 计算接口完成。
 
 本类包含以下接口：
 
@@ -19,6 +39,8 @@ D = α · op(A) · op(B) + β · op(C) + bias
 | aclsparseLtDenseDescriptorInit | 初始化稠密矩阵描述符 |
 | aclsparseLtStructuredDescriptorInit | 初始化结构化稀疏矩阵描述符 |
 | aclsparseLtMatDescriptorDestroy | 销毁 mat 描述符 |
+| aclsparseLtMatDescSetAttribute | 设置 mat 描述符属性（batch） |
+| aclsparseLtMatDescGetAttribute | 获取 mat 描述符属性（batch） |
 | aclsparseLtMatmulDescriptorInit | 初始化 matmul 描述符 |
 | aclsparseLtMatmulDescriptorDestroy | 销毁 matmul 描述符 |
 
@@ -144,6 +166,103 @@ aclsparseStatus_t aclsparseLtMatDescriptorDestroy(
 
 - 若 matDescr 指针本身为 nullptr，返回 ACL_SPARSE_STATUS_HANDLE_IS_NULLPTR
 - 若 *matDescr 为 nullptr，视为空操作，返回 ACL_SPARSE_STATUS_SUCCESS
+
+---
+
+### aclsparseLtMatDescSetAttribute
+
+#### 产品支持情况
+
+- Ascend 950PR / Ascend 950DT：支持
+- Atlas A3 训练系列产品 / Atlas A3 推理系列产品：支持
+- Atlas A2 训练系列产品 / Atlas A2 推理系列产品：支持
+
+#### 功能描述
+
+设置矩阵描述符的指定属性（用于 batch 批量计算配置）。须在 `aclsparseLtMatmulDescriptorInit` 之前设置——Init 时校验 A/B/C/D 四个矩阵的 numBatches 一致性。
+
+#### 函数原型
+
+```cpp
+aclsparseStatus_t aclsparseLtMatDescSetAttribute(
+    aclsparseLtConstHandle_t handle,
+    aclsparseLtMatDescriptor_t* matDescr,
+    aclsparseLtMatDescAttribute_t matAttribute,
+    const void* data,
+    size_t dataSize)
+```
+
+#### 参数说明
+
+| 参数名 | 输入/输出 | 参数类型 | 说明 | 内存位置 |
+|--------|----------|---------|------|----------|
+| handle | 输入 | aclsparseLtConstHandle_t | aclsparseLt 库句柄的 const 指针 | Host |
+| matDescr | 输入/输出 | aclsparseLtMatDescriptor_t* | 矩阵描述符，须已初始化 | Host |
+| matAttribute | 输入 | aclsparseLtMatDescAttribute_t | 要设置的属性枚举 | Host |
+| data | 输入 | const void* | 属性值数据指针 | Host |
+| dataSize | 输入 | size_t | data 缓冲区大小（字节），须等于对应枚举的 sizeof | Host |
+
+可设置的属性如下：
+
+| 属性枚举 | 值 | 值类型 | 默认值 | 说明 |
+|----------|---|--------|--------|------|
+| ACLSPARSELT_MAT_NUM_BATCHES | 0 | int32_t | 1 | batch 数量，须 >= 1。dataSize 须 = sizeof(int32_t) |
+| ACLSPARSELT_MAT_BATCH_STRIDE | 1 | int64_t | 0 | batch 间步长（元素数），每个矩阵独立设置。dataSize 须 = sizeof(int64_t) |
+
+#### 约束说明
+
+- handle 不可为 nullptr
+- matDescr 不可为 nullptr，且须已初始化
+- data 不可为 nullptr
+- dataSize 须等于对应属性的 sizeof，否则返回 ACL_SPARSE_STATUS_INVALID_VALUE
+- numBatches 须 >= 1，否则返回 ACL_SPARSE_STATUS_INVALID_VALUE
+- 本接口仅校验单个描述符的 numBatches >= 1，不跨矩阵校验；A/B/C/D 四个矩阵的 numBatches 一致性由 `aclsparseLtMatmulDescriptorInit` 校验，不一致返回 ACL_SPARSE_STATUS_INVALID_VALUE
+- matAttribute 不在支持范围内时返回 ACL_SPARSE_STATUS_NOT_SUPPORTED
+
+---
+
+### aclsparseLtMatDescGetAttribute
+
+#### 产品支持情况
+
+- Ascend 950PR / Ascend 950DT：支持
+- Atlas A3 训练系列产品 / Atlas A3 推理系列产品：支持
+- Atlas A2 训练系列产品 / Atlas A2 推理系列产品：支持
+
+#### 功能描述
+
+查询矩阵描述符的指定属性当前值（如 numBatches、batchStride）。
+
+#### 函数原型
+
+```cpp
+aclsparseStatus_t aclsparseLtMatDescGetAttribute(
+    aclsparseLtConstHandle_t handle,
+    aclsparseLtConstMatDescriptor_t* matDescr,
+    aclsparseLtMatDescAttribute_t matAttribute,
+    void* data,
+    size_t dataSize)
+```
+
+#### 参数说明
+
+| 参数名 | 输入/输出 | 参数类型 | 说明 | 内存位置 |
+|--------|----------|---------|------|----------|
+| handle | 输入 | aclsparseLtConstHandle_t | aclsparseLt 库句柄的 const 指针 | Host |
+| matDescr | 输入 | aclsparseLtConstMatDescriptor_t* | 矩阵描述符（const 只读） | Host |
+| matAttribute | 输入 | aclsparseLtMatDescAttribute_t | 要查询的属性枚举 | Host |
+| data | 输出 | void* | 属性值输出缓冲区 | Host |
+| dataSize | 输入 | size_t | data 缓冲区大小（字节），须等于对应枚举的 sizeof | Host |
+
+支持查询的属性同 `aclsparseLtMatDescSetAttribute`，可查询 ACLSPARSELT_MAT_NUM_BATCHES 与 ACLSPARSELT_MAT_BATCH_STRIDE 的当前值。
+
+#### 约束说明
+
+- handle 不可为 nullptr
+- matDescr 不可为 nullptr
+- data 不可为 nullptr
+- dataSize 须等于对应属性的 sizeof，否则返回 ACL_SPARSE_STATUS_INVALID_VALUE
+- matAttribute 不在支持范围内时返回 ACL_SPARSE_STATUS_NOT_SUPPORTED
 
 ---
 

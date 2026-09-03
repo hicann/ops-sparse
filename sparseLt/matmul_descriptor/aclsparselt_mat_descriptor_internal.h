@@ -1,7 +1,7 @@
 /**
  * ----------------------------------------------------------------------------------------------------------
  * Copyright (c) 2026 Huawei Technologies Co., Ltd.
- * This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+ * This program is free software; you can redistribute it and/or modify it under the terms and conditions of
  * CANN Open Software License Agreement Version 2.0 (the "License").
  * Please refer to the License for details. You may not use this file except in compliance with the License.
  * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
@@ -37,9 +37,9 @@ struct aclsparseLtMatDescriptor {
     aclsparseOrder_t order = ACL_SPARSE_ORDER_ROW; ///< 内存布局
     aclsparseLtSparsity_t sparsity = ACL_SPARSE_LT_SPARSITY_50_PERCENT; ///< 稀疏模式（仅 structured 有效）
     bool isStructured = false;                     ///< false=dense, true=structured
-    // —— batch 预留字段（本期不可通过 API 配置，SetAttribute 未实现）——
+    // —— batch 字段（可通过 aclsparseLtMatDescSetAttribute 配置）——
     int32_t numBatches = 1;                        ///< batch 数量，默认 1（非批量）
-    int64_t batchStride = 0;                       ///< batch 步长，默认 0
+    int64_t batchStride = 0;                       ///< batch 步长（元素数），默认 0
 };
 
 /** @brief 对外句柄安全转换为内部结构体指针。 */

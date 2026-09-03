@@ -103,17 +103,42 @@ typedef enum aclsparseLtMatmulAlgAttribute_t {
     ACLSPARSELT_MATMUL_SPLIT_K_BUFFERS = 5,     // accepted, stored; TWO_KERNELS uses max (splitK-1)
 } aclsparseLtMatmulAlgAttribute_t;
 
-/* ========== Matmul descriptor attributes (vector scaling) ==========
+/* ========== Matmul descriptor attributes (vector scaling + bias + activation) ==========
  * Aligned with cuSPARSELt cusparseLtMatmulDescAttribute_t.
  * When ALPHA_VECTOR_SCALING is enabled, alpha passed to aclsparseLtMatmul
  * is a device pointer to a float array of length M (per-row scaling).
  * BETA_VECTOR_SCALING implies ALPHA_VECTOR_SCALING (setting beta vector
  * auto-enables alpha vector).
+ *
+ * Bias + activation attributes (values 2~8) extend the epilogue chain:
+ *   D = alpha * A * B + beta * C + bias, then apply activation (ReLU/GeLU).
+ * ReLU and GeLU are mutually exclusive; enabling one while the other is
+ * already enabled returns ACL_SPARSE_STATUS_INVALID_VALUE (setting to 0
+ * disables and does not trigger the check).
  */
 typedef enum aclsparseLtMatmulDescAttribute_t {
     ACLSPARSELT_MATMUL_ALPHA_VECTOR_SCALING = 0,
     ACLSPARSELT_MATMUL_BETA_VECTOR_SCALING = 1,
+    ACLSPARSELT_MATMUL_BIAS_POINTER = 2,                    ///< void*: bias device pointer (NULL=no bias)
+    ACLSPARSELT_MATMUL_BIAS_STRIDE = 3,                     ///< int64_t: batch stride for bias (0=broadcast)
+    ACLSPARSELT_MATMUL_ACTIVATION_RELU = 4,                 ///< int: 0=disable, nonzero=enable ReLU
+    ACLSPARSELT_MATMUL_ACTIVATION_RELU_UPPERBOUND = 5,      ///< float: ReLU upper bound (default FLT_MAX)
+    ACLSPARSELT_MATMUL_ACTIVATION_RELU_THRESHOLD = 6,       ///< float: ReLU threshold (default 0.0f)
+    ACLSPARSELT_MATMUL_ACTIVATION_GELU = 7,                 ///< int: 0=disable, nonzero=enable GeLU
+    ACLSPARSELT_MATMUL_ACTIVATION_GELU_SCALING = 8,         ///< float: GeLU scaling factor (default 1.0f)
 } aclsparseLtMatmulDescAttribute_t;
+
+/* ========== Mat descriptor attributes (batch) ==========
+ * Aligned with cuSPARSELt cusparseLtMatDescAttribute_t.
+ * NUM_BATCHES sets the batch count (default 1, non-batch).
+ * BATCH_STRIDE sets the stride between consecutive batches in elements.
+ * All four matrices (A/B/C/D) in a matmul descriptor must share the same
+ * numBatches; SetAttribute returns INVALID_VALUE on mismatch.
+ */
+typedef enum aclsparseLtMatDescAttribute_t {
+    ACLSPARSELT_MAT_NUM_BATCHES = 0,    ///< int32_t: batch count (default 1)
+    ACLSPARSELT_MAT_BATCH_STRIDE = 1,   ///< int64_t: batch stride in elements
+} aclsparseLtMatDescAttribute_t;
 
 #ifdef __cplusplus
 extern "C" {
@@ -243,6 +268,54 @@ aclsparseStatus_t aclsparseLtStructuredDescriptorInit(
  *         ACL_SPARSE_STATUS_HANDLE_IS_NULLPTR matDescr 指针为空
  */
 aclsparseStatus_t aclsparseLtMatDescriptorDestroy(aclsparseLtMatDescriptor_t* matDescr);
+
+/**
+ * @brief 设置矩阵描述符属性（对齐 cuSPARSELt cusparseLtMatDescSetAttribute）。
+ *
+ * 设置 batch 相关属性：NUM_BATCHES（batch 数量，默认 1）、BATCH_STRIDE
+ * （batch 间步长，元素数为单位）。需在 PlanInit 之前调用。
+ * 一致性校验：同一 matmul descriptor 中的 A/B/C/D 四个矩阵的 numBatches
+ * 须一致，否则返回 ACL_SPARSE_STATUS_INVALID_VALUE。
+ *
+ * @param handle IN, HOST, aclsparseLt 库句柄的 const 指针。
+ * @param matDescr INOUT, HOST, 矩阵描述符。
+ * @param matAttribute IN, HOST, 要设置的属性枚举。
+ * @param data IN, HOST, 属性值数据指针。
+ * @param dataSize IN, HOST, data 缓冲区大小（字节），须等于对应枚举的 sizeof。
+ * @return ACL_SPARSE_STATUS_SUCCESS 成功
+ *         ACL_SPARSE_STATUS_HANDLE_IS_NULLPTR handle 为空
+ *         ACL_SPARSE_STATUS_INVALID_VALUE matDescr/data 为空、dataSize 不匹配、
+ *                                         numBatches < 1 或一致性校验失败
+ *         ACL_SPARSE_STATUS_NOT_SUPPORTED matAttribute 不在支持范围内
+ */
+aclsparseStatus_t aclsparseLtMatDescSetAttribute(
+    aclsparseLtConstHandle_t handle,
+    aclsparseLtMatDescriptor_t* matDescr,
+    aclsparseLtMatDescAttribute_t matAttribute,
+    const void* data,
+    size_t dataSize);
+
+/**
+ * @brief 查询矩阵描述符属性当前值（对齐 cuSPARSELt cusparseLtMatDescGetAttribute）。
+ *
+ * 查询 NUM_BATCHES / BATCH_STRIDE 的当前值。
+ *
+ * @param handle IN, HOST, aclsparseLt 库句柄的 const 指针。
+ * @param matDescr IN, HOST, 矩阵描述符（const 只读）。
+ * @param matAttribute IN, HOST, 要查询的属性枚举。
+ * @param data OUT, HOST, 属性值输出缓冲区。
+ * @param dataSize IN, HOST, data 缓冲区大小（字节），须等于对应枚举的 sizeof。
+ * @return ACL_SPARSE_STATUS_SUCCESS 成功
+ *         ACL_SPARSE_STATUS_HANDLE_IS_NULLPTR handle 为空
+ *         ACL_SPARSE_STATUS_INVALID_VALUE matDescr/data 为空或 dataSize 不匹配
+ *         ACL_SPARSE_STATUS_NOT_SUPPORTED matAttribute 不在支持范围内
+ */
+aclsparseStatus_t aclsparseLtMatDescGetAttribute(
+    aclsparseLtConstHandle_t handle,
+    aclsparseLtConstMatDescriptor_t* matDescr,
+    aclsparseLtMatDescAttribute_t matAttribute,
+    void* data,
+    size_t dataSize);
 
 /* ========== Matmul Descriptor Management ========== */
 
@@ -434,14 +507,17 @@ aclsparseStatus_t aclsparseLtGetProperty(aclsparseLtLibraryPropertyType_t proper
 /**
  * @brief 设置 matmul 描述符属性（对齐 cuSPARSELt cusparseLtMatmulDescSetAttribute）。
  *
- * 设置向量缩放属性（ALPHA_VECTOR_SCALING / BETA_VECTOR_SCALING）。
+ * 设置向量缩放属性（ALPHA_VECTOR_SCALING / BETA_VECTOR_SCALING），
+ * bias 属性（BIAS_POINTER / BIAS_STRIDE），以及 activation 属性
+ * （ACTIVATION_RELU / RELU_UPPERBOUND / RELU_THRESHOLD / ACTIVATION_GELU / GELU_SCALING）。
  * 设置 BETA_VECTOR_SCALING=true 时隐含 ALPHA_VECTOR_SCALING=true（cuSPARSELt 语义）。
+ * ReLU 与 GeLU 互斥：启用一种时若另一种已启用，返回 INVALID_VALUE。
  *
  * @param handle IN, HOST, aclsparseLt 库句柄的 const 指针。
  * @param matmulDescr INOUT, HOST, matmul 描述符。
  * @param matmulAttribute IN, HOST, 要设置的属性枚举。
  * @param data IN, HOST, 属性值数据指针。
- * @param dataSize IN, HOST, data 缓冲区大小（字节），须等于 sizeof(int)。
+ * @param dataSize IN, HOST, data 缓冲区大小（字节），须等于对应枚举的 sizeof。
  * @return ACL_SPARSE_STATUS_SUCCESS 成功
  *         ACL_SPARSE_STATUS_HANDLE_IS_NULLPTR handle 为空
  *         ACL_SPARSE_STATUS_INVALID_VALUE matmulDescr/data 为空或 dataSize 不匹配
@@ -457,13 +533,15 @@ aclsparseStatus_t aclsparseLtMatmulDescSetAttribute(
 /**
  * @brief 查询 matmul 描述符属性当前值（对齐 cuSPARSELt cusparseLtMatmulDescGetAttribute）。
  *
- * 查询向量缩放属性（ALPHA_VECTOR_SCALING / BETA_VECTOR_SCALING）的当前启用状态。
+ * 查询向量缩放属性（ALPHA_VECTOR_SCALING / BETA_VECTOR_SCALING），
+ * bias 属性（BIAS_POINTER / BIAS_STRIDE），以及 activation 属性
+ * （ACTIVATION_RELU / RELU_UPPERBOUND / RELU_THRESHOLD / ACTIVATION_GELU / GELU_SCALING）的当前值。
  *
  * @param handle IN, HOST, aclsparseLt 库句柄的 const 指针。
  * @param matmulDescr IN, HOST, matmul 描述符（const 只读）。
  * @param matmulAttribute IN, HOST, 要查询的属性枚举。
- * @param data OUT, HOST, 属性值输出缓冲区，写入 int（1=启用，0=禁用）。
- * @param dataSize IN, HOST, data 缓冲区大小（字节），须等于 sizeof(int)。
+ * @param data OUT, HOST, 属性值输出缓冲区，写入对应类型的值。
+ * @param dataSize IN, HOST, data 缓冲区大小（字节），须等于对应枚举的 sizeof。
  * @return ACL_SPARSE_STATUS_SUCCESS 成功
  *         ACL_SPARSE_STATUS_HANDLE_IS_NULLPTR handle 为空
  *         ACL_SPARSE_STATUS_INVALID_VALUE matmulDescr/data 为空或 dataSize 不匹配

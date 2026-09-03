@@ -41,6 +41,7 @@
 #include "descriptor_manager.h"
 #include "matmulDescriptorInit_npu_wrapper.h"
 #include "prune_test_util.h"
+#include "transpose_utils.h"  // shared TransposeToRowMajor
 
 namespace sparse_test {
 
@@ -114,20 +115,8 @@ private:
 
 // -----------------------------------------------------------------------------
 // Physical matrix preparation (transpose logic for TRANSPOSE+ROW order).
+// TransposeToRowMajor is provided by the shared header transpose_utils.h.
 // -----------------------------------------------------------------------------
-
-template <typename T>
-inline std::vector<T> TransposeToRowMajor(const std::vector<T>& src,
-    int32_t origRows, int32_t origCols, int64_t dstLd)
-{
-    std::vector<T> dst(static_cast<size_t>(origCols) * static_cast<size_t>(dstLd));
-    for (int32_t j = 0; j < origCols; ++j) {
-        for (int32_t i = 0; i < origRows; ++i) {
-            dst[static_cast<size_t>(j) * dstLd + i] = src[static_cast<size_t>(i) * origCols + j];
-        }
-    }
-    return dst;
-}
 
 template <typename T>
 inline std::vector<T> PreparePhysicalA(const std::vector<T>& hA,
@@ -212,7 +201,7 @@ inline bool RunPruneExecution(
     return true;
 }
 
-// [TRANSPOSE] PruneNpu with transA support.
+// PruneNpu with transA support.
 // When transA=true:
 //   ROW order: physical A is (k, m) row-major. We transpose hA from (m,k) to (k,m).
 //   COL order: physical A is (k, m) col-major = (m,k) row-major with stride ld=k. No transpose.

@@ -16,7 +16,7 @@
 // =============================================================================
 // INT8-specific golden functions for aclsparseLtMatmul.
 //
-// Split from matmul_golden.h to reduce file size [codecheck: oversized header].
+// Split from matmul_golden.h to reduce file size.
 // Included by matmul_golden.h; users who include matmul_golden.h automatically
 // get these functions.
 //
@@ -29,7 +29,7 @@
 namespace sparse_test {
 
 // -----------------------------------------------------------------------------
-// [codecheck-dup] MatmulInt32Accumulate extracted from the common (i,p,j)
+// MatmulInt32Accumulate extracted from the common (i,p,j)
 // INT32 accumulation loop shared by MatmulAlphaBetaInt32 (scalar alpha/beta)
 // and MatmulAlphaBetaInt32Vec (per-row vector alpha/beta).
 // D_int32[i][j] = Σ A_pruned[i][p] * B[p][j]  (int32 accumulation)
@@ -88,7 +88,7 @@ inline void MatmulAlphaBetaInt32(
 // -----------------------------------------------------------------------------
 // Per-row vector scaling variant: alpha/beta are float[M] arrays.
 // D[i,j] = alphaVec[i] * acc[i,j] + betaVec[i] * C[i,j]
-// [codecheck-dup] Reuses MatmulInt32Accumulate for the common accumulation loop.
+// Reuses MatmulInt32Accumulate for the common accumulation loop.
 // -----------------------------------------------------------------------------
 inline void MatmulAlphaBetaInt32Vec(
     const std::vector<int8_t>& A_pruned,
@@ -173,6 +173,44 @@ inline void PruneInt8Matrix(const std::vector<int8_t>& A, std::vector<int8_t>& A
 }
 
 // -----------------------------------------------------------------------------
+// PruneInt8AndMatmul / PruneInt8AndMatmulVec: shared prune+matmul
+// sequences extracted from LtMatmulGoldenRunInt8 / LtMatmulGoldenRunInt8WithEpilogue
+// (scalar) and their Vec counterparts to eliminate duplicate code blocks.
+// -----------------------------------------------------------------------------
+inline void PruneInt8AndMatmul(const std::vector<int8_t>& A, const std::vector<int8_t>& B,
+    const std::vector<int8_t>& C, std::vector<int32_t>& D_int32,
+    int32_t m, int32_t k, int32_t n, float alpha, float beta,
+    bool isColOrder, bool pruneB, const std::string& pruneAlg)
+{
+    std::vector<int8_t> A_pruned;
+    std::vector<int8_t> B_pruned;
+    if (pruneB) {
+        PruneInt8Matrix(B, B_pruned, k, n, isColOrder, pruneAlg);
+        MatmulAlphaBetaInt32(A, B_pruned, C, D_int32, m, k, n, alpha, beta);
+    } else {
+        PruneInt8Matrix(A, A_pruned, m, k, isColOrder, pruneAlg);
+        MatmulAlphaBetaInt32(A_pruned, B, C, D_int32, m, k, n, alpha, beta);
+    }
+}
+
+inline void PruneInt8AndMatmulVec(const std::vector<int8_t>& A, const std::vector<int8_t>& B,
+    const std::vector<int8_t>& C, std::vector<int32_t>& D_int32,
+    int32_t m, int32_t k, int32_t n,
+    const std::vector<float>& alphaVec, const std::vector<float>& betaVec,
+    bool isColOrder, bool pruneB, const std::string& pruneAlg)
+{
+    std::vector<int8_t> A_pruned;
+    std::vector<int8_t> B_pruned;
+    if (pruneB) {
+        PruneInt8Matrix(B, B_pruned, k, n, isColOrder, pruneAlg);
+        MatmulAlphaBetaInt32Vec(A, B_pruned, C, D_int32, m, k, n, alphaVec, betaVec);
+    } else {
+        PruneInt8Matrix(A, A_pruned, m, k, isColOrder, pruneAlg);
+        MatmulAlphaBetaInt32Vec(A_pruned, B, C, D_int32, m, k, n, alphaVec, betaVec);
+    }
+}
+
+// -----------------------------------------------------------------------------
 // Golden entry: sparse×dense INT8 (INT32 accumulation).
 // output_dtype: "INT32" → D is int32_t; "INT8" → D is int8_t (saturated).
 // pruneAlg: "STRIP" (default) or "TILE".
@@ -186,21 +224,7 @@ inline void LtMatmulGoldenRunInt8(
     bool isColOrder, bool pruneB,
     const std::string& pruneAlg = "STRIP")
 {
-    // Step 1: prune the sparse matrix (TILE or STRIP, per pruneAlg).
-    std::vector<int8_t> A_pruned;
-    std::vector<int8_t> B_pruned;
-    if (pruneB) {
-        PruneInt8Matrix(B, B_pruned, k, n, isColOrder, pruneAlg);
-    } else {
-        PruneInt8Matrix(A, A_pruned, m, k, isColOrder, pruneAlg);
-    }
-
-    // Step 2: INT32 accumulation matmul.
-    if (pruneB) {
-        MatmulAlphaBetaInt32(A, B_pruned, C, D_int32, m, k, n, alpha, beta);
-    } else {
-        MatmulAlphaBetaInt32(A_pruned, B, C, D_int32, m, k, n, alpha, beta);
-    }
+    PruneInt8AndMatmul(A, B, C, D_int32, m, k, n, alpha, beta, isColOrder, pruneB, pruneAlg);
 }
 
 inline void LtMatmulGoldenRunInt8WithNpuPrune(
@@ -292,15 +316,8 @@ inline void LtMatmulGoldenRunInt8Vec(
     bool isColOrder, bool pruneB,
     const std::string& pruneAlg = "STRIP")
 {
-    std::vector<int8_t> A_pruned;
-    std::vector<int8_t> B_pruned;
-    if (pruneB) {
-        PruneInt8Matrix(B, B_pruned, k, n, isColOrder, pruneAlg);
-        MatmulAlphaBetaInt32Vec(A, B_pruned, C, D_int32, m, k, n, alphaVec, betaVec);
-    } else {
-        PruneInt8Matrix(A, A_pruned, m, k, isColOrder, pruneAlg);
-        MatmulAlphaBetaInt32Vec(A_pruned, B, C, D_int32, m, k, n, alphaVec, betaVec);
-    }
+    PruneInt8AndMatmulVec(A, B, C, D_int32, m, k, n, alphaVec, betaVec,
+                           isColOrder, pruneB, pruneAlg);
 }
 
 // dense×dense INT8 with vector scaling (INT32 output)
@@ -324,6 +341,231 @@ inline void LtMatmulDenseGoldenRunInt8ToInt8Vec(
 {
     std::vector<int32_t> D_int32;
     LtMatmulDenseGoldenRunInt8Vec(A, B, C, D_int32, m, k, n, alphaVec, betaVec);
+    SaturateCastToInt8(D_int32, D_int8);
+}
+
+// =============================================================================
+// Epilogue golden helpers for INT8→INT32 path.
+//
+// Per requirement doc §2.1.1 INT8→INT32 path:
+//   Step 5: ApplyBiasInt32 — bias is FP32, rounds to INT32 (±0.5 rounding error,
+//           tolerated by atol=1 per requirement doc §2.6)
+//   Step 6: ApplyActivationInt32 — ReLU is integer comparison (no rounding);
+//           GeLU computes in FP32 then rounds back to INT32
+//   Step 7: INT32 output (no truncation) or SaturateCastToInt8 for INT8 output
+// =============================================================================
+
+// Step 5 (INT32 domain): per-row bias broadcast.
+// D_int32[i][j] += round(biasVec[i]).
+// bias is FP32; round-to-nearest introduces ±0.5 error, covered by atol=1.
+inline void ApplyBiasInt32(std::vector<int32_t>& D_int32,
+                            const std::vector<float>& biasVec,
+                            int32_t m, int32_t n)
+{
+    if (biasVec.empty()) { return; }
+    for (int32_t i = 0; i < m; ++i) {
+        int32_t b = static_cast<int32_t>(std::round(biasVec[static_cast<size_t>(i)]));
+        int32_t* dRow = D_int32.data() + static_cast<int64_t>(i) * n;
+        for (int32_t j = 0; j < n; ++j) { dRow[j] += b; }
+    }
+}
+
+// Step 6 (INT32 domain): activation post-processing.
+//   ReLU: D = min(ub, max(thr, D)) — integer comparison, thresholds rounded to int.
+//   GeLU: convert to FP32, compute sigmoid polynomial, round back to INT32.
+// actType==0 is a no-op.
+//
+// When reluUb exceeds INT32 range (e.g. FLT_MAX meaning "no upper bound"),
+// the float→int32 cast is undefined behavior. We detect this and skip the
+// upper clamp, matching the NPU's FP32-domain behavior where FLT_MAX is a
+// no-op clamp. Same safeguard applies to reluThr below INT32 range.
+inline void ApplyActivationInt32(std::vector<int32_t>& D_int32,
+                                   int32_t actType,
+                                   float reluUb, float reluThr,
+                                   float geluScale,
+                                   int32_t m, int32_t n)
+{
+    if (actType == 0) { return; }
+    const size_t mn = static_cast<size_t>(m) * static_cast<size_t>(n);
+    if (actType == 1) {
+        // ReLU: integer thresholds (round ub/thr to int for exact comparison).
+        // Guard against UB when reluUb/reluThr exceed INT32 range.
+        // 2147483520.0f is the largest float ≤ INT32_MAX (2³¹−128).
+        constexpr float kInt32MaxF = 2147483520.0f;
+        constexpr float kInt32MinF = -2147483648.0f;
+        const bool hasUpperBound = (reluUb <= kInt32MaxF);
+        const bool hasLowerBound = (reluThr >= kInt32MinF);
+        int32_t thrInt = hasLowerBound ? static_cast<int32_t>(std::round(reluThr))
+                                      : INT32_MIN;
+        int32_t ubInt  = hasUpperBound ? static_cast<int32_t>(std::round(reluUb))
+                                      : INT32_MAX;
+        for (size_t i = 0; i < mn; ++i) {
+            int32_t v = D_int32[i];
+            if (hasLowerBound && v < thrInt) { v = thrInt; }
+            if (hasUpperBound && v > ubInt) { v = ubInt; }
+            D_int32[i] = v;
+        }
+    } else if (actType == 2) {
+        // GeLU: FP32 computation then round back to INT32
+        constexpr float kSqrt8OverPi = 1.5957691216057308f;
+        for (size_t i = 0; i < mn; ++i) {
+            float x = static_cast<float>(D_int32[i]);
+            float x3 = x * x * x;
+            float t = kSqrt8OverPi * (x + 0.044715f * x3);
+            float sigmoid = 1.0f / (1.0f + std::exp(-t));
+            float result = geluScale * x * sigmoid;
+            D_int32[i] = static_cast<int32_t>(std::round(result));
+        }
+    }
+}
+
+// Convenience: apply bias + activation in sequence (INT32 domain).
+inline void ApplyEpilogueInt32(std::vector<int32_t>& D_int32,
+                                const std::vector<float>& biasVec,
+                                int32_t actType,
+                                float reluUb, float reluThr, float geluScale,
+                                int32_t m, int32_t n)
+{
+    ApplyBiasInt32(D_int32, biasVec, m, n);
+    ApplyActivationInt32(D_int32, actType, reluUb, reluThr, geluScale, m, n);
+}
+
+// =============================================================================
+// INT8 epilogue golden entries (sparse×dense + dense×dense, INT32 + INT8 output).
+//
+// These extend the existing INT8 entries with bias + activation (Steps 5-6).
+// When biasVec is empty and actType==0, they reduce to the existing entries.
+// =============================================================================
+
+// sparse×dense INT8→INT32 with epilogue (scalar alpha/beta)
+inline void LtMatmulGoldenRunInt8WithEpilogue(
+    const std::vector<int8_t>& A, const std::vector<int8_t>& B,
+    const std::vector<int8_t>& C,
+    std::vector<int32_t>& D_int32,
+    int32_t m, int32_t k, int32_t n,
+    float alpha, float beta,
+    bool isColOrder, bool pruneB,
+    const std::string& pruneAlg,
+    const std::vector<float>& biasVec,
+    int32_t actType, float reluUb, float reluThr, float geluScale)
+{
+    PruneInt8AndMatmul(A, B, C, D_int32, m, k, n, alpha, beta, isColOrder, pruneB, pruneAlg);
+    ApplyEpilogueInt32(D_int32, biasVec, actType, reluUb, reluThr, geluScale, m, n);
+}
+
+// sparse×dense INT8→INT32 with epilogue (vector alpha/beta)
+inline void LtMatmulGoldenRunInt8WithEpilogueVec(
+    const std::vector<int8_t>& A, const std::vector<int8_t>& B,
+    const std::vector<int8_t>& C,
+    std::vector<int32_t>& D_int32,
+    int32_t m, int32_t k, int32_t n,
+    const std::vector<float>& alphaVec, const std::vector<float>& betaVec,
+    bool isColOrder, bool pruneB,
+    const std::string& pruneAlg,
+    const std::vector<float>& biasVec,
+    int32_t actType, float reluUb, float reluThr, float geluScale)
+{
+    PruneInt8AndMatmulVec(A, B, C, D_int32, m, k, n, alphaVec, betaVec,
+                           isColOrder, pruneB, pruneAlg);
+    ApplyEpilogueInt32(D_int32, biasVec, actType, reluUb, reluThr, geluScale, m, n);
+}
+
+// sparse×dense INT8→INT8 with epilogue (scalar alpha/beta)
+inline void LtMatmulGoldenRunInt8ToInt8WithEpilogue(
+    const std::vector<int8_t>& A, const std::vector<int8_t>& B,
+    const std::vector<int8_t>& C,
+    std::vector<int8_t>& D_int8,
+    int32_t m, int32_t k, int32_t n,
+    float alpha, float beta,
+    bool isColOrder, bool pruneB,
+    const std::string& pruneAlg,
+    const std::vector<float>& biasVec,
+    int32_t actType, float reluUb, float reluThr, float geluScale)
+{
+    std::vector<int32_t> D_int32;
+    LtMatmulGoldenRunInt8WithEpilogue(A, B, C, D_int32, m, k, n,
+                                        alpha, beta, isColOrder, pruneB, pruneAlg,
+                                        biasVec, actType, reluUb, reluThr, geluScale);
+    SaturateCastToInt8(D_int32, D_int8);
+}
+
+// sparse×dense INT8→INT8 with epilogue (vector alpha/beta)
+inline void LtMatmulGoldenRunInt8ToInt8WithEpilogueVec(
+    const std::vector<int8_t>& A, const std::vector<int8_t>& B,
+    const std::vector<int8_t>& C,
+    std::vector<int8_t>& D_int8,
+    int32_t m, int32_t k, int32_t n,
+    const std::vector<float>& alphaVec, const std::vector<float>& betaVec,
+    bool isColOrder, bool pruneB,
+    const std::string& pruneAlg,
+    const std::vector<float>& biasVec,
+    int32_t actType, float reluUb, float reluThr, float geluScale)
+{
+    std::vector<int32_t> D_int32;
+    LtMatmulGoldenRunInt8WithEpilogueVec(A, B, C, D_int32, m, k, n,
+                                           alphaVec, betaVec, isColOrder, pruneB, pruneAlg,
+                                           biasVec, actType, reluUb, reluThr, geluScale);
+    SaturateCastToInt8(D_int32, D_int8);
+}
+
+// INT8→INT8 with NPU-pruned A + epilogue (scalar/vector alpha/beta)
+inline void LtMatmulGoldenRunInt8WithNpuPruneEpilogue(
+    const std::vector<int8_t>& A, const std::vector<int8_t>& B,
+    const std::vector<int8_t>& C,
+    std::vector<int8_t>& D_int8,
+    int32_t m, int32_t k, int32_t n,
+    float alpha, float beta,
+    const std::vector<int8_t>& npuPrunedA,
+    bool isSparseA,
+    const std::vector<float>& biasVec,
+    int32_t actType, float reluUb, float reluThr, float geluScale)
+{
+    std::vector<int32_t> D_int32;
+    if (isSparseA && !npuPrunedA.empty()) {
+        MatmulAlphaBetaInt32(npuPrunedA, B, C, D_int32, m, k, n, alpha, beta);
+    } else if (!isSparseA && !npuPrunedA.empty()) {
+        // B-sparse: use NPU's pruned B (already in k×n layout)
+        MatmulAlphaBetaInt32(A, npuPrunedA, C, D_int32, m, k, n, alpha, beta);
+    } else if (!isSparseA) {
+        std::vector<int8_t> B_pruned;
+        PruneInt8Matrix(B, B_pruned, k, n, false);
+        MatmulAlphaBetaInt32(A, B_pruned, C, D_int32, m, k, n, alpha, beta);
+    } else {
+        std::vector<int8_t> A_pruned;
+        PruneInt8Matrix(A, A_pruned, m, k, false);
+        MatmulAlphaBetaInt32(A_pruned, B, C, D_int32, m, k, n, alpha, beta);
+    }
+    ApplyEpilogueInt32(D_int32, biasVec, actType, reluUb, reluThr, geluScale, m, n);
+    SaturateCastToInt8(D_int32, D_int8);
+}
+
+inline void LtMatmulGoldenRunInt8VecWithNpuPruneEpilogue(
+    const std::vector<int8_t>& A, const std::vector<int8_t>& B,
+    const std::vector<int8_t>& C,
+    std::vector<int8_t>& D_int8,
+    int32_t m, int32_t k, int32_t n,
+    const std::vector<float>& alphaVec, const std::vector<float>& betaVec,
+    const std::vector<int8_t>& npuPrunedA,
+    bool isSparseA,
+    const std::vector<float>& biasVec,
+    int32_t actType, float reluUb, float reluThr, float geluScale)
+{
+    std::vector<int32_t> D_int32;
+    if (isSparseA && !npuPrunedA.empty()) {
+        MatmulAlphaBetaInt32Vec(npuPrunedA, B, C, D_int32, m, k, n, alphaVec, betaVec);
+    } else if (!isSparseA && !npuPrunedA.empty()) {
+        // B-sparse: use NPU's pruned B (already in k×n layout)
+        MatmulAlphaBetaInt32Vec(A, npuPrunedA, C, D_int32, m, k, n, alphaVec, betaVec);
+    } else if (!isSparseA) {
+        std::vector<int8_t> B_pruned;
+        PruneInt8Matrix(B, B_pruned, k, n, false);
+        MatmulAlphaBetaInt32Vec(A, B_pruned, C, D_int32, m, k, n, alphaVec, betaVec);
+    } else {
+        std::vector<int8_t> A_pruned;
+        PruneInt8Matrix(A, A_pruned, m, k, false);
+        MatmulAlphaBetaInt32Vec(A_pruned, B, C, D_int32, m, k, n, alphaVec, betaVec);
+    }
+    ApplyEpilogueInt32(D_int32, biasVec, actType, reluUb, reluThr, geluScale, m, n);
     SaturateCastToInt8(D_int32, D_int8);
 }
 

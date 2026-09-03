@@ -84,6 +84,8 @@ target_include_directories(${_target} PRIVATE
     ${CMAKE_SOURCE_DIR}/sparseLt/prune/${_src_arch}
     ${CMAKE_SOURCE_DIR}/sparseLt/shared
     ${CMAKE_SOURCE_DIR}/sparseLt/common
+    ${CMAKE_SOURCE_DIR}/sparseLt/matmul_descriptor
+    ${CMAKE_SOURCE_DIR}/sparseLt/matmul_plan
     ${CMAKE_SOURCE_DIR}/test/frame
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}/${_src_arch}
@@ -130,6 +132,8 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/${_src_arch}/ltmatmul_perf_test.cpp")
         ${CMAKE_SOURCE_DIR}/sparseLt/prune/${_src_arch}
         ${CMAKE_SOURCE_DIR}/sparseLt/shared
         ${CMAKE_SOURCE_DIR}/sparseLt/common
+        ${CMAKE_SOURCE_DIR}/sparseLt/matmul_descriptor
+        ${CMAKE_SOURCE_DIR}/sparseLt/matmul_plan
         ${CMAKE_SOURCE_DIR}/test/frame
         ${CMAKE_CURRENT_SOURCE_DIR}
         ${CMAKE_CURRENT_SOURCE_DIR}/${_src_arch}

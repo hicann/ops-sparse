@@ -1,7 +1,7 @@
 /**
  * ----------------------------------------------------------------------------------------------------------
  * Copyright (c) 2026 Huawei Technologies Co., Ltd.
- * This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+ * This program is free software; you can redistribute it and/or modify it under the terms and conditions of
  * CANN Open Software License Agreement Version 2.0 (the "License").
  * Please refer to the License for details. You may not use this file in compliance with the License.
  * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
@@ -327,6 +327,41 @@ __aicore__ inline void SpltPruneLoadRowBlock(
     PipeBarrier<PIPE_MTE2>();
 }
 
+// SpltPruneLoadRowBlockChunk — chunked GM→UB load for trans paths with large m.
+// Loads curRowTile rows × curCols columns starting at (rowStart, colStart) from
+// the (k, m) row-major GM source (ld ≥ m). The destination UB row stride is
+// forced to alignedStride * sizeof(T) via dstStride padding, so all subsequent
+// scalar/Transpose access can use alignedStride uniformly across chunks.
+//
+// dstStride is in 32-byte blocks (UB-side stride unit per DataCopyPad spec).
+// Total UB row stride = ceil_32(curCols * sizeof(T)) + dstStride * 32 bytes,
+// which equals alignedStride * sizeof(T) when chunkM is aligned to 32B/elemSize.
+// For the full chunk (curCols == chunkM), dstStride = 0 (natural alignment
+// already equals alignedStride). For the tail chunk (curCols < chunkM),
+// dstStride > 0 pads the row to the fixed stride.
+template <typename T>
+__aicore__ inline void SpltPruneLoadRowBlockChunk(
+    LocalTensor<T>& blkUB, GlobalTensor<T>& aGM,
+    DataCopyExtParams& copyParams, DataCopyPadExtParams<T>& padParams,
+    int32_t rowStart, int32_t curRowTile, int32_t colStart,
+    int32_t curCols, int32_t ld, int32_t alignedStride)
+{
+    copyParams.blockCount = static_cast<uint32_t>(curRowTile);
+    copyParams.blockLen = static_cast<uint32_t>(curCols * sizeof(T));
+    copyParams.srcStride = static_cast<uint32_t>((ld - curCols) * sizeof(T));
+    // Force UB row stride = alignedStride * sizeof(T).
+    // dstStride (32B blocks) = (alignedStride * sizeof(T) - ceil_32(blockLen)) / 32.
+    const int32_t naturalBytes = (curCols * static_cast<int32_t>(sizeof(T)) +
+                                   SPLT_UB_ALIGN_BYTES - 1) /
+                                   SPLT_UB_ALIGN_BYTES * SPLT_UB_ALIGN_BYTES;
+    const int32_t dstStrideBytes =
+        alignedStride * static_cast<int32_t>(sizeof(T)) - naturalBytes;
+    copyParams.dstStride = static_cast<uint32_t>(dstStrideBytes / SPLT_UB_ALIGN_BYTES);
+    DataCopyPad(blkUB, aGM[static_cast<int64_t>(rowStart) * ld + colStart],
+                copyParams, padParams);
+    PipeBarrier<PIPE_MTE2>();
+}
+
 template <typename T>
 __aicore__ inline void SpltPruneStoreRowBlock(
     LocalTensor<T>& blkUB, GlobalTensor<T>& aOutGM,
@@ -467,7 +502,7 @@ __aicore__ inline int32_t SpltPruneColLoadIter(
 // SpltPruneAlongCol — along-column pruning: each block processes ROW_TILE rows.
 // Loads GM→UB, prunes columns, stores UB→GM. Sync order: MTE2 after load,
 // V after prune, MTE3_MTE2 flag after store (cross-iteration WAR on blkUB).
-// [TRANSPOSE] Output is always written as contiguous (m, k) row-major
+// Output is always written as contiguous (m, k) row-major
 // (stride = k), while input may have stride ld >= k (padded matrix).
 // ----------------------------------------------------------------------------
 template <typename T>
@@ -498,7 +533,7 @@ __aicore__ inline void SpltPruneAlongCol(
 }
 
 // ----------------------------------------------------------------------------
-// [TRANSPOSE] SpltPruneTransRowOrder — sparseTrans=true, ROW order path.
+// SpltPruneTransRowOrder — sparseTrans=true, ROW order path.
 // Physical A is (k, m) row-major: data[physRow * ld + physCol], physRow ∈ [0,k),
 // physCol ∈ [0,m), ld >= m. Logical[i][j] = data[j * ld + i].
 //
@@ -583,7 +618,8 @@ template <typename T>
 __aicore__ inline void SpltPruneTransWriteColsVec(
     LocalTensor<T>& blkUB, LocalTensor<T>& transUB, GlobalTensor<T>& aOutGM,
     DataCopyExtParams& writeParams,
-    int32_t curRowTile, int32_t stride, int32_t m, int32_t k, int32_t rowStart)
+    int32_t curRowTile, int32_t stride, int32_t cols, int32_t colOffset,
+    int32_t k, int32_t rowStart)
 {
     constexpr int32_t TRANS_TILE = 16;
     constexpr int32_t TRANS_UB_STRIDE = (sizeof(T) == 1) ? 32 : TRANS_TILE;
@@ -592,19 +628,19 @@ __aicore__ inline void SpltPruneTransWriteColsVec(
     writeParams.blockLen = static_cast<uint32_t>(curRowTile * sizeof(T));
     writeParams.srcStride = 0;
     writeParams.dstStride = 0;
-    for (int32_t colStart = 0; colStart < m; colStart += TRANS_TILE) {
-        int32_t cols = (colStart + TRANS_TILE <= m) ? TRANS_TILE : (m - colStart);
+    for (int32_t colStart = 0; colStart < cols; colStart += TRANS_TILE) {
+        int32_t curCols = (colStart + TRANS_TILE <= cols) ? TRANS_TILE : (cols - colStart);
         if constexpr (std::is_same_v<T, int8_t>) {
-            SpltPruneTransWriteInt8<T>(blkUB, transUB, curRowTile, cols, colStart, stride);
+            SpltPruneTransWriteInt8<T>(blkUB, transUB, curRowTile, curCols, colStart, stride);
         } else if constexpr (sizeof(T) == 4) {
-            SpltPruneTransWriteFp32<T>(blkUB, transUB, curRowTile, cols, colStart, stride);
+            SpltPruneTransWriteFp32<T>(blkUB, transUB, curRowTile, curCols, colStart, stride);
         } else {
-            SpltPruneTransWriteFp16<T>(blkUB, transUB, curRowTile, cols, colStart, stride);
+            SpltPruneTransWriteFp16<T>(blkUB, transUB, curRowTile, curCols, colStart, stride);
         }
         SetFlag<HardEvent::V_MTE3>(0);
         WaitFlag<HardEvent::V_MTE3>(0);
-        for (int32_t r = 0; r < cols; ++r) {
-            DataCopyPad(aOutGM[static_cast<int64_t>(colStart + r) * k + rowStart],
+        for (int32_t r = 0; r < curCols; ++r) {
+            DataCopyPad(aOutGM[static_cast<int64_t>(colOffset + colStart + r) * k + rowStart],
                         transUB[r * TRANS_UB_STRIDE], writeParams);
         }
         SetFlag<HardEvent::MTE3_V>(0);
@@ -640,13 +676,18 @@ __aicore__ inline void SpltPruneTransInitBuffers(
 template <typename T>
 __aicore__ inline void SpltPruneTransRowOrder(
     GlobalTensor<T>& aGM, GlobalTensor<T>& aOutGM,
-    int32_t m, int32_t k, int32_t ld, int32_t blockId, int32_t blockNum)
+    int32_t m, int32_t k, int32_t ld, int32_t blockId, int32_t blockNum,
+    int32_t chunkM)
 {
     constexpr int32_t groupSize = std::is_same_v<T, float> ? 2 : 4;
     constexpr int32_t TRANS_TILE = 16;
-    // UB row stride is 32B-aligned (DataCopyPad pads each row).
-    // Use alignedM for buffer allocation and all scalar element access.
-    const int32_t alignedM = SpltAlignedStride<T>(m);
+    // When m > chunkM, split the m-dimension into chunks of chunkM
+    // columns. Each chunk loads TRANS_TILE rows × chunkM cols, prunes along-row,
+    // and transposes back to GM at the correct column offset. chunkM is aligned
+    // to 32B/elemSize so alignedChunkM == chunkM (exact UB row stride).
+    // When m <= chunkM, single chunk (= m), behavior unchanged from original.
+    const int32_t effectiveChunkM = (chunkM > 0 && chunkM < m) ? chunkM : m;
+    const int32_t alignedChunkM = SpltAlignedStride<T>(effectiveChunkM);
     TBuf<TPosition::VECCALC> blockBuf, transBuf;
     TBuf<TPosition::VECCALC> absBuf, keepMaskBuf;
     TPipe pipe;
@@ -657,23 +698,30 @@ __aicore__ inline void SpltPruneTransRowOrder(
     DataCopyExtParams loadParams{1, 0, 0, 0, 0};
     DataCopyPadExtParams<T> padParams{false, 0, 0, T(0)};
     DataCopyExtParams writeParams{1, static_cast<uint32_t>(TRANS_TILE * sizeof(T)), 0, 0, 0};
-    SpltPruneTransInitBuffers<T>(blockBuf, transBuf, pipe, alignedM, blkUB, transUB,
+    SpltPruneTransInitBuffers<T>(blockBuf, transBuf, pipe, alignedChunkM, blkUB, transUB,
                                    loadParams, padParams, writeParams);
-    pipe.InitBuffer(absBuf, static_cast<uint32_t>(m + 64) * sizeof(float));
-    pipe.InitBuffer(keepMaskBuf, static_cast<uint32_t>(m + 64) * sizeof(float));
+    pipe.InitBuffer(absBuf, static_cast<uint32_t>(effectiveChunkM + 64) * sizeof(float));
+    pipe.InitBuffer(keepMaskBuf, static_cast<uint32_t>(effectiveChunkM + 64) * sizeof(float));
     absUB = absBuf.Get<float>();
     keepMaskUB = keepMaskBuf.Get<float>();
 
     for (int32_t rowStart = blockId * TRANS_TILE;
          rowStart < k; rowStart += blockNum * TRANS_TILE) {
         int32_t curRowTile = (rowStart + TRANS_TILE <= k) ? TRANS_TILE : (k - rowStart);
-        SpltPruneLoadRowBlock<T>(blkUB, aGM, loadParams, padParams, rowStart, curRowTile, m, ld);
-        for (int32_t r = 0; r < curRowTile; ++r) {
-            SpltPruneGroupNVec<T>(blkUB, absUB, keepMaskUB,
-                                    r * alignedM, m, groupSize);
+        // Iterate over m in chunks of effectiveChunkM columns.
+        for (int32_t colStart = 0; colStart < m; colStart += effectiveChunkM) {
+            int32_t curCols = (colStart + effectiveChunkM <= m)
+                              ? effectiveChunkM : (m - colStart);
+            SpltPruneLoadRowBlockChunk<T>(blkUB, aGM, loadParams, padParams,
+                                            rowStart, curRowTile, colStart,
+                                            curCols, ld, alignedChunkM);
+            for (int32_t r = 0; r < curRowTile; ++r) {
+                SpltPruneGroupNVec<T>(blkUB, absUB, keepMaskUB,
+                                        r * alignedChunkM, curCols, groupSize);
+            }
+            SpltPruneTransWriteColsVec<T>(blkUB, transUB, aOutGM, writeParams, curRowTile,
+                                             alignedChunkM, curCols, colStart, k, rowStart);
         }
-        SpltPruneTransWriteColsVec<T>(blkUB, transUB, aOutGM, writeParams, curRowTile,
-                                         alignedM, m, k, rowStart);
     }
 }
 
@@ -884,12 +932,19 @@ __aicore__ inline void SpltPruneTileAlongCol(
 template <typename T>
 __aicore__ inline void SpltPruneTileTransRowOrder(
     GlobalTensor<T>& aGM, GlobalTensor<T>& aOutGM,
-    int32_t m, int32_t k, int32_t ld, int32_t blockId, int32_t blockNum)
+    int32_t m, int32_t k, int32_t ld, int32_t blockId, int32_t blockNum,
+    int32_t chunkM)
 {
     constexpr int32_t TS = std::is_same_v<T, float> ? SPLT_TILE_SIZE_FP32 : SPLT_TILE_SIZE_FP16;
     constexpr int32_t groupSize = std::is_same_v<T, float> ? 2 : 4;
     constexpr int32_t TRANS_TILE = 16;
-    const int32_t alignedM = SpltAlignedStride<T>(m);
+    // When m > chunkM, split the m-dimension into chunks of chunkM
+    // columns. chunkM is aligned to 32B/elemSize (a multiple of TS), so full
+    // chunks have complete TS×TS tiles. The last chunk may have a partial
+    // tile row (curCols % TS != 0), handled by SpltPruneTileTransTails.
+    // When m <= chunkM, single chunk (= m), behavior unchanged from original.
+    const int32_t effectiveChunkM = (chunkM > 0 && chunkM < m) ? chunkM : m;
+    const int32_t alignedChunkM = SpltAlignedStride<T>(effectiveChunkM);
     TBuf<TPosition::VECCALC> blockBuf, transBuf;
     TPipe pipe;
     LocalTensor<T> blkUB;
@@ -897,28 +952,35 @@ __aicore__ inline void SpltPruneTileTransRowOrder(
     DataCopyExtParams loadParams{1, 0, 0, 0, 0};
     DataCopyPadExtParams<T> padParams{false, 0, 0, T(0)};
     DataCopyExtParams writeParams{1, static_cast<uint32_t>(TRANS_TILE * sizeof(T)), 0, 0, 0};
-    SpltPruneTransInitBuffers<T>(blockBuf, transBuf, pipe, alignedM, blkUB, transUB,
+    SpltPruneTransInitBuffers<T>(blockBuf, transBuf, pipe, alignedChunkM, blkUB, transUB,
                                    loadParams, padParams, writeParams);
 
     for (int32_t rowStart = blockId * TRANS_TILE;
          rowStart < k; rowStart += blockNum * TRANS_TILE) {
         int32_t curRowTile = (rowStart + TRANS_TILE <= k) ? TRANS_TILE : (k - rowStart);
-        SpltPruneLoadRowBlock<T>(blkUB, aGM, loadParams, padParams, rowStart, curRowTile, m, ld);
+        // Iterate over m in chunks of effectiveChunkM columns.
+        for (int32_t colStart = 0; colStart < m; colStart += effectiveChunkM) {
+            int32_t curCols = (colStart + effectiveChunkM <= m)
+                              ? effectiveChunkM : (m - colStart);
+            SpltPruneLoadRowBlockChunk<T>(blkUB, aGM, loadParams, padParams,
+                                            rowStart, curRowTile, colStart,
+                                            curCols, ld, alignedChunkM);
 
-        int32_t fullTileRowsM = m / TS;
-        int32_t fullTileColsK = curRowTile / TS;
-        for (int32_t tr = 0; tr < fullTileRowsM; ++tr) {
-            int32_t iBase = tr * TS;
-            for (int32_t tc = 0; tc < fullTileColsK; ++tc) {
-                SpltPruneTileDispatch<T>(blkUB, tc * TS, iBase, alignedM);
+            int32_t fullTileRowsM = curCols / TS;
+            int32_t fullTileColsK = curRowTile / TS;
+            for (int32_t tr = 0; tr < fullTileRowsM; ++tr) {
+                int32_t iBase = tr * TS;
+                for (int32_t tc = 0; tc < fullTileColsK; ++tc) {
+                    SpltPruneTileDispatch<T>(blkUB, tc * TS, iBase, alignedChunkM);
+                }
             }
-        }
-        SpltPruneTileTransTails<T>(blkUB,
-                                     curRowTile, m, fullTileRowsM,
-                                     fullTileColsK, TS, groupSize, alignedM);
+            SpltPruneTileTransTails<T>(blkUB,
+                                         curRowTile, curCols, fullTileRowsM,
+                                         fullTileColsK, TS, groupSize, alignedChunkM);
 
-        SpltPruneTransWriteColsVec<T>(blkUB, transUB, aOutGM, writeParams, curRowTile,
-                                         alignedM, m, k, rowStart);
+            SpltPruneTransWriteColsVec<T>(blkUB, transUB, aOutGM, writeParams, curRowTile,
+                                             alignedChunkM, curCols, colStart, k, rowStart);
+        }
     }
 }
 
@@ -948,6 +1010,7 @@ __aicore__ inline void SpltPruneImpl(GM_ADDR aGm, GM_ADDR aPrunedGm, Aclsparselt
     const int32_t pruneAlongRow = td.pruneAlongRow;
     const int32_t sparseTrans = td.sparseTrans;
     const int32_t pruneAlg = td.pruneAlg;
+    const int32_t chunkM = td.chunkM;
     const int32_t blockId = static_cast<int32_t>(GetBlockIdx());
     const int32_t blockNum = static_cast<int32_t>(GetBlockNum());
 
@@ -963,9 +1026,9 @@ __aicore__ inline void SpltPruneImpl(GM_ADDR aGm, GM_ADDR aPrunedGm, Aclsparselt
         SpltPruneAlongRowUnified<T>(aGM, aOutGM, m, k, ld, pruneAlg, blockId, blockNum);
     } else if (sparseTrans != 0) {
         if (pruneAlg == SPLT_PRUNE_ALG_TILE) {
-            SpltPruneTileTransRowOrder<T>(aGM, aOutGM, m, k, ld, blockId, blockNum);
+            SpltPruneTileTransRowOrder<T>(aGM, aOutGM, m, k, ld, blockId, blockNum, chunkM);
         } else {
-            SpltPruneTransRowOrder<T>(aGM, aOutGM, m, k, ld, blockId, blockNum);
+            SpltPruneTransRowOrder<T>(aGM, aOutGM, m, k, ld, blockId, blockNum, chunkM);
         }
     } else {
         if (pruneAlg == SPLT_PRUNE_ALG_TILE) {

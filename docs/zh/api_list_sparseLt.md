@@ -22,8 +22,8 @@
 | [aclsparseLtDenseDescriptorInit](#aclsparseltdensedescriptorinit) | 初始化稠密矩阵描述符 |
 | [aclsparseLtStructuredDescriptorInit](#aclsparseltstructureddescriptorinit) | 初始化结构化稀疏矩阵描述符（2:4） |
 | [aclsparseLtMatDescriptorDestroy](#aclsparseltmatdescriptordestroy) | 销毁矩阵描述符 |
-| [aclsparseLtMatDescSetAttribute](#aclsparseltmatdescsetattribute) | 设置矩阵描述符属性（**暂未支持**） |
-| [aclsparseLtMatDescGetAttribute](#aclsparseltmatdescgetattribute) | 获取矩阵描述符属性（**暂未支持**） |
+| [aclsparseLtMatDescSetAttribute](#aclsparseltmatdescsetattribute) | 设置矩阵描述符属性（batch 配置） |
+| [aclsparseLtMatDescGetAttribute](#aclsparseltmatdescgetattribute) | 获取矩阵描述符属性（batch 配置） |
 | [aclsparseLtMatmulDescriptorInit](#aclsparseltmatmuldescriptorinit) | 初始化矩阵乘法描述符 |
 | [aclsparseLtMatmulDescriptorDestroy](#aclsparseltmatmuldescriptordestroy) | 销毁矩阵乘法描述符 |
 | [aclsparseLtMatmulDescSetAttribute](#aclsparseltmatmuldescsetattribute) | 设置 matmul 描述符属性 |
@@ -262,8 +262,6 @@ aclsparseStatus_t aclsparseLtMatDescriptorDestroy(aclsparseLtMatDescriptor_t* ma
 
 ### aclsparseLtMatDescSetAttribute
 
-> **支持状态**：暂未支持。当前版本尚未实现。
-
 ```c
 aclsparseStatus_t aclsparseLtMatDescSetAttribute(
     aclsparseLtConstHandle_t handle,
@@ -273,7 +271,7 @@ aclsparseStatus_t aclsparseLtMatDescSetAttribute(
     size_t dataSize);
 ```
 
-**功能**：设置矩阵描述符的指定属性（如批数、批步长等）。
+**功能**：设置矩阵描述符的指定属性（用于 batch 批量计算配置）。须在 `aclsparseLtMatmulDescriptorInit` 之前设置——Init 时校验 A/B/C/D 四个矩阵的 `numBatches` 一致性。
 
 **参数说明**：
 
@@ -281,20 +279,27 @@ aclsparseStatus_t aclsparseLtMatDescSetAttribute(
 - `matDescr`（IN/OUT）：HOST，矩阵描述符。
 - `attribute`（IN）：HOST，要设置的矩阵描述符属性。
 - `data`（IN）：HOST，指向属性值的指针。
-- `dataSize`（IN）：HOST，属性值字节数，用于校验。
+- `dataSize`（IN）：HOST，属性值字节数，须等于对应属性的 sizeof，用于校验。
+
+可设置的属性如下：
+
+| 属性枚举 | 值 | 值类型 | 默认值 | 说明 |
+|----------|---|--------|--------|------|
+| `ACLSPARSELT_MAT_NUM_BATCHES` | 0 | int32_t | 1 | batch 数量，须 >= 1。dataSize 须 = `sizeof(int32_t)` |
+| `ACLSPARSELT_MAT_BATCH_STRIDE` | 1 | int64_t | 0 | batch 间步长（元素数），每个矩阵独立设置。dataSize 须 = `sizeof(int64_t)` |
+
+> **numBatches 一致性校验**：`aclsparseLtMatmulDescriptorInit` 时校验 A/B/C/D 四个矩阵的 numBatches 须一致，不一致返回 `ACL_SPARSE_STATUS_INVALID_VALUE`。本接口仅校验单个描述符的 numBatches >= 1，不跨矩阵校验。
 
 **返回值**：
 
 - `ACL_SPARSE_STATUS_SUCCESS`：成功
 - `ACL_SPARSE_STATUS_HANDLE_IS_NULLPTR`：handle 为空指针
-- `ACL_SPARSE_STATUS_INVALID_VALUE`：matDescr 为空、attribute 非法、data 为空、dataSize 与属性不匹配
-- `ACL_SPARSE_STATUS_NOT_SUPPORTED`：该属性暂不支持
+- `ACL_SPARSE_STATUS_INVALID_VALUE`：matDescr 为空、attribute 非法、data 为空、dataSize 与属性不匹配、`NUM_BATCHES` 值 < 1
+- `ACL_SPARSE_STATUS_NOT_SUPPORTED`：该属性不在支持范围内
 
 ---
 
 ### aclsparseLtMatDescGetAttribute
-
-> **支持状态**：暂未支持。当前版本尚未实现。
 
 ```c
 aclsparseStatus_t aclsparseLtMatDescGetAttribute(
@@ -313,14 +318,16 @@ aclsparseStatus_t aclsparseLtMatDescGetAttribute(
 - `matDescr`（IN）：HOST，矩阵描述符。
 - `attribute`（IN）：HOST，要获取的矩阵描述符属性。
 - `data`（OUT）：HOST，返回属性值的内存地址。
-- `dataSize`（IN）：HOST，属性值字节数，用于校验。
+- `dataSize`（IN）：HOST，属性值字节数，须等于对应属性的 sizeof，用于校验。
+
+支持查询的属性同 `aclsparseLtMatDescSetAttribute`，可查询 `ACLSPARSELT_MAT_NUM_BATCHES` 与 `ACLSPARSELT_MAT_BATCH_STRIDE` 的当前值。
 
 **返回值**：
 
 - `ACL_SPARSE_STATUS_SUCCESS`：成功
 - `ACL_SPARSE_STATUS_HANDLE_IS_NULLPTR`：handle 为空指针
 - `ACL_SPARSE_STATUS_INVALID_VALUE`：matDescr 为空、attribute 非法、data 为空、dataSize 与属性不匹配
-- `ACL_SPARSE_STATUS_NOT_SUPPORTED`：该属性暂不支持
+- `ACL_SPARSE_STATUS_NOT_SUPPORTED`：该属性不在支持范围内
 
 ---
 
@@ -393,22 +400,38 @@ aclsparseStatus_t aclsparseLtMatmulDescSetAttribute(
     size_t dataSize);
 ```
 
-**功能**：设置 matmul 描述符的指定属性（如向量缩放：ALPHA_VECTOR_SCALING / BETA_VECTOR_SCALING）。设置 BETA_VECTOR_SCALING=true 时隐含 ALPHA_VECTOR_SCALING=true（cuSPARSELt 语义）。
+**功能**：设置 matmul 描述符的指定属性，用于配置 epilogue 链的向量缩放（alpha/beta）、bias 与 activation。须在 `aclsparseLtMatmulPlanInit` 之前设置——PlanInit 读取属性计算 tiling，之后修改不会生效（需重新初始化计划）。设置 `BETA_VECTOR_SCALING` 为非 0 时隐含启用 `ALPHA_VECTOR_SCALING`（cuSPARSELt 语义）。
 
 **参数说明**：
 
 - `handle`（IN）：HOST，aclsparseLt 库句柄。
-- `matmulDescr`（IN/OUT）：HOST，matmul 描述符。
+- `matmulDescr`（IN/OUT）：HOST，matmul 描述符，须已初始化。
 - `matmulAttribute`（IN）：HOST，要设置的 matmul 描述符属性。
-- `data`（IN）：HOST，指向属性值的指针（int 类型）。
-- `dataSize`（IN）：HOST，属性值字节数，须等于 `sizeof(int)`，用于校验。
+- `data`（IN）：HOST，指向属性值的指针，值类型与 dataSize 随属性变化（见下表）。
+- `dataSize`（IN）：HOST，属性值字节数，须等于对应属性的 sizeof，用于校验。
+
+可设置的属性如下：
+
+| 属性枚举 | 值 | 值类型 | 默认值 | 说明 |
+|----------|---|--------|--------|------|
+| `ACLSPARSELT_MATMUL_ALPHA_VECTOR_SCALING` | 0 | int | 0 | alpha 逐行向量缩放开关，0=禁用（标量模式），非 0=启用（alpha 为 Device float[M]）。dataSize 须 = `sizeof(int)` |
+| `ACLSPARSELT_MATMUL_BETA_VECTOR_SCALING` | 1 | int | 0 | beta 逐行向量缩放开关，0=禁用，非 0=启用，启用时隐含启用 ALPHA_VECTOR_SCALING（cuSPARSELt 语义）。dataSize 须 = `sizeof(int)` |
+| `ACLSPARSELT_MATMUL_BIAS_POINTER` | 2 | void* | NULL | bias 向量 Device 指针，长度 = m。dtype 与 C 矩阵相同（FP32 路径 bias 为 FP32，FP16 路径 bias 为 FP16，BF16 路径 bias 为 BF16），INT8 路径 bias 为 FP32（cuSPARSELt 规定）。NULL=不启用 bias。dataSize 须 = `sizeof(void*)` |
+| `ACLSPARSELT_MATMUL_BIAS_STRIDE` | 3 | int64_t | 0 | batch 间 bias 步长（元素数），0=所有 batch 共用同一 bias。dataSize 须 = `sizeof(int64_t)` |
+| `ACLSPARSELT_MATMUL_ACTIVATION_RELU` | 4 | int | 0 | ReLU 开关，0=禁用，非 0=启用。与 GeLU 互斥。dataSize 须 = `sizeof(int)` |
+| `ACLSPARSELT_MATMUL_ACTIVATION_RELU_UPPERBOUND` | 5 | float | FLT_MAX | ReLU 上界（`min(upperBound, D)`）。dataSize 须 = `sizeof(float)` |
+| `ACLSPARSELT_MATMUL_ACTIVATION_RELU_THRESHOLD` | 6 | float | 0.0f | ReLU 阈值（`max(threshold, D)`）。dataSize 须 = `sizeof(float)` |
+| `ACLSPARSELT_MATMUL_ACTIVATION_GELU` | 7 | int | 0 | GeLU 开关，0=禁用，非 0=启用。与 ReLU 互斥。dataSize 须 = `sizeof(int)` |
+| `ACLSPARSELT_MATMUL_ACTIVATION_GELU_SCALING` | 8 | float | 1.0f | GeLU 缩放系数。设置此属性会隐含启用 GeLU（cuSPARSELt 语义：It implies ACTIVATION_GELU）。若 ReLU 已启用则不自动启用 GeLU（保持互斥语义）。dataSize 须 = `sizeof(float)` |
+
+> **ReLU/GeLU 互斥校验**：SetAttribute 启用一种 activation 时，若另一种已启用，返回 `ACL_SPARSE_STATUS_INVALID_VALUE`；设为 0（关闭）时不检查。例如：已启用 GeLU（`ACTIVATION_GELU=1`）后设置 `ACTIVATION_RELU=1` 将返回错误；先设置 `ACTIVATION_GELU=0` 关闭再启用 ReLU 则成功。
 
 **返回值**：
 
 - `ACL_SPARSE_STATUS_SUCCESS`：成功
 - `ACL_SPARSE_STATUS_HANDLE_IS_NULLPTR`：handle 为空指针
-- `ACL_SPARSE_STATUS_INVALID_VALUE`：matmulDescr 为空、matmulAttribute 非法、data 为空、dataSize 与属性不匹配
-- `ACL_SPARSE_STATUS_NOT_SUPPORTED`：该属性暂不支持
+- `ACL_SPARSE_STATUS_INVALID_VALUE`：matmulDescr 为空、matmulAttribute 非法、data 为空、dataSize 与属性不匹配、ReLU/GeLU 互斥冲突
+- `ACL_SPARSE_STATUS_NOT_SUPPORTED`：该属性不在支持范围内
 
 ---
 
@@ -423,22 +446,22 @@ aclsparseStatus_t aclsparseLtMatmulDescGetAttribute(
     size_t dataSize);
 ```
 
-**功能**：获取 matmul 描述符的指定属性（如向量缩放：ALPHA_VECTOR_SCALING / BETA_VECTOR_SCALING 的当前启用状态）。
+**功能**：获取 matmul 描述符的指定属性当前值。支持查询 `aclsparseLtMatmulDescSetAttribute` 列出的全部 9 个属性（向量缩放开关、bias 指针/步长、ReLU 开关/上界/阈值、GeLU 开关/缩放）。
 
 **参数说明**：
 
 - `handle`（IN）：HOST，aclsparseLt 库句柄。
 - `matmulDescr`（IN）：HOST，matmul 描述符。
 - `matmulAttribute`（IN）：HOST，要获取的 matmul 描述符属性。
-- `data`（OUT）：HOST，返回属性值的内存地址（写入 int，1=启用，0=禁用）。
-- `dataSize`（IN）：HOST，属性值字节数，须等于 `sizeof(int)`，用于校验。
+- `data`（OUT）：HOST，返回属性值的内存地址，值类型与 dataSize 随属性变化（同 SetAttribute 表）。
+- `dataSize`（IN）：HOST，属性值字节数，须等于对应属性的 sizeof，用于校验。
 
 **返回值**：
 
 - `ACL_SPARSE_STATUS_SUCCESS`：成功
 - `ACL_SPARSE_STATUS_HANDLE_IS_NULLPTR`：handle 为空指针
 - `ACL_SPARSE_STATUS_INVALID_VALUE`：matmulDescr 为空、matmulAttribute 非法、data 为空、dataSize 与属性不匹配
-- `ACL_SPARSE_STATUS_NOT_SUPPORTED`：该属性暂不支持
+- `ACL_SPARSE_STATUS_NOT_SUPPORTED`：该属性不在支持范围内
 
 ---
 
@@ -640,7 +663,7 @@ aclsparseStatus_t aclsparseLtMatmul(
     int32_t numStreams);
 ```
 
-**功能**：执行结构化稀疏矩阵乘法，计算 `D = α · op(A) · op(B) + β · op(C)`（含可选的激活与偏置）。A 须为已剪枝的矩阵（通过 `aclsparseLtSpMMAPrune` 产出）。当 matA 为 null 时，回退到 workspace 中的 A_pruned 区域（须已由 SpMMAPrune 填充）。alpha/beta 可为标量（float 指针）或设备端向量（启用 ALPHA_VECTOR_SCALING 时为 float[M] 数组指针）。算子在指定 stream 上异步执行，调用方须通过 aclrtSynchronizeStream 同步后读取 D。
+**功能**：执行结构化稀疏矩阵乘法并融合 epilogue 后处理，计算 `D = Activation(alpha * op(A) * op(B) + beta * C + bias)`。epilogue 链依次执行：alpha 缩放 → beta·C 累加 → bias 逐行广播加（per-row broadcast，长度 = m 的逐行广播向量，dtype 与 C 相同，INT8 路径为 FP32）→ activation（ReLU/GeLU，可选，二者互斥）→ 类型转换写出。bias 与 activation 通过 `aclsparseLtMatmulDescSetAttribute` 预先配置到 matmul 描述符中，执行接口不额外传参。A 须为已剪枝的矩阵（通过 `aclsparseLtSpMMAPrune` 产出）。当 matA 为 null 时，回退到 workspace 中的 A_pruned 区域（须已由 SpMMAPrune 填充）。alpha/beta 可为标量（float 指针）或设备端向量（启用 ALPHA_VECTOR_SCALING 时为 float[M] 数组指针）。算子在指定 stream 上异步执行，调用方须通过 aclrtSynchronizeStream 同步后读取 D。
 
 **参数说明**：
 
@@ -921,10 +944,26 @@ matmul 算法选择属性枚举（用于 `aclsparseLtMatmulAlgSetAttribute` / `a
 
 matmul 描述符属性枚举（用于 `aclsparseLtMatmulDescSetAttribute` / `aclsparseLtMatmulDescGetAttribute`）：
 
-| 枚举值 | 说明 |
-|--------|------|
-| `ACLSPARSELT_MATMUL_ALPHA_VECTOR_SCALING` | alpha 向量缩放，启用时 alpha 为 Device float[M] 数组指针 |
-| `ACLSPARSELT_MATMUL_BETA_VECTOR_SCALING` | beta 向量缩放，启用时隐含 alpha 向量缩放，beta 为 Device float[M] 数组指针 |
+| 枚举值 | 编号 | 值类型 | 默认值 | 说明 |
+|--------|------|--------|--------|------|
+| `ACLSPARSELT_MATMUL_ALPHA_VECTOR_SCALING` | 0 | int | 0 | alpha 逐行向量缩放开关，0=禁用（标量模式），非 0=启用（alpha 为 Device float[M]） |
+| `ACLSPARSELT_MATMUL_BETA_VECTOR_SCALING` | 1 | int | 0 | beta 逐行向量缩放开关，启用时隐含启用 ALPHA_VECTOR_SCALING（cuSPARSELt 语义） |
+| `ACLSPARSELT_MATMUL_BIAS_POINTER` | 2 | void* | NULL | bias 向量 Device 指针，长度 = m。dtype 与 C 矩阵相同（FP32 路径 bias 为 FP32，FP16 路径 bias 为 FP16，BF16 路径 bias 为 BF16），INT8 路径 bias 为 FP32（cuSPARSELt 规定）。NULL=不启用 bias |
+| `ACLSPARSELT_MATMUL_BIAS_STRIDE` | 3 | int64_t | 0 | batch 间 bias 步长（元素数），0=所有 batch 共用同一 bias |
+| `ACLSPARSELT_MATMUL_ACTIVATION_RELU` | 4 | int | 0 | ReLU 开关，0=禁用，非 0=启用。与 GeLU 互斥 |
+| `ACLSPARSELT_MATMUL_ACTIVATION_RELU_UPPERBOUND` | 5 | float | FLT_MAX | ReLU 上界，计算 `min(upperBound, D)` |
+| `ACLSPARSELT_MATMUL_ACTIVATION_RELU_THRESHOLD` | 6 | float | 0.0f | ReLU 阈值，计算 `max(threshold, D)` |
+| `ACLSPARSELT_MATMUL_ACTIVATION_GELU` | 7 | int | 0 | GeLU 开关，0=禁用，非 0=启用。与 ReLU 互斥 |
+| `ACLSPARSELT_MATMUL_ACTIVATION_GELU_SCALING` | 8 | float | 1.0f | GeLU 缩放系数。设置此属性会隐含启用 GeLU（cuSPARSELt 语义：It implies ACTIVATION_GELU）。若 ReLU 已启用则不自动启用 GeLU（保持互斥语义） |
+
+### aclsparseLtMatDescAttribute_t
+
+矩阵描述符属性枚举（用于 `aclsparseLtMatDescSetAttribute` / `aclsparseLtMatDescGetAttribute`），用于 batch 批量计算配置：
+
+| 枚举值 | 编号 | 值类型 | 默认值 | 说明 |
+|--------|------|--------|--------|------|
+| `ACLSPARSELT_MAT_NUM_BATCHES` | 0 | int32_t | 1 | batch 数量，须 >= 1。A/B/C/D 四个矩阵的 numBatches 须一致（`aclsparseLtMatmulDescriptorInit` 校验） |
+| `ACLSPARSELT_MAT_BATCH_STRIDE` | 1 | int64_t | 0 | batch 间步长（元素数），每个矩阵独立设置 |
 
 ### aclsparseLtSplitKMode_t
 
@@ -950,15 +989,16 @@ Split-K 模式枚举：
 aclsparseLt 的完整工作流分为初始化、描述符构建、计划构建、执行、清理五个阶段。
 
 1. 调用 `aclsparseLtInit` 创建库上下文。
-2. 对稀疏侧矩阵（A 或 B）调用 `aclsparseLtStructuredDescriptorInit` 创建结构化描述符，对稠密侧矩阵调用 `aclsparseLtDenseDescriptorInit` 创建稠密描述符。
-3. 调用 `aclsparseLtMatmulDescriptorInit` 构建 Matmul 描述符，传入 opA/opB、四个矩阵描述符（matA/matB/matC/matD）与 computeType。
-4. （可选）调用 `aclsparseLtSpMMAPrune` 对稠密矩阵执行 2:4 剪枝，生成稀疏侧输入。
-5. （可选）调用 `aclsparseLtSpMMACompressedSize` 查询压缩后所需存储大小，再调用 `aclsparseLtSpMMACompress` 将稀疏矩阵压缩为紧凑存储。
-6. 调用 `aclsparseLtMatmulAlgSelectionInit` 构建算法选择描述符。
-7. 调用 `aclsparseLtMatmulPlanInit` 构建执行计划。
-8. 调用 `aclsparseLtMatmulGetWorkspace` 查询所需 workspace 大小并分配设备内存。
-9. 调用 `aclsparseLtMatmul` 执行结构化稀疏矩阵乘法（`aclsparseLtMatmulSearch` 暂未支持）。
-10. 按依赖逆序销毁执行计划、算法选择描述符、Matmul 描述符、矩阵描述符，最后调用 `aclsparseLtDestroy` 释放库句柄。
+2. 对稀疏侧矩阵（A 或 B）调用 `aclsparseLtStructuredDescriptorInit` 创建结构化描述符，对稠密侧矩阵调用 `aclsparseLtDenseDescriptorInit` 创建稠密描述符。如需 batch 批量计算，通过 `aclsparseLtMatDescSetAttribute` 设置 `NUM_BATCHES` / `BATCH_STRIDE`（须在步骤 3 之前）。
+3. 调用 `aclsparseLtMatmulDescriptorInit` 构建 Matmul 描述符，传入 opA/opB、四个矩阵描述符（matA/matB/matC/matD）与 computeType（Init 时校验 A/B/C/D 四个矩阵 numBatches 一致性）。
+4. （可选）通过 `aclsparseLtMatmulDescSetAttribute` 设置 bias（`BIAS_POINTER` / `BIAS_STRIDE`）、activation（`ACTIVATION_RELU` / `RELU_UPPERBOUND` / `RELU_THRESHOLD` / `ACTIVATION_GELU` / `GELU_SCALING`）、向量缩放（`ALPHA_VECTOR_SCALING` / `BETA_VECTOR_SCALING`）。须在 PlanInit 之前设置。
+5. （可选）调用 `aclsparseLtSpMMAPrune` 对稠密矩阵执行 2:4 剪枝，生成稀疏侧输入。
+6. （可选）调用 `aclsparseLtSpMMACompressedSize` 查询压缩后所需存储大小，再调用 `aclsparseLtSpMMACompress` 将稀疏矩阵压缩为紧凑存储（当前版本暂未支持）。
+7. 调用 `aclsparseLtMatmulAlgSelectionInit` 构建算法选择描述符。
+8. 调用 `aclsparseLtMatmulPlanInit` 构建执行计划（读取上述全部属性计算 tiling）。
+9. 调用 `aclsparseLtMatmulGetWorkspace` 查询所需 workspace 大小并分配设备内存。
+10. 调用 `aclsparseLtMatmul` 执行结构化稀疏矩阵乘法（`aclsparseLtMatmulSearch` 暂未支持）。bias 与 activation 已通过描述符属性配置，执行接口不额外传参。
+11. 按依赖逆序销毁执行计划、算法选择描述符、Matmul 描述符、矩阵描述符，最后调用 `aclsparseLtDestroy` 释放库句柄。
 
 ---
 
@@ -998,6 +1038,30 @@ int aclsparseLtExample()
     aclsparseLtMatmulDescriptorInit(&handle, &matmulDesc,
         ACL_SPARSE_OP_NON_TRANSPOSE, ACL_SPARSE_OP_NON_TRANSPOSE,
         &matA, &matB, &matC, &matD, ACL_SPARSE_COMPUTE_32F);
+
+    // 3.1（可选）配置 bias + ReLU activation（须在 PlanInit 之前设置）
+    //     bias：长度 = m 的逐行广播向量（dtype 与 C 相同，INT8 路径为 FP32），Device 内存
+    //     activation：ReLU（threshold=0.0f、upperBound=FLT_MAX 退化为标准 ReLU）
+    void *dBias = nullptr;
+    {
+        float hBias[m];  // 长度 = m，此处填 0.5f 仅作示意
+        for (int64_t i = 0; i < m; i++) { hBias[i] = 0.5f; }
+        aclrtMalloc(&dBias, static_cast<size_t>(m) * sizeof(float), ACL_MEM_MALLOC_HUGE_FIRST);
+        aclrtMemcpy(dBias, static_cast<size_t>(m) * sizeof(float),
+                    hBias, static_cast<size_t>(m) * sizeof(float),
+                    ACL_MEMCPY_HOST_TO_DEVICE);
+    }
+    int64_t biasStride = 0;  // 0=所有 batch 共用同一 bias（单 batch 时无影响）
+    int reluEnable = 1;
+    aclsparseLtMatmulDescSetAttribute(&handle, &matmulDesc,
+        ACLSPARSELT_MATMUL_BIAS_POINTER, &dBias, sizeof(void*));
+    aclsparseLtMatmulDescSetAttribute(&handle, &matmulDesc,
+        ACLSPARSELT_MATMUL_BIAS_STRIDE, &biasStride, sizeof(int64_t));
+    aclsparseLtMatmulDescSetAttribute(&handle, &matmulDesc,
+        ACLSPARSELT_MATMUL_ACTIVATION_RELU, &reluEnable, sizeof(int));
+    // 说明：GeLU 用法同理，设置 ACLSPARSELT_MATMUL_ACTIVATION_GELU=1，
+    //       可选设置 ACLSPARSELT_MATMUL_ACTIVATION_GELU_SCALING（默认 1.0f）；
+    //       不可同时启用 ReLU 与 GeLU（互斥，返回 INVALID_VALUE）。
 
     // 4. 执行 2:4 剪枝：dA -> dAPruned
     aclsparseLtSpMMAPrune(&handle, &matmulDesc,
@@ -1043,6 +1107,7 @@ int aclsparseLtExample()
     aclsparseLtMatDescriptorDestroy(&matD);
     aclsparseLtDestroy(&handle);
 
+    aclrtFree(dBias);
     aclrtDestroyStream(stream);
     aclrtResetDevice(deviceId);
     aclFinalize();

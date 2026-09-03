@@ -1,7 +1,7 @@
 /**
  * ----------------------------------------------------------------------------------------------------------
  * Copyright (c) 2026 Huawei Technologies Co., Ltd.
- * This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+ * This program is free software; you can redistribute it and/or modify it under the terms and conditions of
  * CANN Open Software License Agreement Version 2.0 (the "License").
  * Please refer to the License for details. You may not use this file in compliance with the License.
  * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
@@ -120,6 +120,71 @@ static aclsparseStatus_t validate_prune_params(
     return ACL_SPARSE_STATUS_SUCCESS;
 }
 
+// ----------------------------------------------------------------------------
+// compute_prune_chunk_m — compute the maximum chunkM (columns per chunk) for
+// the trans path so that the per-chunk UB usage fits within the UB capacity.
+//
+// When m <= chunkM, the kernel uses a single chunk (= m), identical to the
+// original behavior. When m > chunkM, the kernel splits the m-dimension into
+// chunks of chunkM columns each, loading TRANS_TILE(16) rows × chunkM cols
+// per chunk.
+//
+// chunkM is aligned to 32B/elemSize so that the UB row stride is exact
+// (alignedChunkM == chunkM). Since 32B/elemSize is always a multiple of both
+// groupSize and TS, this alignment also ensures groups/tiles don't span chunk
+// boundaries.
+//
+// Returns: chunkM (>= 1 if supported), or 0 if UB too small for even one
+// minimum tile/group.
+// ----------------------------------------------------------------------------
+static int32_t compute_prune_chunk_m(int32_t dt, int32_t m, int32_t pruneAlg)
+{
+    const int64_t elemSize =
+        (dt == SPLT_DTYPE_FP32) ? SPLT_FP32_BYTES :
+        (dt == SPLT_DTYPE_INT8) ? SPLT_INT8_BYTES : SPLT_HALF_BYTES;
+    const bool isTile = (pruneAlg == ACLSPARSELT_PRUNE_SPMMA_TILE);
+    const int32_t groupSize = (dt == SPLT_DTYPE_FP32) ? 2 : 4;
+    // Alignment granularity = 32B / elemSize elements (always a multiple of TS/groupSize).
+    const int32_t alignUnit = SPLT_UB_ALIGN_BYTES / static_cast<int32_t>(elemSize);
+    const int32_t TS = isTile
+        ? ((dt == SPLT_DTYPE_FP32) ? SPLT_TILE_SIZE_FP32 : SPLT_TILE_SIZE_FP16)
+        : groupSize;
+    // transUB stride: INT8 uses 32, others use 16 (TRANS_TILE).
+    const int32_t transUbStride = (elemSize == 1) ? 32 : 16;
+    constexpr int32_t TRANS_TILE = 16;
+    const int64_t ubBytes = static_cast<int64_t>(get_ub_size());
+
+    // UB budget (exact, since chunkM is aligned to 32B/elemSize → alignedChunkM == chunkM):
+    //   blkUB      = TRANS_TILE * chunkM * elemSize + TRANS_TILE * elemSize  (row padding)
+    //   transUB    = TRANS_TILE * transUbStride * elemSize
+    //   absBuf     = (chunkM + 64) * sizeof(float)   [STRIP only]
+    //   keepMaskBuf= (chunkM + 64) * sizeof(float)   [STRIP only]
+    const int64_t blkPadding = static_cast<int64_t>(TRANS_TILE) * elemSize;
+    const int64_t transBytes = static_cast<int64_t>(TRANS_TILE) * transUbStride * elemSize;
+    const int64_t vecOverhead = isTile ? 0 : 2 * 64 * static_cast<int64_t>(sizeof(float));
+    const int64_t overhead = blkPadding + transBytes + vecOverhead;
+    if (overhead >= ubBytes) {
+        return 0;
+    }
+    const int64_t available = ubBytes - overhead;
+
+    // per-chunkM bytes: blkUB row data + (absBuf + keepMaskBuf for STRIP)
+    const int64_t perChunkBytes = isTile
+        ? static_cast<int64_t>(TRANS_TILE) * elemSize
+        : static_cast<int64_t>(TRANS_TILE) * elemSize + 2 * static_cast<int64_t>(sizeof(float));
+
+    int64_t maxChunkM = available / perChunkBytes;
+    // Align down to alignUnit (32B/elemSize).
+    maxChunkM = (maxChunkM / alignUnit) * alignUnit;
+    if (maxChunkM < TS) {
+        return 0;
+    }
+
+    // chunkM = min(maxChunkM, m). When m <= maxChunkM, single chunk (= m).
+    int32_t chunkM = (maxChunkM < m) ? static_cast<int32_t>(maxChunkM) : m;
+    return chunkM;
+}
+
 static aclsparseStatus_t check_ub_capacity(
     aclsparseLtMatmulDescriptor_t md, int32_t dt,
     int32_t m, int32_t k, int32_t pruneAlongRow, int32_t pruneAlg)
@@ -130,9 +195,27 @@ static aclsparseStatus_t check_ub_capacity(
     const bool isTile = (pruneAlg == ACLSPARSELT_PRUNE_SPMMA_TILE);
     const bool sparseTrans = md_isSparseA(md) ? md_transA(md) : md_transB(md);
     const bool isTransRowPath = (pruneAlongRow == 0 && sparseTrans);
-    const int32_t rowDim = isTransRowPath ? m : k;
-    const int64_t rowBytes = static_cast<int64_t>(rowDim) * elemSize;
     const int64_t SPLT_UB_BYTES = static_cast<int64_t>(get_ub_size());
+
+    // Trans path supports chunked loading: when full m exceeds UB,
+    // the kernel splits m into chunks of chunkM columns. Return NOT_SUPPORTED
+    // only if even a single minimum tile/group cannot fit in UB.
+    if (isTransRowPath) {
+        const int32_t chunkM = compute_prune_chunk_m(dt, m, pruneAlg);
+        const int32_t TS = isTile
+            ? ((dt == SPLT_DTYPE_FP32) ? SPLT_TILE_SIZE_FP32 : SPLT_TILE_SIZE_FP16)
+            : ((dt == SPLT_DTYPE_FP32) ? 2 : 4);
+        if (chunkM < TS) {
+            OP_LOGE(kSparseLtLogTag, "Prune: trans path chunkM=%d < TS=%d (m=%d, dt=%d, alg=%d)",
+                    chunkM, TS, m, dt, pruneAlg);
+            return ACL_SPARSE_STATUS_NOT_SUPPORTED;
+        }
+        return ACL_SPARSE_STATUS_SUCCESS;
+    }
+
+    // Non-trans paths: keep existing full-load UB check (rowDim = k).
+    const int32_t rowDim = k;
+    const int64_t rowBytes = static_cast<int64_t>(rowDim) * elemSize;
     const int32_t tileSize = isTile
         ? ((dt == SPLT_DTYPE_FP32) ? SPLT_TILE_SIZE_FP32 : SPLT_TILE_SIZE_FP16)
         : 1;
@@ -141,19 +224,14 @@ static aclsparseStatus_t check_ub_capacity(
     const int64_t dataBytes = (pruneAlongRow != 0)
         ? alignedRowBytes * static_cast<int64_t>(tileSize)
         : alignedRowBytes * static_cast<int64_t>(SPLT_PRUNE_ROW_TILE);
-    const bool hasVecBuf = (pruneAlongRow != 0) || (isTransRowPath && !isTile);
+    const bool hasVecBuf = (pruneAlongRow != 0);
     const int64_t vecBufBytes = hasVecBuf
         ? 2 * static_cast<int64_t>(rowDim + 64) * static_cast<int64_t>(sizeof(float))
         : 0;
-    const int64_t transExtraBytes = isTransRowPath
-        ? static_cast<int64_t>(SPLT_PRUNE_ROW_TILE) * elemSize
-          + static_cast<int64_t>(SPLT_PRUNE_ROW_TILE) *
-            static_cast<int64_t>((elemSize == SPLT_INT8_BYTES) ? 32 : 16) * elemSize
-        : 0;
-    const int64_t ubBytes = dataBytes + vecBufBytes + transExtraBytes;
+    const int64_t ubBytes = dataBytes + vecBufBytes;
     if (ubBytes > SPLT_UB_BYTES) {
-        OP_LOGE(kSparseLtLogTag, "Prune: %s=%d exceeds UB capacity (ubBytes=%lld > %lld, alongRow=%d)",
-                isTransRowPath ? "m" : "k", rowDim,
+        OP_LOGE(kSparseLtLogTag, "Prune: k=%d exceeds UB capacity (ubBytes=%lld > %lld, alongRow=%d)",
+                rowDim,
                 static_cast<long long>(ubBytes), static_cast<long long>(SPLT_UB_BYTES),
                 pruneAlongRow);
         return ACL_SPARSE_STATUS_NOT_SUPPORTED;
@@ -171,7 +249,9 @@ static aclsparseStatus_t resolve_prune_buffers(
     const void*& aIn, void*& aPruned)
 {
     aclsparseStatus_t ubSt = check_ub_capacity(md, dt, m, k, pruneAlongRow, pruneAlg);
-    if (ubSt != ACL_SPARSE_STATUS_SUCCESS) { return ubSt; }
+    if (ubSt != ACL_SPARSE_STATUS_SUCCESS) {
+        return ubSt;
+    }
 
     if (d_in == nullptr) {
         OP_LOGE(kSparseLtLogTag, "Prune: d_in is null (must be passed explicitly)");
@@ -225,12 +305,18 @@ static AclsparseltTilingData compute_prune_tiling(
     const bool sparseTrans = md_isSparseA(md) ? md_transA(md) : md_transB(md);
     const bool isTransRowPath = (pruneAlongRow == 0 && sparseTrans);
     const int32_t minLd = isTransRowPath ? td.m : td.k;
-    if (td.ld < minLd) { td.ld = minLd; }
+    if (td.ld < minLd) {
+        td.ld = minLd;
+    }
     td.pruneAlongRow = pruneAlongRow;
     td.pruneAlg = pruneAlg;
     td.sparseTrans = sparseTrans ? 1 : 0;
     td.dataType = dt;
     td.coreNum = static_cast<int32_t>(get_cube_core_num());
+    // Compute chunkM for the trans path. When m > chunkM, the kernel
+    // splits the m-dimension into chunks. Non-trans paths set chunkM = 0
+    // (kernel ignores it). When m <= chunkM (single chunk), chunkM = m.
+    td.chunkM = isTransRowPath ? compute_prune_chunk_m(dt, m, pruneAlg) : 0;
     // [TILE] TILE alongRow uses TS rows/block (vs 1 for STRIP alongRow).
     const int32_t tileSize = (pruneAlg == ACLSPARSELT_PRUNE_SPMMA_TILE)
         ? ((dt == SPLT_DTYPE_FP32) ? SPLT_TILE_SIZE_FP32 : SPLT_TILE_SIZE_FP16)
@@ -244,7 +330,9 @@ static AclsparseltTilingData compute_prune_tiling(
     td.usedCoreNum = (pruneTiles < static_cast<int32_t>(get_cube_core_num()))
         ? pruneTiles
         : static_cast<int32_t>(get_cube_core_num());
-    if (td.usedCoreNum <= 0) { td.usedCoreNum = 1; }
+    if (td.usedCoreNum <= 0) {
+        td.usedCoreNum = 1;
+    }
     return td;
 }
 
@@ -267,12 +355,16 @@ extern "C" aclsparseStatus_t aclsparseLtSpMMAPrune(
     int32_t pruneAlgInt = 0;
     aclsparseStatus_t st = validate_prune_params(handle, matmulDescr, pruneAlg, stream,
                                                    md, dt, m, k, pruneAlongRow, pruneAlgInt);
-    if (st != ACL_SPARSE_STATUS_SUCCESS) { return st; }
+    if (st != ACL_SPARSE_STATUS_SUCCESS) {
+        return st;
+    }
 
     const void* aIn = nullptr;
     void* aPruned = nullptr;
     st = resolve_prune_buffers(d_in, d_out, md, dt, m, k, pruneAlongRow, pruneAlgInt, aIn, aPruned);
-    if (st != ACL_SPARSE_STATUS_SUCCESS) { return st; }
+    if (st != ACL_SPARSE_STATUS_SUCCESS) {
+        return st;
+    }
 
     AclsparseltTilingData td = compute_prune_tiling(md, dt, m, k, pruneAlongRow, pruneAlgInt);
 

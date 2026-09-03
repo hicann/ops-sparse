@@ -53,6 +53,20 @@ using namespace AscendC;
 template <typename T> struct SpltL0CTypeTrait { using type = float; };  // FP32/FP16/BF16
 template <> struct SpltL0CTypeTrait<int8_t> { using type = int32_t; };  // INT8
 
+// ============================================================================
+// Bias dtype mapping (per cuSPARSELt spec):
+// "The data type of the bias vector is the same as the matrix C except the
+//  following case: INT8 input, INT8/INT32 output, INT32 compute — in which
+//  the data type of the bias is FP32."
+//   FP32 path: bias = FP32 (= C dtype) → load directly, no Cast
+//   FP16 path: bias = FP16 (= C dtype) → load FP16, Cast to FP32
+//   BF16 path: bias = BF16 (= C dtype) → load BF16, Cast to FP32
+//   INT8 path: bias = FP32 (cuSPARSELt spec) → load directly, no Cast
+// ============================================================================
+template <typename T> struct SpltBiasDTypeTrait { using type = T; };  // FP32/FP16/BF16: bias = C dtype
+template <> struct SpltBiasDTypeTrait<int8_t> { using type = float; };  // INT8: bias = FP32
+template <typename T> using SpltBiasDType = typename SpltBiasDTypeTrait<T>::type;
+
 // Element-wise scalar Cast loop (GetValue/SetValue). Uses static_cast for
 // types that support it (FP16, INT8, etc.).
 template <typename DstT, typename SrcT>
@@ -170,7 +184,7 @@ __aicore__ inline void DrainCubeFlags()
 // GM → L1: load one kL1 block of A(curM, curKL1) + B(curKL1, curN) from GM to L1.
 // The L1 tensors are created by the caller (kL1 loop) and passed by reference so
 // they persist for the subsequent kL0 loop slicing.
-// [TRANSPOSE] transB is handled entirely at the GM level: when transB=1, GM B
+// transB is handled entirely at the GM level: when transB=1, GM B
 // is declared as DNExt(k, n) (column-major). CopyGM2L1 auto-selects DN2ZN which
 // transposes during the fractal conversion. No branching needed here.
 template <typename T, typename GmSliceA, typename GmSliceB, typename L1ATensor, typename L1BTensor>
@@ -306,7 +320,7 @@ __aicore__ inline void SpltMatmulCubeTileLoop(
 
         // Two-level Slice matching cann-samples matmul_kernel_swat.h.
         auto gmBlockARow = gmA.Slice(Te::MakeCoord(mPos, 0), Te::MakeShape(curM, k));
-        // [TRANSPOSE] B slice is the same for transB and non-transB: GM B is
+        // B slice is the same for transB and non-transB: GM B is
         // declared as DNExt(k,n) when transB (column-major view of (n,k) physical
         // data), so slicing (0, nPos, k, curN) works for both paths.
         auto gmBlockBCol = gmB.Slice(Te::MakeCoord(0, nPos), Te::MakeShape(k, curN));
@@ -383,6 +397,8 @@ __aicore__ inline void SpltMatmulCubeImpl(GM_ADDR aPrunedGm, GM_ADDR bGm,
     const int32_t baseM = td.baseM;
     const int32_t baseN = td.baseN;
     const int32_t splitK = td.splitK;
+    // batch 参数
+    const int32_t numBatches = (td.numBatches > 0) ? td.numBatches : 1;
 
     const int32_t blockId = static_cast<int32_t>(GetBlockIdx());
     const int32_t blockNum = static_cast<int32_t>(GetBlockNum());
@@ -392,6 +408,7 @@ __aicore__ inline void SpltMatmulCubeImpl(GM_ADDR aPrunedGm, GM_ADDR bGm,
     // Use int64_t to prevent overflow when mTiles*nTiles
     // approaches INT32_MAX (large m, n).
     const int64_t totalMNTiles = static_cast<int64_t>(mTiles) * static_cast<int64_t>(nTiles);
+    // 每个 batch 内的 totalTiles（batch 循环在外层）
     const int64_t totalTiles = totalMNTiles * static_cast<int64_t>(splitK);
     if (totalTiles <= 0) { return; }
 
@@ -405,22 +422,32 @@ __aicore__ inline void SpltMatmulCubeImpl(GM_ADDR aPrunedGm, GM_ADDR bGm,
     // (k,m) row-major; declare as DNExt(m,k) (column-major view) so CopyGM2L1
     // transposes during the fractal conversion — same mechanism as transB.
     // sparseTrans=0: standard NDExt(m,k) (prune already transposed for sparse path).
-    // [TRANSPOSE] transB=1: GM B physical is (n, k) row-major. Declare as
+    // transB=1: GM B physical is (n, k) row-major. Declare as
     // DNExt(k, n) (column-major) — CopyGM2L1 auto-selects DN2ZN which transposes.
     // DNExt and NDExt produce different tensor types, so the tile loop call must
     // branch at the call site (template dispatch on GmTensorA/GmTensorB types).
     const L1BufferConfig l1cfg = InitL1DoubleBuffer<T>(baseM, baseN, td.kL1Size);
     SetMMLayoutTransform(true);
-    if (td.sparseTrans != 0) {
-        auto gmA = Te::MakeTensor(Te::MakeMemPtr<Te::Location::GM>(reinterpret_cast<__gm__ T*>(aPrunedGm)),
-                              Te::MakeFrameLayout<Te::DNExtLayoutPtn, Te::LayoutTraitDefault<T>>(m, k));
-        SpltMatmulCubeDispatchB<T>(td, gmA, bGm, tempGm, l1cfg, blockId, blockNum,
-                                    nTiles, totalMNTiles, totalTiles);
-    } else {
-        auto gmA = Te::MakeTensor(Te::MakeMemPtr<Te::Location::GM>(reinterpret_cast<__gm__ T*>(aPrunedGm)),
-                              Te::MakeFrameLayout<Te::NDExtLayoutPtn, Te::LayoutTraitDefault<T>>(m, k));
-        SpltMatmulCubeDispatchB<T>(td, gmA, bGm, tempGm, l1cfg, blockId, blockNum,
-                                    nTiles, totalMNTiles, totalTiles);
+    // batch 外循环（GM 指针按 batchStride 偏移）
+    using L0CType = typename SpltL0CTypeTrait<T>::type;
+    const int64_t tempBatchStride = static_cast<int64_t>(splitK) * m * n * sizeof(L0CType);
+    for (int32_t b = 0; b < numBatches; ++b) {
+        // GM 指针按 batchStride 偏移（batchStride 以元素数为单位）
+        __gm__ T* aBase = reinterpret_cast<__gm__ T*>(aPrunedGm)
+                          + static_cast<int64_t>(b) * td.batchStrideA;
+        GM_ADDR bBatchGm = bGm + static_cast<int64_t>(b) * td.batchStrideB * static_cast<int64_t>(sizeof(T));
+        GM_ADDR tempBatchGm = tempGm + static_cast<int64_t>(b) * tempBatchStride;
+        if (td.sparseTrans != 0) {
+            auto gmA = Te::MakeTensor(Te::MakeMemPtr<Te::Location::GM>(aBase),
+                                  Te::MakeFrameLayout<Te::DNExtLayoutPtn, Te::LayoutTraitDefault<T>>(m, k));
+            SpltMatmulCubeDispatchB<T>(td, gmA, bBatchGm, tempBatchGm, l1cfg, blockId, blockNum,
+                                        nTiles, totalMNTiles, totalTiles);
+        } else {
+            auto gmA = Te::MakeTensor(Te::MakeMemPtr<Te::Location::GM>(aBase),
+                                  Te::MakeFrameLayout<Te::NDExtLayoutPtn, Te::LayoutTraitDefault<T>>(m, k));
+            SpltMatmulCubeDispatchB<T>(td, gmA, bBatchGm, tempBatchGm, l1cfg, blockId, blockNum,
+                                        nTiles, totalMNTiles, totalTiles);
+        }
     }
 
     // [OPT-P1] Drain all leftover flags (both L1 ping-pong slots + L0 + L0C).
@@ -517,6 +544,71 @@ __aicore__ inline float SpltGetScalarFromUB(LocalTensor<float>& ubTensor, int32_
     return ubTensor.GetValue(static_cast<uint32_t>(index));
 }
 
+// Load full bias vector from GM to FP32 UB (count elements).
+// BiasType=float (FP32/INT8): direct DataCopyPad to FP32 UB.
+// BiasType=half (FP16): DataCopyPad raw to biasRawBuf, then Vector Cast to FP32 UB.
+// BiasType=bfloat16_t (BF16): DataCopyPad raw to biasRawBuf, then SpltCastBf16ToFp32Vec.
+// biasRawBuf must be pre-allocated with count * sizeof(BiasType) bytes when BiasType != float.
+template <typename BiasType>
+__aicore__ inline void SpltLoadBiasFullToFp32(
+    LocalTensor<float>& biasFp32UB,
+    TBuf<TPosition::VECCALC>& biasRawBuf,
+    GlobalTensor<BiasType>& biasGM,
+    int32_t count)
+{
+    if constexpr (std::is_same_v<BiasType, float>) {
+        // FP32/INT8 path: bias is FP32 in GM, load directly
+        DataCopyExtParams copyBias{1, static_cast<uint32_t>(count * sizeof(float)), 0, 0, 0};
+        DataCopyPadExtParams<float> padBias{false, 0, 0, 0.0f};
+        DataCopyPad(biasFp32UB, biasGM[0], copyBias, padBias);
+        SetFlag<HardEvent::MTE2_V>(0);
+        WaitFlag<HardEvent::MTE2_V>(0);
+    } else {
+        // FP16/BF16 path: load raw bias, then Vector Cast to FP32
+        LocalTensor<BiasType> biasRawUB = biasRawBuf.Get<BiasType>();
+        DataCopyExtParams copyBias{1, static_cast<uint32_t>(count * sizeof(BiasType)), 0, 0, 0};
+        DataCopyPadExtParams<BiasType> padBias{false, 0, 0, BiasType(0)};
+        DataCopyPad(biasRawUB, biasGM[0], copyBias, padBias);
+        SetFlag<HardEvent::MTE2_V>(0);
+        WaitFlag<HardEvent::MTE2_V>(0);
+        if constexpr (std::is_same_v<BiasType, bfloat16_t>) {
+            // BF16: use existing Vector Cast helper (Cast<float, bfloat16_t, CAST_NONE>)
+            SpltCastBf16ToFp32Vec(biasFp32UB, biasRawUB, count);
+        } else {
+            // FP16: direct Vector Cast (Cast<float, half, CAST_NONE>)
+            Cast(biasFp32UB, biasRawUB, AscendC::RoundMode::CAST_NONE, count);
+            PipeBarrier<PIPE_V>();
+        }
+    }
+}
+
+// Allocate bias UB buffers and optionally load full bias vector from GM to FP32 UB.
+// Shared by SpltEpilogueImpl (non-fused) and SpltFusedEpilogueImpl (fused) to
+// eliminate duplicate bias init code (#2). Both paths set up the same
+// GlobalTensor + TBuf + LocalTensor + conditional SpltLoadBiasFullToFp32.
+// biasRawBuf is only allocated for non-float BiasType (FP16/BF16 Cast intermediate).
+template <typename BiasType>
+__aicore__ inline void SpltInitBiasBuffers(
+    GlobalTensor<BiasType>& biasVecGM,
+    TBuf<TPosition::VECCALC>& biasVecBuf,
+    TBuf<TPosition::VECCALC>& biasRawBuf,
+    LocalTensor<float>& biasVecUB,
+    TPipe& pipe,
+    uint64_t biasDevPtr, int64_t biasStride, int32_t m)
+{
+    biasVecGM.SetGlobalBuffer(reinterpret_cast<__gm__ BiasType*>(biasDevPtr),
+                               static_cast<uint64_t>(m));
+    pipe.InitBuffer(biasVecBuf, static_cast<uint32_t>(static_cast<size_t>(m) * sizeof(float)));
+    biasVecUB = biasVecBuf.Get<float>();
+    if constexpr (!std::is_same_v<BiasType, float>) {
+        pipe.InitBuffer(biasRawBuf, static_cast<uint32_t>(static_cast<size_t>(m) * sizeof(BiasType)));
+    }
+    if (biasStride == 0) {
+        // 所有 batch 共用同一 bias
+        SpltLoadBiasFullToFp32<BiasType>(biasVecUB, biasRawBuf, biasVecGM, m);
+    }
+}
+
 // Sub-helpers extracted from SpltEpilogueProcessChunk to reduce
 // NBNC (139->~45), cyclomatic complexity (36->~10), and depth (6->3).
 // Flag operations are preserved exactly from the original inline code.
@@ -567,6 +659,7 @@ __aicore__ inline void SpltEpilogueChunkApplyAlpha(
     LocalTensor<float>& dFp32UB, LocalTensor<float>& accUB, LocalTensor<float>& alphaVecUB,
     int64_t base, int32_t count, int32_t n, int32_t alphaVectorScaling, float alpha)
 {
+    if (n == 0) { return; }
     if (alphaVectorScaling == 1) {
         int32_t offset = 0;
         while (offset < count) {
@@ -595,6 +688,7 @@ __aicore__ inline void SpltEpilogueChunkApplyBetaVec(
     DataCopyExtParams& copyC, DataCopyPadExtParams<T>& padC,
     LocalTensor<float>& betaVecUB)
 {
+    if (n == 0) { return; }
     LocalTensor<T> cUB = cTBuf.Get<T>();
     DataCopyPad(cUB, cGM[base], copyC, padC);
     SetFlag<HardEvent::MTE2_V>(0);
@@ -658,6 +752,90 @@ __aicore__ inline void SpltEpilogueChunkApplyBetaScalar(
     Add(dFp32UB, dFp32UB, tempUB, static_cast<int32_t>(count));
 }
 
+// ============================================================================
+// bias + activation epilogue helpers.
+// Epilogue chain: SplitK reduce -> alpha -> beta*C -> bias -> activation -> Cast -> store D
+// bias 和 activation 在 FP32 域（dFp32UB）上操作。
+// ============================================================================
+
+// Apply bias to dFp32UB in the non-fused (chunk-based) path.
+// bias is per-row broadcast: chunk 可能跨行，逐行取出 bias[r] 标量，对该行片段做 Adds。
+// 仿 SpltEpilogueChunkApplyAlpha 的 per-row 分段模式。
+__aicore__ inline void SpltEpilogueChunkApplyBias(
+    LocalTensor<float>& dFp32UB, LocalTensor<float>& biasVecUB,
+    int64_t base, int32_t count, int32_t n)
+{
+    if (n == 0) { return; }
+    int32_t offset = 0;
+    while (offset < count) {
+        int32_t row = static_cast<int32_t>((base + offset) / n);
+        int64_t rowEndFlat = static_cast<int64_t>(row + 1) * n;
+        int64_t chunkEnd = base + count;
+        int32_t elemEnd = static_cast<int32_t>((rowEndFlat < chunkEnd) ? rowEndFlat : chunkEnd);
+        int32_t elemCount = elemEnd - static_cast<int32_t>(base + offset);
+        float bias_r = SpltGetScalarFromUB(biasVecUB, row);
+        Adds(dFp32UB[offset], dFp32UB[offset], bias_r, elemCount);
+        PipeBarrier<PIPE_V>();
+        offset += elemCount;
+    }
+}
+
+// Apply ReLU activation: D = min(upperBound, max(threshold, D)).
+// 在 FP32 域（dFp32UB）操作。count 为元素数。
+__aicore__ inline void SpltApplyReLU(
+    LocalTensor<float>& dFp32UB, int32_t count,
+    float reluThreshold, float reluUpperBound)
+{
+    Maxs(dFp32UB, dFp32UB, reluThreshold, count);
+    PipeBarrier<PIPE_V>();
+    Mins(dFp32UB, dFp32UB, reluUpperBound, count);
+    PipeBarrier<PIPE_V>();
+}
+
+// Apply GeLU activation (sigmoid equivalent, 11 steps with Exp clamp).
+// 输入 x = dFp32UB，输出回写 dFp32UB。geluTemp 复用 tempBuf。
+// 逐行执行（per-row, count=curN），geluTemp 需要一行大小 buffer。
+// Step 6 clamp z<=20 防 Exp 溢出（不改变 golden 语义，sigmoid(20)≈1.0）。
+// LocalTensor 按值传递（轻量级 handle，类似指针，避免临时对象无法绑定到非 const 引用）。
+__aicore__ inline void SpltApplyGeLU(
+    LocalTensor<float> dFp32UB, LocalTensor<float> geluTemp,
+    int32_t count, float geluScaling)
+{
+    // Step 1: geluTemp = x²
+    Mul(geluTemp, dFp32UB, dFp32UB, count);
+    PipeBarrier<PIPE_V>();
+    // Step 2: geluTemp = 0.044715 * x²
+    Muls(geluTemp, geluTemp, 0.044715f, count);
+    PipeBarrier<PIPE_V>();
+    // Step 3: geluTemp = 0.044715 * x³
+    Mul(geluTemp, geluTemp, dFp32UB, count);
+    PipeBarrier<PIPE_V>();
+    // Step 4: geluTemp = x + 0.044715 * x³
+    Add(geluTemp, geluTemp, dFp32UB, count);
+    PipeBarrier<PIPE_V>();
+    // Step 5: z = sqrt(8/π) * (x + 0.044715 * x³)
+    Muls(geluTemp, geluTemp, 1.5957691f, count);
+    PipeBarrier<PIPE_V>();
+    // Step 6: clamp z <= 20.0f 防 Exp 溢出
+    Mins(geluTemp, geluTemp, 20.0f, count);
+    PipeBarrier<PIPE_V>();
+    // Step 7: exp(z)
+    Exp(geluTemp, geluTemp, count);
+    PipeBarrier<PIPE_V>();
+    // Step 8: x = geluScaling * x
+    Muls(dFp32UB, dFp32UB, geluScaling, count);
+    PipeBarrier<PIPE_V>();
+    // Step 9: x = geluScaling * x * exp(z)
+    Mul(dFp32UB, dFp32UB, geluTemp, count);
+    PipeBarrier<PIPE_V>();
+    // Step 10: geluTemp = 1 + exp(z)
+    Adds(geluTemp, geluTemp, 1.0f, count);
+    PipeBarrier<PIPE_V>();
+    // Step 11: D = geluScaling * x * exp(z) / (1 + exp(z))
+    Div(dFp32UB, dFp32UB, geluTemp, count);
+    PipeBarrier<PIPE_V>();
+}
+
 // Cast FP32 -> OutType and store to GM (UB -> GM via DataCopyPad).
 template <typename OutType>
 __aicore__ inline void SpltEpilogueChunkStoreOutput(
@@ -706,11 +884,17 @@ __aicore__ inline void SpltEpilogueProcessChunk(
     int64_t base, int32_t count, int32_t splitK, float alpha, float beta,
     int64_t totalElem, int32_t n,
     int32_t alphaVectorScaling, int32_t betaVectorScaling,
-    LocalTensor<float>& alphaVecUB, LocalTensor<float>& betaVecUB)
+    LocalTensor<float>& alphaVecUB, LocalTensor<float>& betaVecUB,
+    LocalTensor<float>& biasVecUB,
+    uint64_t biasDevPtr, int32_t activationType,
+    float reluThreshold, float reluUpperBound, float geluScaling)
 {
     using TempType = typename SpltL0CTypeTrait<T>::type;
+    // INT32 fast path: alpha=1+beta=0+无 bias+无 activation 时直接 int32 累加输出
+    // 有 bias 或 activation 时必须走 FP32 域（bias Adds / GeLU Exp 等在 FP32 域操作）
     if constexpr (!std::is_same_v<TempType, float>) {
-        if (alphaVectorScaling == 0 && alpha == 1.0f && beta == 0.0f) {
+        if (alphaVectorScaling == 0 && alpha == 1.0f && beta == 0.0f
+            && biasDevPtr == 0 && activationType == 0) {
             SpltEpilogueInt32AccPath<OutType>(accUB, tempUB, dTBuf, halfBuf, tempGM, dGM,
                                               base, count, splitK, totalElem);
             return;
@@ -738,6 +922,17 @@ __aicore__ inline void SpltEpilogueProcessChunk(
             SpltEpilogueChunkApplyBetaScalar<T>(dFp32UB, tempUB, cTBuf, cFp32Buf,
                                                  cGM, base, count, copyC, padC, beta);
         }
+    }
+    // ⑤ bias → 累加到 dFp32UB
+    if (biasDevPtr != 0) {
+        SpltEpilogueChunkApplyBias(dFp32UB, biasVecUB, base, count, n);
+    }
+    // ⑥ activation
+    if (activationType == 1) {
+        SpltApplyReLU(dFp32UB, static_cast<int32_t>(count), reluThreshold, reluUpperBound);
+    } else if (activationType == 2) {
+        // 非融合路径：chunk 级批量执行 GeLU，geluTemp 复用 tempUB
+        SpltApplyGeLU(dFp32UB, tempUB, static_cast<int32_t>(count), geluScaling);
     }
     SpltEpilogueChunkStoreOutput<OutType>(dFp32UB, dTBuf, halfBuf, dGM,
                                                base, count, copyAcc, copyOut);
@@ -827,6 +1022,88 @@ __aicore__ inline void SpltEpilogueInitBuffers(
     }
 }
 
+// Set per-batch GM pointers for SpltEpilogueBatchLoop.
+// Offsets temp/c/d/bias GM by batch stride; reloads bias when biasStride != 0.
+template <typename T, typename OutType>
+__aicore__ inline void SpltEpilogueOffsetBatchGM(
+    const AclsparseltTilingData& td,
+    GlobalTensor<typename SpltL0CTypeTrait<T>::type>& tempGM,
+    GlobalTensor<T>& cGM, GlobalTensor<OutType>& dGM,
+    GlobalTensor<SpltBiasDType<T>>& biasVecGM,
+    LocalTensor<float>& biasVecUB, TBuf<TPosition::VECCALC>& biasRawBuf,
+    GM_ADDR tempGm, GM_ADDR cGm, GM_ADDR dGm,
+    int32_t b, int32_t m, int64_t totalElem)
+{
+    using TempType = typename SpltL0CTypeTrait<T>::type;
+    using BiasType = SpltBiasDType<T>;
+    const int64_t tempBatchElems = static_cast<int64_t>(td.splitK) * totalElem;
+    tempGM.SetGlobalBuffer(reinterpret_cast<__gm__ TempType*>(tempGm)
+                           + static_cast<int64_t>(b) * tempBatchElems,
+                           static_cast<uint64_t>(tempBatchElems));
+    cGM.SetGlobalBuffer(reinterpret_cast<__gm__ T*>(cGm)
+                        + static_cast<int64_t>(b) * td.batchStrideC,
+                        static_cast<uint64_t>(totalElem));
+    dGM.SetGlobalBuffer(reinterpret_cast<__gm__ OutType*>(dGm)
+                        + static_cast<int64_t>(b) * td.batchStrideD,
+                        static_cast<uint64_t>(totalElem));
+    if (td.biasDevPtr != 0 && td.biasStride != 0) {
+        biasVecGM.SetGlobalBuffer(reinterpret_cast<__gm__ BiasType*>(td.biasDevPtr)
+                                  + static_cast<int64_t>(b) * td.biasStride,
+                                  static_cast<uint64_t>(m));
+        SpltLoadBiasFullToFp32<BiasType>(biasVecUB, biasRawBuf, biasVecGM, m);
+    }
+}
+
+// Batch loop for SpltEpilogueImpl: iterates batches, sets per-batch GM pointers,
+// reloads bias if needed, and runs the chunk processing loop.
+// Extracted to reduce NBNC of SpltEpilogueImpl (#8, was 86, target<=50).
+// Flag operations and loop order preserved exactly.
+template <typename T, typename OutType>
+__aicore__ inline void SpltEpilogueBatchLoop(
+    const AclsparseltTilingData& td,
+    GlobalTensor<typename SpltL0CTypeTrait<T>::type>& tempGM,
+    GlobalTensor<T>& cGM, GlobalTensor<OutType>& dGM,
+    GlobalTensor<SpltBiasDType<T>>& biasVecGM,
+    LocalTensor<float>& biasVecUB, TBuf<TPosition::VECCALC>& biasRawBuf,
+    LocalTensor<float>& accUB, LocalTensor<float>& tempUB, LocalTensor<float>& dFp32UB,
+    TBuf<TPosition::VECCALC>& cTBuf, TBuf<TPosition::VECCALC>& cFp32Buf,
+    TBuf<TPosition::VECCALC>& dTBuf, TBuf<TPosition::VECCALC>& halfBuf,
+    LocalTensor<float>& alphaVecUB, LocalTensor<float>& betaVecUB,
+    GM_ADDR tempGm, GM_ADDR cGm, GM_ADDR dGm, int32_t m,
+    int32_t alphaVectorScaling, int32_t betaVectorScaling, float beta)
+{
+    const int32_t n = td.n;
+    const int32_t splitK = td.splitK;
+    const float alpha = td.alpha;
+    const uint64_t biasDevPtr = td.biasDevPtr;
+    const int32_t activationType = td.activationType;
+    const float reluThreshold = td.reluThreshold;
+    const float reluUpperBound = td.reluUpperBound;
+    const float geluScaling = td.geluScaling;
+    const int32_t numBatches = (td.numBatches > 0) ? td.numBatches : 1;
+    const int32_t blockId = static_cast<int32_t>(GetBlockIdx());
+    const int32_t blockNum = static_cast<int32_t>(GetBlockNum());
+    const int64_t totalElem = static_cast<int64_t>(m) * static_cast<int64_t>(n);
+    constexpr int32_t CHUNK = 256;
+
+    for (int32_t b = 0; b < numBatches; ++b) {
+        SpltEpilogueOffsetBatchGM<T, OutType>(td, tempGM, cGM, dGM, biasVecGM,
+                                              biasVecUB, biasRawBuf,
+                                              tempGm, cGm, dGm, b, m, totalElem);
+
+        for (int64_t base = static_cast<int64_t>(blockId) * CHUNK; base < totalElem;
+             base += static_cast<int64_t>(blockNum) * CHUNK) {
+            int32_t count = (base + CHUNK <= totalElem) ? CHUNK : static_cast<int32_t>(totalElem - base);
+            SpltEpilogueProcessChunk<T, OutType>(accUB, tempUB, dFp32UB, cTBuf, cFp32Buf, dTBuf, halfBuf,
+                                        tempGM, cGM, dGM, base, count, splitK, alpha, beta,
+                                        totalElem, n, alphaVectorScaling, betaVectorScaling,
+                                        alphaVecUB, betaVecUB,
+                                        biasVecUB, biasDevPtr, activationType,
+                                        reluThreshold, reluUpperBound, geluScaling);
+        }
+    }
+}
+
 // ============================================================================
 // v2: SpltEpilogueImpl templated on (T, OutType). AccType is always float
 // (INT8 int32 temp is Cast to float on load). Non-INT8 path: OutType == T.
@@ -834,36 +1111,36 @@ template <typename T, typename OutType = T>
 __aicore__ inline void SpltEpilogueImpl(GM_ADDR tempGm, GM_ADDR cGm, GM_ADDR dGm, GM_ADDR tilingGm)
 {
     using TempType = typename SpltL0CTypeTrait<T>::type;  // float or int32_t
+    using BiasType = SpltBiasDType<T>;  // bias dtype: T for FP32/FP16/BF16, float for INT8
     const AclsparseltTilingData td = splt_load_tiling(tilingGm);
     const int32_t m = td.m;
-    const int32_t n = td.n;
-    const int32_t splitK = td.splitK;
-    const float alpha = td.alpha;
     const float beta = td.beta;
     const int32_t alphaVectorScaling = td.alphaVectorScaling;
     const int32_t betaVectorScaling = td.betaVectorScaling;
-    const int32_t blockId = static_cast<int32_t>(GetBlockIdx());
-    const int32_t blockNum = static_cast<int32_t>(GetBlockNum());
-
-    const int64_t totalElem = static_cast<int64_t>(m) * static_cast<int64_t>(n);
+    const uint64_t biasDevPtr = td.biasDevPtr;
+    const int64_t biasStride = td.biasStride;
 
     GlobalTensor<TempType> tempGM;
-    tempGM.SetGlobalBuffer(reinterpret_cast<__gm__ TempType*>(tempGm),
-                           static_cast<uint64_t>(totalElem) * static_cast<uint64_t>(splitK));
     GlobalTensor<T> cGM;
-    cGM.SetGlobalBuffer(reinterpret_cast<__gm__ T*>(cGm), static_cast<uint64_t>(totalElem));
     GlobalTensor<OutType> dGM;
-    dGM.SetGlobalBuffer(reinterpret_cast<__gm__ OutType*>(dGm), static_cast<uint64_t>(totalElem));
 
     GlobalTensor<float> alphaVecGM;
     GlobalTensor<float> betaVecGM;
     SpltInitScalingGM(alphaVecGM, betaVecGM, td.alphaDevPtr, td.betaDevPtr,
                        m, alphaVectorScaling, betaVectorScaling);
 
-    constexpr int32_t CHUNK = 256;
+    GlobalTensor<BiasType> biasVecGM;
+    TBuf<TPosition::VECCALC> biasVecBuf;
+    TBuf<TPosition::VECCALC> biasRawBuf;
+    LocalTensor<float> biasVecUB;
+    TPipe pipe;
+    if (biasDevPtr != 0) {
+        SpltInitBiasBuffers<BiasType>(biasVecGM, biasVecBuf, biasRawBuf, biasVecUB,
+                                       pipe, biasDevPtr, biasStride, m);
+    }
+
     TBuf<TPosition::VECCALC> accBuf, tempBuf, cTBuf, cFp32Buf, dFp32Buf, dTBuf, halfBuf;
     TBuf<TPosition::VECCALC> alphaVecBuf, betaVecBuf;
-    TPipe pipe;
     SpltEpilogueInitBuffers<T, OutType>(pipe, accBuf, tempBuf, dFp32Buf, dTBuf,
                                          cTBuf, cFp32Buf, halfBuf, beta, betaVectorScaling);
     LocalTensor<float> alphaVecUB;
@@ -876,13 +1153,9 @@ __aicore__ inline void SpltEpilogueImpl(GM_ADDR tempGm, GM_ADDR cGm, GM_ADDR dGm
     LocalTensor<float> tempUB = tempBuf.Get<float>();
     LocalTensor<float> dFp32UB = dFp32Buf.Get<float>();
 
-    for (int64_t base = static_cast<int64_t>(blockId) * CHUNK; base < totalElem; base += static_cast<int64_t>(blockNum) * CHUNK) {
-        int32_t count = (base + CHUNK <= totalElem) ? CHUNK : static_cast<int32_t>(totalElem - base);
-        SpltEpilogueProcessChunk<T, OutType>(accUB, tempUB, dFp32UB, cTBuf, cFp32Buf, dTBuf, halfBuf,
-                                    tempGM, cGM, dGM, base, count, splitK, alpha, beta,
-                                    totalElem, n, alphaVectorScaling, betaVectorScaling,
-                                    alphaVecUB, betaVecUB);
-    }
+    SpltEpilogueBatchLoop<T, OutType>(td, tempGM, cGM, dGM, biasVecGM, biasVecUB, biasRawBuf,
+        accUB, tempUB, dFp32UB, cTBuf, cFp32Buf, dTBuf, halfBuf, alphaVecUB, betaVecUB,
+        tempGm, cGm, dGm, m, alphaVectorScaling, betaVectorScaling, beta);
 }
 
 // ============================================================================
@@ -943,7 +1216,7 @@ __aicore__ inline void SpltFusedMatmulCubeTileLoop(
         const uint64_t curNAlign = static_cast<uint64_t>((curN + SPLT_L0C_C0 - 1) / SPLT_L0C_C0) * SPLT_L0C_C0;
 
         auto gmBlockARow = gmA.Slice(Te::MakeCoord(mPos, 0), Te::MakeShape(curM, k));
-        // [TRANSPOSE] B slice is the same for both paths (DNExt GM layout handles transB).
+        // B slice is the same for both paths (DNExt GM layout handles transB).
         auto gmBlockBCol = gmB.Slice(Te::MakeCoord(0, nPos), Te::MakeShape(k, curN));
         // v2: L0C type follows SpltL0CTypeTrait (float for FP32/FP16/BF16, int32_t for INT8).
         auto tensorL0C = Te::MakeTensor(Te::MakeMemPtr<Te::Location::L0C, typename SpltL0CTypeTrait<T>::type>(0),
@@ -1022,6 +1295,8 @@ __aicore__ inline void SpltFusedMatmulCubeImpl(GM_ADDR aPrunedGm, GM_ADDR bGm,
     const int32_t k = td.k;
     const int32_t baseM = td.baseM;
     const int32_t baseN = td.baseN;
+    // batch 参数
+    const int32_t numBatches = (td.numBatches > 0) ? td.numBatches : 1;
 
     const int32_t blockId = static_cast<int32_t>(GetBlockIdx());
     const int32_t blockNum = static_cast<int32_t>(GetBlockNum());
@@ -1029,6 +1304,7 @@ __aicore__ inline void SpltFusedMatmulCubeImpl(GM_ADDR aPrunedGm, GM_ADDR bGm,
     const int32_t nTiles = (n + baseN - 1) / baseN;
     // Use int64_t to prevent overflow when mTiles*nTiles
     // approaches INT32_MAX (large m, n). Consistent with non-Fused path.
+    // 每个 batch 内的 totalTiles（batch 循环在外层）
     const int64_t totalTiles = static_cast<int64_t>(mTiles) * static_cast<int64_t>(nTiles);
     if (totalTiles <= 0) { return; }
 
@@ -1036,28 +1312,40 @@ __aicore__ inline void SpltFusedMatmulCubeImpl(GM_ADDR aPrunedGm, GM_ADDR bGm,
     // DNExt/NDExt produce different types, so branch at call site for both A and B.
     const L1BufferConfig l1cfg = InitL1DoubleBuffer<T>(baseM, baseN, td.kL1Size);
     SetMMLayoutTransform(true);
-    uint32_t localTileIdx = 0;
-    if (td.sparseTrans != 0) {
-        auto gmA = Te::MakeTensor(Te::MakeMemPtr<Te::Location::GM>(reinterpret_cast<__gm__ T*>(aPrunedGm)),
-                              Te::MakeFrameLayout<Te::DNExtLayoutPtn, Te::LayoutTraitDefault<T>>(m, k));
-        SpltFusedMatmulCubeDispatchB<T>(td, gmA, bGm, l1cfg, blockId, blockNum,
-                                        nTiles, totalTiles, localTileIdx);
-    } else {
-        auto gmA = Te::MakeTensor(Te::MakeMemPtr<Te::Location::GM>(reinterpret_cast<__gm__ T*>(aPrunedGm)),
-                              Te::MakeFrameLayout<Te::NDExtLayoutPtn, Te::LayoutTraitDefault<T>>(m, k));
-        SpltFusedMatmulCubeDispatchB<T>(td, gmA, bGm, l1cfg, blockId, blockNum,
-                                        nTiles, totalTiles, localTileIdx);
+    // batch 外循环（GM 指针按 batchStride 偏移）
+    // localTileIdx 每 batch 重置为 0，与 AIV 侧 SpltFusedEpilogueTileLoop
+    // 的 per-batch 重置对齐。此前 localTileIdx 在循环外声明并跨 batch 累加，
+    // 导致 batch 边界处 AIC 奇偶翻转而 AIV 重置为 0，下一个 batch 首个 tile 的
+    // AIC→AIV 路由 flag 与 AIV 等待 flag 错配 → CrossCore 死锁。
+    for (int32_t b = 0; b < numBatches; ++b) {
+        uint32_t localTileIdx = 0;  // 每 batch 重置，与 AIV 侧对齐
+        // GM 指针按 batchStride 偏移（batchStride 以元素数为单位）
+        __gm__ T* aBase = reinterpret_cast<__gm__ T*>(aPrunedGm)
+                          + static_cast<int64_t>(b) * td.batchStrideA;
+        GM_ADDR bBatchGm = bGm + static_cast<int64_t>(b) * td.batchStrideB * static_cast<int64_t>(sizeof(T));
+        if (td.sparseTrans != 0) {
+            auto gmA = Te::MakeTensor(Te::MakeMemPtr<Te::Location::GM>(aBase),
+                                  Te::MakeFrameLayout<Te::DNExtLayoutPtn, Te::LayoutTraitDefault<T>>(m, k));
+            SpltFusedMatmulCubeDispatchB<T>(td, gmA, bBatchGm, l1cfg, blockId, blockNum,
+                                            nTiles, totalTiles, localTileIdx);
+        } else {
+            auto gmA = Te::MakeTensor(Te::MakeMemPtr<Te::Location::GM>(aBase),
+                                  Te::MakeFrameLayout<Te::NDExtLayoutPtn, Te::LayoutTraitDefault<T>>(m, k));
+            SpltFusedMatmulCubeDispatchB<T>(td, gmA, bBatchGm, l1cfg, blockId, blockNum,
+                                            nTiles, totalTiles, localTileIdx);
+        }
+        // CrossCore drain 每 batch 执行：等待本 batch 最后一个 tile 的
+        // 目标 AIV 释放 UB（AIV 处理完后 SetFlag，AIC 这里 WaitFlag 消费）。
+        // 每 batch 独立 drain，避免残留 flag 跨 batch 累积。
+        if (localTileIdx > 0) {
+            const bool lastToAiv1 = ((localTileIdx - 1) & 0x1) == 1;
+            const uint16_t lastAivWaitFlag = lastToAiv1 ? SPLT_AIV1_SYNC_AIC : SPLT_AIV0_SYNC_AIC;
+            CrossCoreWaitFlag<SPLT_SYNC_MODE_4, PIPE_FIX>(lastAivWaitFlag);
+        }
     }
 
     // Drain L1 double-buffer flags.
     DrainCubeFlags();
-
-    // Drain CrossCore: wait for target AIV of the last tile.
-    if (localTileIdx > 0) {
-        const bool lastToAiv1 = ((localTileIdx - 1) & 0x1) == 1;
-        const uint16_t lastAivWaitFlag = lastToAiv1 ? SPLT_AIV1_SYNC_AIC : SPLT_AIV0_SYNC_AIC;
-        CrossCoreWaitFlag<SPLT_SYNC_MODE_4, PIPE_FIX>(lastAivWaitFlag);
-    }
 
     SetMMLayoutTransform(false);
 }
@@ -1296,22 +1584,22 @@ __aicore__ inline void SpltFusedEpilogueBetaC(
     }
 }
 
-// General path: D = alpha*acc + beta*C -> output.
-// v2: INT8 path (AccType=int32_t) requires Cast int32 -> float before Muls.
-// Added halfBuf param for float→half→int8 two-step Cast.
-template <typename AccType, typename OutType, typename CType = OutType>
-__aicore__ inline void SpltFusedEpilogueGeneralPath(
-    LocalTensor<AccType>& accUB, GlobalTensor<CType>& cGM, GlobalTensor<OutType>& dGM,
-    TBuf<TPosition::VECCALC>& dFp32Buf, TBuf<TPosition::VECCALC>& cTBuf,
-    TBuf<TPosition::VECCALC>& cFp32Buf, TBuf<TPosition::VECCALC>& tempBuf,
-    TBuf<TPosition::VECCALC>& dTBuf, TBuf<TPosition::VECCALC>& halfBuf,
-    int32_t mPos, int32_t nPos, int32_t curM, int32_t curN,
-    uint64_t curMAlign, uint64_t curNAlign, int32_t n,
-    float alpha, float beta,
-    int32_t alphaVectorScaling, int32_t betaVectorScaling,
-    LocalTensor<float>& alphaVecUB, LocalTensor<float>& betaVecUB)
+// ----------------------------------------------------------------------------
+// Sub-helpers extracted from SpltFusedEpilogueGeneralPath to reduce CCN (was 26)
+// and NBNC (was 95). Each helper preserves the exact flag/pipe operations.
+// ----------------------------------------------------------------------------
+
+// Apply alpha scaling to accumulator -> dFp32UB.
+// Handles both scalar alpha and per-row vector alpha, for both float and
+// int32 accumulators (INT8 requires Cast int32->float before Muls).
+template <typename AccType>
+__aicore__ inline void SpltFusedEpilogueApplyAlpha(
+    LocalTensor<float>& dFp32UB, LocalTensor<AccType>& accUB,
+    LocalTensor<float>& alphaVecUB,
+    int32_t mPos, int32_t curM, int32_t curN,
+    uint64_t curMAlign, uint64_t curNAlign,
+    float alpha, int32_t alphaVectorScaling)
 {
-    LocalTensor<float> dFp32UB = dFp32Buf.Get<float>();
     if (alphaVectorScaling == 1) {
         if constexpr (std::is_same_v<AccType, float>) {
             for (int32_t r = 0; r < curM; ++r) {
@@ -1337,15 +1625,139 @@ __aicore__ inline void SpltFusedEpilogueGeneralPath(
             Cast(dFp32UB, accUB, AscendC::RoundMode::CAST_NONE,
                  static_cast<int32_t>(curMAlign * curNAlign));
             PipeBarrier<PIPE_V>();
-            
             Muls(dFp32UB, dFp32UB, alpha, static_cast<int32_t>(curMAlign * curNAlign));
         }
     }
+}
+
+// Load non-FP32 bias chunk from GM and Cast to FP32.
+// Used by SpltFusedEpilogueApplyBias for FP16/BF16 bias types.
+template <typename BiasType>
+__aicore__ inline void SpltCastBiasChunkToFp32(
+    LocalTensor<BiasType>& biasRawChunkUB, LocalTensor<float>& biasChunkUB,
+    GlobalTensor<BiasType>& biasVecGM, int32_t mPos, int32_t curM)
+{
+    DataCopyExtParams copyBiasChunk{1,
+        static_cast<uint32_t>(curM * sizeof(BiasType)), 0, 0, 0};
+    DataCopyPadExtParams<BiasType> padBiasChunk{false, 0, 0, BiasType(0)};
+    DataCopyPad(biasRawChunkUB, biasVecGM[mPos], copyBiasChunk, padBiasChunk);
+    SetFlag<HardEvent::MTE2_V>(0);
+    WaitFlag<HardEvent::MTE2_V>(0);
+    if constexpr (std::is_same_v<BiasType, bfloat16_t>) {
+        SpltCastBf16ToFp32Vec(biasChunkUB, biasRawChunkUB, curM);
+    } else {
+        Cast(biasChunkUB, biasRawChunkUB, AscendC::RoundMode::CAST_NONE, curM);
+        PipeBarrier<PIPE_V>();
+    }
+}
+
+// Apply bias to dFp32UB in the fused general path.
+// Handles both per-chunk (biasChunkMode==1: load curM rows from GM) and
+// full-load (biasChunkMode==0: biasVecUB already loaded) modes.
+// For FP16/BF16 bias, raw data is Cast to FP32 before per-row Adds.
+template <typename CType>
+__aicore__ inline void SpltFusedEpilogueApplyBias(
+    LocalTensor<float>& dFp32UB,
+    TBuf<TPosition::VECCALC>& tempBuf, TBuf<TPosition::VECCALC>& biasRawBuf,
+    LocalTensor<float>& biasVecUB, GlobalTensor<SpltBiasDType<CType>>& biasVecGM,
+    int32_t mPos, int32_t curM, int32_t curN, uint64_t curNAlign,
+    uint64_t biasDevPtr, int32_t biasChunkMode)
+{
+    using BiasType = SpltBiasDType<CType>;
+    if (biasDevPtr == 0) { return; }
+    if (biasChunkMode == 1) {
+        if constexpr (std::is_same_v<BiasType, float>) {
+            // FP32/INT8: bias is FP32 in GM, load directly to tempBuf
+            LocalTensor<float> biasChunkUB = tempBuf.Get<float>();
+            DataCopyExtParams copyBiasChunk{1,
+                static_cast<uint32_t>(curM * sizeof(float)), 0, 0, 0};
+            DataCopyPadExtParams<float> padBiasChunk{false, 0, 0, 0.0f};
+            DataCopyPad(biasChunkUB, biasVecGM[mPos], copyBiasChunk, padBiasChunk);
+            SetFlag<HardEvent::MTE2_V>(0);
+            WaitFlag<HardEvent::MTE2_V>(0);
+            for (int32_t r = 0; r < curM; ++r) {
+                float bias_r = SpltGetScalarFromUB(biasChunkUB, r);
+                Adds(dFp32UB[r * curNAlign], dFp32UB[r * curNAlign], bias_r, curN);
+            }
+            PipeBarrier<PIPE_V>();
+        } else {
+            // FP16/BF16: load raw bias, Cast to FP32, per-row Adds
+            LocalTensor<BiasType> biasRawChunkUB = biasRawBuf.Get<BiasType>();
+            LocalTensor<float> biasChunkUB = tempBuf.Get<float>();
+            SpltCastBiasChunkToFp32<BiasType>(biasRawChunkUB, biasChunkUB, biasVecGM, mPos, curM);
+            for (int32_t r = 0; r < curM; ++r) {
+                float bias_r = SpltGetScalarFromUB(biasChunkUB, r);
+                Adds(dFp32UB[r * curNAlign], dFp32UB[r * curNAlign], bias_r, curN);
+            }
+            PipeBarrier<PIPE_V>();
+        }
+    } else {
+        // 全量加载：biasVecUB 已加载 (FP32), per-row GetValue + Adds
+        for (int32_t r = 0; r < curM; ++r) {
+            float bias_r = SpltGetScalarFromUB(biasVecUB, mPos + r);
+            Adds(dFp32UB[r * curNAlign], dFp32UB[r * curNAlign], bias_r, curN);
+        }
+        PipeBarrier<PIPE_V>();
+    }
+}
+
+// Apply activation (ReLU or GeLU) to dFp32UB in the fused general path.
+// ReLU: batch execution over full tile. GeLU: per-row with tempBuf reuse.
+__aicore__ inline void SpltFusedEpilogueApplyActivation(
+    LocalTensor<float>& dFp32UB, TBuf<TPosition::VECCALC>& tempBuf,
+    int32_t curM, int32_t curN, uint64_t curMAlign, uint64_t curNAlign,
+    int32_t activationType,
+    float reluThreshold, float reluUpperBound, float geluScaling)
+{
+    if (activationType == 1) {
+        // ReLU: 全 tile 批量执行
+        SpltApplyReLU(dFp32UB, static_cast<int32_t>(curMAlign * curNAlign),
+                       reluThreshold, reluUpperBound);
+    } else if (activationType == 2) {
+        // GeLU: 逐行执行，geluTemp 复用 tempBuf（一行大小 = maxNAlign×4）
+        LocalTensor<float> geluTemp = tempBuf.Get<float>();
+        for (int32_t r = 0; r < curM; ++r) {
+            SpltApplyGeLU(dFp32UB[r * curNAlign], geluTemp, curN, geluScaling);
+        }
+    }
+}
+
+// General path: D = alpha*acc + beta*C + bias + activation -> output.
+// v2: INT8 path (AccType=int32_t) requires Cast int32 -> float before Muls.
+// Added halfBuf param for float→half→int8 two-step Cast.
+// bias + activation 插入在 beta*C 之后、Cast+output 之前。
+template <typename AccType, typename OutType, typename CType = OutType>
+__aicore__ inline void SpltFusedEpilogueGeneralPath(
+    LocalTensor<AccType>& accUB, GlobalTensor<CType>& cGM, GlobalTensor<OutType>& dGM,
+    TBuf<TPosition::VECCALC>& dFp32Buf, TBuf<TPosition::VECCALC>& cTBuf,
+    TBuf<TPosition::VECCALC>& cFp32Buf, TBuf<TPosition::VECCALC>& tempBuf,
+    TBuf<TPosition::VECCALC>& dTBuf, TBuf<TPosition::VECCALC>& halfBuf,
+    TBuf<TPosition::VECCALC>& biasRawBuf,
+    int32_t mPos, int32_t nPos, int32_t curM, int32_t curN,
+    uint64_t curMAlign, uint64_t curNAlign, int32_t n,
+    float alpha, float beta,
+    int32_t alphaVectorScaling, int32_t betaVectorScaling,
+    LocalTensor<float>& alphaVecUB, LocalTensor<float>& betaVecUB,
+    LocalTensor<float>& biasVecUB, GlobalTensor<SpltBiasDType<CType>>& biasVecGM,
+    uint64_t biasDevPtr, int32_t biasChunkMode,
+    int32_t activationType,
+    float reluThreshold, float reluUpperBound, float geluScaling)
+{
+    using BiasType = SpltBiasDType<CType>;
+    LocalTensor<float> dFp32UB = dFp32Buf.Get<float>();
+    SpltFusedEpilogueApplyAlpha<AccType>(dFp32UB, accUB, alphaVecUB,
+        mPos, curM, curN, curMAlign, curNAlign, alpha, alphaVectorScaling);
     if (betaVectorScaling == 1 || beta != 0.0f) {
         SpltFusedEpilogueBetaC<AccType, OutType, CType>(dFp32UB, cGM, cTBuf, cFp32Buf, tempBuf,
                                   mPos, nPos, curM, curN, curNAlign, n, beta,
                                   betaVectorScaling, betaVecUB);
     }
+    // ③ bias → 累加到 dFp32UB
+    SpltFusedEpilogueApplyBias<CType>(dFp32UB, tempBuf, biasRawBuf, biasVecUB, biasVecGM,
+        mPos, curM, curN, curNAlign, biasDevPtr, biasChunkMode);
+    // ④ activation
+    SpltFusedEpilogueApplyActivation(dFp32UB, tempBuf, curM, curN, curMAlign, curNAlign,
+        activationType, reluThreshold, reluUpperBound, geluScaling);
     if constexpr (std::is_same_v<OutType, float>) {
         SpltFusedEpilogueOutputFp32(dFp32UB, dGM, mPos, nPos, curM, curN, curNAlign, n);
     } else {
@@ -1376,10 +1788,14 @@ __aicore__ inline void SpltFusedEpilogueTileLoop(
     TBuf<TPosition::VECCALC>& accBuf, TBuf<TPosition::VECCALC>& dFp32Buf,
     TBuf<TPosition::VECCALC>& dTBuf, TBuf<TPosition::VECCALC>& cTBuf,
     TBuf<TPosition::VECCALC>& cFp32Buf, TBuf<TPosition::VECCALC>& tempBuf,
-    TBuf<TPosition::VECCALC>& halfBuf,
+    TBuf<TPosition::VECCALC>& halfBuf, TBuf<TPosition::VECCALC>& biasRawBuf,
     float alpha, float beta,
     int32_t alphaVectorScaling, int32_t betaVectorScaling,
-    LocalTensor<float>& alphaVecUB, LocalTensor<float>& betaVecUB)
+    LocalTensor<float>& alphaVecUB, LocalTensor<float>& betaVecUB,
+    LocalTensor<float>& biasVecUB, GlobalTensor<SpltBiasDType<CType>>& biasVecGM,
+    uint64_t biasDevPtr, int32_t biasChunkMode,
+    int32_t activationType,
+    float reluThreshold, float reluUpperBound, float geluScaling)
 {
     const int32_t m = td.m;
     const int32_t n = td.n;
@@ -1412,20 +1828,24 @@ __aicore__ inline void SpltFusedEpilogueTileLoop(
         // 2. Process the full tile (this AIV handles ALL curM rows).
         LocalTensor<AccType> accUB = accBuf.Get<AccType>();
 
-        const bool isFastPath = (alphaVectorScaling == 0 && alpha == 1.0f && beta == 0.0f);
+        // FastPath 条件更新：有 bias 或 activation 时走 GeneralPath（方式 A，见 §3.2）
+        const bool isFastPath = (alphaVectorScaling == 0 && alpha == 1.0f && beta == 0.0f
+                                 && biasDevPtr == 0 && activationType == 0);
         if (isFastPath) {
-            // Fast path: alpha=1, beta=0 -> Cast acc -> OutType and write to GM.
+            // Fast path: alpha=1, beta=0, no bias, no activation -> Cast acc -> OutType and write to GM.
             // Pass curMAlign so INT8 Cast covers the full tile.
             // Pass halfBuf for float→half→int8 two-step Cast.
             SpltFusedEpilogueFastPath<AccType, OutType>(accUB, dGM, dTBuf, dFp32Buf, halfBuf,
                                          mPos, nPos, curM, curN, curMAlign, curNAlign, n);
         } else {
-            // General path: D = alpha*acc + beta*C.
+            // General path: D = alpha*acc + beta*C + bias + activation.
             SpltFusedEpilogueGeneralPath<AccType, OutType, CType>(accUB, cGM, dGM,
-                dFp32Buf, cTBuf, cFp32Buf, tempBuf, dTBuf, halfBuf,
+                dFp32Buf, cTBuf, cFp32Buf, tempBuf, dTBuf, halfBuf, biasRawBuf,
                 mPos, nPos, curM, curN, curMAlign, curNAlign, n,
                 alpha, beta, alphaVectorScaling, betaVectorScaling,
-                alphaVecUB, betaVecUB);
+                alphaVecUB, betaVecUB,
+                biasVecUB, biasVecGM, biasDevPtr, biasChunkMode,
+                activationType, reluThreshold, reluUpperBound, geluScaling);
         }
 
         // 3. Notify AIC that this AIV is done with the UB slot.
@@ -1445,10 +1865,13 @@ __aicore__ inline void SpltFusedEpilogueInitBuffers(
     TBuf<TPosition::VECCALC>& halfBuf,
     uint64_t maxMAlign, uint64_t maxNAlign,
     float alpha, float beta,
-    int32_t alphaVectorScaling, int32_t betaVectorScaling)
+    int32_t alphaVectorScaling, int32_t betaVectorScaling,
+    uint64_t biasDevPtr, int32_t biasChunkMode, int32_t activationType)
 {
     using AccType = typename SpltL0CTypeTrait<T>::type;
-    const bool isFastPath = (alphaVectorScaling == 0 && alpha == 1.0f && beta == 0.0f);
+    // FastPath 条件——有 bias 或 activation 时走 GeneralPath
+    const bool isFastPath = (alphaVectorScaling == 0 && alpha == 1.0f && beta == 0.0f
+                             && biasDevPtr == 0 && activationType == 0);
     pipe.InitBuffer(accBuf, static_cast<uint32_t>(maxMAlign * maxNAlign * sizeof(AccType)));
     if (!isFastPath) {
         pipe.InitBuffer(dFp32Buf, static_cast<uint32_t>(maxMAlign * maxNAlign * sizeof(float)));
@@ -1464,12 +1887,22 @@ __aicore__ inline void SpltFusedEpilogueInitBuffers(
     if constexpr (std::is_same_v<OutType, int8_t>) {
         pipe.InitBuffer(halfBuf, static_cast<uint32_t>(maxNAlign * sizeof(half)));
     }
-    if (betaVectorScaling == 1 || beta != 0.0f) {
+    // tempBuf/cTBuf/cFp32Buf 分配条件扩展
+    // tempBuf: beta*C temp | biasChunkUB (biasChunkMode==1, dtype=BiasType) | geluTemp (activationType==2)
+    // cTBuf: C load (beta!=0)
+    // cFp32Buf: C Cast (beta!=0, T!=float)
+    const bool needTempBuf = (betaVectorScaling == 1 || beta != 0.0f)
+        || (biasDevPtr != 0 && biasChunkMode == 1)
+        || (activationType == 2);
+    const bool needCTBuf = (betaVectorScaling == 1 || beta != 0.0f);
+    if (needCTBuf) {
         pipe.InitBuffer(cTBuf, static_cast<uint32_t>(maxNAlign * sizeof(T)));
+    }
+    if (needTempBuf) {
         pipe.InitBuffer(tempBuf, static_cast<uint32_t>(maxNAlign * sizeof(float)));
-        if constexpr (!std::is_same_v<T, float>) {
-            pipe.InitBuffer(cFp32Buf, static_cast<uint32_t>(maxNAlign * sizeof(float)));
-        }
+    }
+    if ((betaVectorScaling == 1 || beta != 0.0f) && !std::is_same_v<T, float>) {
+        pipe.InitBuffer(cFp32Buf, static_cast<uint32_t>(maxNAlign * sizeof(float)));
     }
 }
 
@@ -1484,52 +1917,175 @@ __aicore__ inline void SpltFusedEpilogueInitGM(
     dGM.SetGlobalBuffer(reinterpret_cast<__gm__ OutType*>(dGm), static_cast<uint64_t>(m) * n);
 }
 
+// Set per-batch GM pointers for SpltFusedEpilogueBatchLoop.
+// Offsets c/d/bias GM by batch stride; reloads full bias when biasChunkMode==0.
+template <typename T, typename OutType>
+__aicore__ inline void SpltFusedEpilogueOffsetBatchGM(
+    const AclsparseltTilingData& td,
+    GlobalTensor<T>& cGM, GlobalTensor<OutType>& dGM,
+    GlobalTensor<SpltBiasDType<T>>& biasVecGM,
+    LocalTensor<float>& biasVecUB, TBuf<TPosition::VECCALC>& biasRawBuf,
+    GM_ADDR cGm, GM_ADDR dGm, int32_t b, int32_t m, uint64_t totalElem)
+{
+    using BiasType = SpltBiasDType<T>;
+    cGM.SetGlobalBuffer(reinterpret_cast<__gm__ T*>(cGm)
+                        + static_cast<int64_t>(b) * td.batchStrideC, totalElem);
+    dGM.SetGlobalBuffer(reinterpret_cast<__gm__ OutType*>(dGm)
+                        + static_cast<int64_t>(b) * td.batchStrideD, totalElem);
+    if (td.biasDevPtr != 0 && td.biasStride != 0) {
+        biasVecGM.SetGlobalBuffer(reinterpret_cast<__gm__ BiasType*>(td.biasDevPtr)
+                                  + static_cast<int64_t>(b) * td.biasStride,
+                                  static_cast<uint64_t>(m));
+        if (td.biasChunkMode == 0) {
+            SpltLoadBiasFullToFp32<BiasType>(biasVecUB, biasRawBuf, biasVecGM, m);
+        }
+    }
+}
+
+// Batch loop for SpltFusedEpilogueImpl: iterates batches, sets per-batch GM
+// pointers, reloads bias if needed, and runs the tile processing loop.
+// Extracted to reduce NBNC of SpltFusedEpilogueImpl (#9, was 95, target<=50).
+// Flag operations and CrossCore sync preserved exactly.
+template <typename T, typename OutType>
+__aicore__ inline void SpltFusedEpilogueBatchLoop(
+    const AclsparseltTilingData& td,
+    GlobalTensor<T>& cGM, GlobalTensor<OutType>& dGM,
+    GlobalTensor<SpltBiasDType<T>>& biasVecGM,
+    LocalTensor<float>& biasVecUB, TBuf<TPosition::VECCALC>& biasRawBuf,
+    TBuf<TPosition::VECCALC>& accBuf, TBuf<TPosition::VECCALC>& dFp32Buf,
+    TBuf<TPosition::VECCALC>& dTBuf, TBuf<TPosition::VECCALC>& cTBuf,
+    TBuf<TPosition::VECCALC>& cFp32Buf, TBuf<TPosition::VECCALC>& tempBuf,
+    TBuf<TPosition::VECCALC>& halfBuf,
+    LocalTensor<float>& alphaVecUB, LocalTensor<float>& betaVecUB,
+    GM_ADDR cGm, GM_ADDR dGm)
+{
+    using AccType = typename SpltL0CTypeTrait<T>::type;
+    const int32_t m = td.m;
+    const int32_t n = td.n;
+    const int32_t baseM = td.baseM;
+    const int32_t baseN = td.baseN;
+    const float alpha = td.alpha;
+    const float beta = td.beta;
+    const int32_t alphaVectorScaling = td.alphaVectorScaling;
+    const int32_t betaVectorScaling = td.betaVectorScaling;
+    const uint64_t biasDevPtr = td.biasDevPtr;
+    const int32_t biasChunkMode = td.biasChunkMode;
+    const int32_t activationType = td.activationType;
+    const float reluThreshold = td.reluThreshold;
+    const float reluUpperBound = td.reluUpperBound;
+    const float geluScaling = td.geluScaling;
+    const int32_t numBatches = (td.numBatches > 0) ? td.numBatches : 1;
+    const int32_t blockId = static_cast<int32_t>(GetBlockIdx());
+    const int32_t blockNum = static_cast<int32_t>(GetBlockNum());
+    const uint32_t taskRation = GetTaskRation();
+    const int32_t rawBlockId = blockId / static_cast<int32_t>(taskRation);
+    const uint32_t subBlockIdx = GetSubBlockIdx();
+    const uint16_t aivWaitFlag = (subBlockIdx == 1) ? SPLT_AIC_SYNC_AIV1 : SPLT_AIC_SYNC_AIV0;
+    const uint16_t aivNotifyFlag = (subBlockIdx == 1) ? SPLT_AIV1_SYNC_AIC : SPLT_AIV0_SYNC_AIC;
+    const int32_t mTiles = (m + baseM - 1) / baseM;
+    const int32_t nTiles = (n + baseN - 1) / baseN;
+    const int64_t totalTiles = static_cast<int64_t>(mTiles) * static_cast<int64_t>(nTiles);
+    const uint64_t totalElem = static_cast<uint64_t>(m) * static_cast<uint64_t>(n);
+
+    for (int32_t b = 0; b < numBatches; ++b) {
+        SpltFusedEpilogueOffsetBatchGM<T, OutType>(td, cGM, dGM, biasVecGM,
+                                                   biasVecUB, biasRawBuf,
+                                                   cGm, dGm, b, m, totalElem);
+        // 无 tile 的 block 跳过 CrossCoreSetFlag，避免残留 flag
+        // 影响下一个 batch 的同步。
+        if (static_cast<int64_t>(rawBlockId) >= totalTiles) { continue; }
+        CrossCoreSetFlag<SPLT_SYNC_MODE_4, PIPE_MTE3>(aivNotifyFlag);
+        SpltFusedEpilogueTileLoop<AccType, OutType, T>(td, rawBlockId, blockNum, subBlockIdx,
+                                     aivWaitFlag, aivNotifyFlag,
+                                     nTiles, totalTiles, cGM, dGM,
+                                     accBuf, dFp32Buf, dTBuf, cTBuf, cFp32Buf, tempBuf, halfBuf, biasRawBuf,
+                                     alpha, beta,
+                                     alphaVectorScaling, betaVectorScaling,
+                                     alphaVecUB, betaVecUB,
+                                     biasVecUB, biasVecGM, biasDevPtr, biasChunkMode,
+                                     activationType, reluThreshold, reluUpperBound, geluScaling);
+    }
+}
+
+// Initialize bias buffers for SpltFusedEpilogueImpl, dispatching on
+// biasChunkMode. Extracted from SpltFusedEpilogueImpl to reduce NBNC (#2).
+//   biasChunkMode == 0: full bias load via SpltInitBiasBuffers (UB-resident).
+//   biasChunkMode == 1: chunk-mode GM-resident bias (lazy per-tile load),
+//                       only allocates the Cast intermediate (biasRawBuf).
+template <typename BiasType>
+__aicore__ inline void SpltFusedEpilogueInitBias(
+    GlobalTensor<BiasType>& biasVecGM,
+    TBuf<TPosition::VECCALC>& biasVecBuf,
+    TBuf<TPosition::VECCALC>& biasRawBuf,
+    LocalTensor<float>& biasVecUB,
+    TPipe& pipe,
+    uint64_t biasDevPtr, int64_t biasStride, int32_t biasChunkMode,
+    int32_t m, uint64_t maxMAlign)
+{
+    if (biasDevPtr == 0) { return; }
+    if (biasChunkMode == 0) {
+        SpltInitBiasBuffers<BiasType>(biasVecGM, biasVecBuf, biasRawBuf, biasVecUB,
+                                       pipe, biasDevPtr, biasStride, m);
+    } else if (biasChunkMode == 1) {
+        biasVecGM.SetGlobalBuffer(reinterpret_cast<__gm__ BiasType*>(biasDevPtr),
+                                   static_cast<uint64_t>(m));
+        if constexpr (!std::is_same_v<BiasType, float>) {
+            pipe.InitBuffer(biasRawBuf, static_cast<uint32_t>(maxMAlign * sizeof(BiasType)));
+        }
+    }
+}
+
 // v2: SpltFusedEpilogueImpl templated on (T, OutType). AccType derived via
 // SpltL0CTypeTrait<T>. Non-INT8 path: OutType == T (backward compat).
 template <typename T, typename OutType = T>
 __aicore__ inline void SpltFusedEpilogueImpl(GM_ADDR cGm, GM_ADDR dGm, GM_ADDR tilingGm)
 {
     using AccType = typename SpltL0CTypeTrait<T>::type;
+    using BiasType = SpltBiasDType<T>;
     const AclsparseltTilingData td = splt_load_tiling(tilingGm);
-    const int32_t m = td.m, n = td.n, baseM = td.baseM, baseN = td.baseN;
-    const float alpha = td.alpha, beta = td.beta;
-    const int32_t alphaVectorScaling = td.alphaVectorScaling, betaVectorScaling = td.betaVectorScaling;
-    const int32_t blockId = static_cast<int32_t>(GetBlockIdx());
-    const int32_t blockNum = static_cast<int32_t>(GetBlockNum());
-    const int32_t rawBlockId = blockId / static_cast<int32_t>(GetTaskRation());
-    const uint32_t subBlockIdx = GetSubBlockIdx();
-    const uint16_t aivWaitFlag = (subBlockIdx == 1) ? SPLT_AIC_SYNC_AIV1 : SPLT_AIC_SYNC_AIV0;
-    const uint16_t aivNotifyFlag = (subBlockIdx == 1) ? SPLT_AIV1_SYNC_AIC : SPLT_AIV0_SYNC_AIC;
-    const int32_t mTiles = (m + baseM - 1) / baseM, nTiles = (n + baseN - 1) / baseN;
-    const int64_t totalTiles = static_cast<int64_t>(mTiles) * static_cast<int64_t>(nTiles);
+    const int32_t m = td.m;
+    const int32_t baseM = td.baseM;
+    const int32_t baseN = td.baseN;
+    const int32_t alphaVectorScaling = td.alphaVectorScaling;
+    const int32_t betaVectorScaling = td.betaVectorScaling;
+    const uint64_t biasDevPtr = td.biasDevPtr;
+    const int64_t biasStride = td.biasStride;
+    const int32_t biasChunkMode = td.biasChunkMode;
+    const uint32_t taskRation = GetTaskRation();
+    if (taskRation == 0) { return; }
+    const int64_t totalTiles = static_cast<int64_t>((m + baseM - 1) / baseM) *
+                               static_cast<int64_t>((td.n + baseN - 1) / baseN);
     if (totalTiles <= 0) { return; }
     GlobalTensor<T> cGM;
     GlobalTensor<OutType> dGM;
-    SpltFusedEpilogueInitGM<T, OutType>(cGM, dGM, cGm, dGm, m, n);
     GlobalTensor<float> alphaVecGM, betaVecGM;
     SpltInitScalingGM(alphaVecGM, betaVecGM, td.alphaDevPtr, td.betaDevPtr,
                        m, alphaVectorScaling, betaVectorScaling);
+    GlobalTensor<BiasType> biasVecGM;
+    TBuf<TPosition::VECCALC> biasVecBuf;
+    TBuf<TPosition::VECCALC> biasRawBuf;
+    LocalTensor<float> biasVecUB;
+    TPipe pipe;
     const uint64_t maxMAlign = static_cast<uint64_t>((baseM + 1) & ~1);
     const uint64_t maxNAlign = static_cast<uint64_t>((baseN + SPLT_L0C_C0 - 1) / SPLT_L0C_C0) * SPLT_L0C_C0;
-    TPipe pipe;
     TBuf<TPosition::VECCALC> accBuf, dFp32Buf, dTBuf, cTBuf, cFp32Buf, tempBuf, halfBuf;
     TBuf<TPosition::VECCALC> alphaVecBuf, betaVecBuf;
     SpltFusedEpilogueInitBuffers<T, OutType>(pipe, accBuf, dFp32Buf, dTBuf, cTBuf,
-        cFp32Buf, tempBuf, halfBuf, maxMAlign, maxNAlign, alpha, beta,
-        alphaVectorScaling, betaVectorScaling);
+        cFp32Buf, tempBuf, halfBuf, maxMAlign, maxNAlign, td.alpha, td.beta,
+        alphaVectorScaling, betaVectorScaling,
+        biasDevPtr, biasChunkMode, td.activationType);
+    // Bias UB allocation + loading AFTER accBuf (accBuf must stay at
+    // UB offset 0 to match AIC's CopyL0C2UB target).
+    SpltFusedEpilogueInitBias<BiasType>(biasVecGM, biasVecBuf, biasRawBuf, biasVecUB,
+                                         pipe, biasDevPtr, biasStride, biasChunkMode,
+                                         m, maxMAlign);
     LocalTensor<float> alphaVecUB, betaVecUB;
     SpltLoadScalingUB(alphaVecBuf, betaVecBuf, alphaVecUB, betaVecUB,
                        alphaVecGM, betaVecGM, pipe, m,
                        alphaVectorScaling, betaVectorScaling);
-    CrossCoreSetFlag<SPLT_SYNC_MODE_4, PIPE_MTE3>(aivNotifyFlag);
-    if (static_cast<int64_t>(rawBlockId) >= totalTiles) { return; }
-    SpltFusedEpilogueTileLoop<AccType, OutType, T>(td, rawBlockId, blockNum, subBlockIdx,
-                                 aivWaitFlag, aivNotifyFlag,
-                                 nTiles, totalTiles, cGM, dGM,
-                                 accBuf, dFp32Buf, dTBuf, cTBuf, cFp32Buf, tempBuf, halfBuf,
-                                 alpha, beta,
-                                 alphaVectorScaling, betaVectorScaling,
-                                 alphaVecUB, betaVecUB);
+    SpltFusedEpilogueBatchLoop<T, OutType>(td, cGM, dGM, biasVecGM, biasVecUB, biasRawBuf,
+        accBuf, dFp32Buf, dTBuf, cTBuf, cFp32Buf, tempBuf, halfBuf,
+        alphaVecUB, betaVecUB, cGm, dGm);
 }
 
 // ============================================================================
