@@ -20,12 +20,92 @@
 #include <string>
 #include <memory>
 #include <type_traits>
-#include <arm_fp16.h>
+#include <cstdint>
 #include "acl/acl.h"
 #include "cann_ops_sparse.h"
 
 // host 侧 half/bf16 别名：kernel 侧为 AscendC::half / AscendC::bfloat16_t
+// aarch64 host 使用原生 __fp16；其余 host（如 x86_64，GCC 11 无 __fp16/_Float16）使用
+// 软件实现的 2 字节 IEEE754 half，仅用于 host 侧数据构造/搬运，位布局与 __fp16 一致
+#if defined(__aarch64__) || (defined(__ARM_ARCH) && defined(__ARM_FEATURE_FP16_SCALAR_ARITHMETIC))
+#include <arm_fp16.h>
 using half = __fp16;
+#else
+struct half {
+    uint16_t bits;
+    half() : bits(0) {}
+    half(float f) { *this = f; }
+    operator float() const {
+        uint32_t sign = static_cast<uint32_t>(bits & 0x8000u) << 16;
+        uint32_t exp = (bits >> 10) & 0x1Fu;
+        uint32_t mant = bits & 0x3FFu;
+        uint32_t u;
+        if (exp == 0) {
+            if (mant == 0) {
+                u = sign;
+            } else {
+                exp = 113;
+                while ((mant & 0x400u) == 0) {
+                    mant <<= 1;
+                    exp--;
+                }
+                u = sign | (exp << 23) | ((mant & 0x3FFu) << 13);
+            }
+        } else if (exp == 31) {
+            u = sign | 0x7F800000u | (mant << 13);
+        } else {
+            u = sign | ((exp + 127 - 15) << 23) | (mant << 13);
+        }
+        union {
+            uint32_t u;
+            float f;
+        } x = {u};
+        return x.f;
+    }
+    half &operator=(float v) {
+        union {
+            float f;
+            uint32_t u;
+        } x = {v};
+        uint32_t sign = (x.u >> 16) & 0x8000u;
+        uint32_t abs = x.u & 0x7fffffffu;
+        if (abs >= 0x7f800000u) {
+            uint16_t payload = static_cast<uint16_t>((abs & 0x007fffffu) >> 13);
+            bits = static_cast<uint16_t>(sign | 0x7c00u | payload | (payload == 0 ? 0 : 1));
+            return *this;
+        }
+        int32_t exponent = static_cast<int32_t>((abs >> 23) & 0xffu) - 127 + 15;
+        uint32_t mantissa = abs & 0x007fffffu;
+        if (exponent >= 31) {
+            bits = static_cast<uint16_t>(sign | 0x7c00u);
+            return *this;
+        }
+        if (exponent <= 0) {
+            if (exponent < -10) {
+                bits = static_cast<uint16_t>(sign);
+                return *this;
+            }
+            mantissa |= 0x00800000u;
+            uint32_t shift = static_cast<uint32_t>(14 - exponent);
+            uint32_t rounded = (mantissa + ((1u << (shift - 1)) - 1u) + ((mantissa >> shift) & 1u)) >> shift;
+            bits = static_cast<uint16_t>(sign | rounded);
+            return *this;
+        }
+        uint32_t roundedMantissa = mantissa + 0x00000fffu + ((mantissa >> 13) & 1u);
+        if ((roundedMantissa & 0x00800000u) != 0) {
+            roundedMantissa = 0;
+            ++exponent;
+            if (exponent >= 31) {
+                bits = static_cast<uint16_t>(sign | 0x7c00u);
+                return *this;
+            }
+        }
+        bits = static_cast<uint16_t>(sign | (static_cast<uint32_t>(exponent) << 10) | (roundedMantissa >> 13));
+        return *this;
+    }
+};
+static_assert(sizeof(half) == 2, "half must be 2 bytes");
+#endif
 
 struct bfloat16_t {
     uint16_t bits;
@@ -360,7 +440,7 @@ aclDataType AclTypeOf<float>() { return ACL_FLOAT; }
 template <>
 aclDataType AclTypeOf<int32_t>() { return ACL_INT32; }
 template <>
-aclDataType AclTypeOf<__fp16>() { return ACL_FLOAT16; }
+aclDataType AclTypeOf<half>() { return ACL_FLOAT16; }
 template <>
 aclDataType AclTypeOf<bfloat16_t>() { return ACL_BF16; }
 

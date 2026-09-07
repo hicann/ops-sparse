@@ -197,6 +197,7 @@ function(ops_sparse_add_gtest_tests operator link_lib)
     endif()
 
     add_executable(${target} ${_test_src} ${CMAKE_SOURCE_DIR}/test/frame/test_main.cpp)
+    target_compile_features(${target} PRIVATE cxx_std_17)
 
     target_include_directories(${target} PRIVATE
         ${CMAKE_SOURCE_DIR}/include
