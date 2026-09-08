@@ -19,6 +19,7 @@
 #include "cann_ops_sparse.h"
 #include "aclsparse_host_utils.h"
 #include "aclsparse_descr_internal.h"
+#include "log/log.h"
 #include "spmm.h"
 #include "spmm_csr_mat.h"
 
@@ -211,12 +212,17 @@ WsOffsets ComputeWsOffsets(int64_t m, int32_t blockDim) {
 } // namespace
 
 aclsparseStatus_t aclsparseSpMMGetBufferSize(
-    aclsparseHandle_t /*handle*/, aclsparseOperation_t opA, aclsparseOperation_t opB,
-    const void * /*alpha*/, aclsparseConstSpMatDescr_t matA, aclsparseConstDnMatDescr_t matB,
-    const void * /*beta*/, aclsparseDnMatDescr_t matC, aclDataType computeType,
+    aclsparseHandle_t handle, aclsparseOperation_t opA, aclsparseOperation_t opB,
+    const void *alpha, aclsparseConstSpMatDescr_t matA, aclsparseConstDnMatDescr_t matB,
+    const void *beta, aclsparseDnMatDescr_t matC, aclDataType computeType,
     aclsparseSpMMAlg_t alg, size_t *size)
 {
+    if (handle == nullptr) {
+        OP_LOGE("aclsparseSpMMGetBufferSize", "handle is nullptr");
+        return ACL_SPARSE_STATUS_HANDLE_IS_NULLPTR;
+    }
     if (size == nullptr) {
+        OP_LOGE("aclsparseSpMMGetBufferSize", "size is nullptr");
         return ACL_SPARSE_STATUS_INVALID_VALUE;
     }
     aclsparseSpMatDescr *matAInner = (aclsparseSpMatDescr *)matA;
@@ -225,6 +231,8 @@ aclsparseStatus_t aclsparseSpMMGetBufferSize(
     aclsparseStatus_t st = ValidateSpmmInputs(matAInner, matBInner, matCInner,
                                             opA, opB, computeType, alg);
     if (st != ACL_SPARSE_STATUS_SUCCESS) {
+        OP_LOGE("aclsparseSpMMGetBufferSize",
+                "ValidateSpmmInputs failed, status=%d", static_cast<int>(st));
         return st;
     }
     WsOffsets off = ComputeWsOffsets(static_cast<int64_t>(matAInner->rows),
@@ -333,26 +341,35 @@ static aclsparseStatus_t SpmmRunKernel(
 }
 
 aclsparseStatus_t aclsparseSpMMPreprocess(
-    aclsparseHandle_t /*handle*/, aclsparseOperation_t opA, aclsparseOperation_t opB,
+    aclsparseHandle_t handle, aclsparseOperation_t opA, aclsparseOperation_t opB,
     const void *alpha, aclsparseConstSpMatDescr_t matA, aclsparseConstDnMatDescr_t matB,
     const void *beta, aclsparseDnMatDescr_t matC, aclDataType computeType,
     aclsparseSpMMAlg_t alg, void *buffer)
 {
+    if (handle == nullptr) {
+        OP_LOGE("aclsparseSpMMPreprocess", "handle is nullptr");
+        return ACL_SPARSE_STATUS_HANDLE_IS_NULLPTR;
+    }
     aclsparseSpMatDescr *matAInner = (aclsparseSpMatDescr *)matA;
     aclsparseDnMatDescr *matBInner = (aclsparseDnMatDescr *)matB;
     aclsparseDnMatDescr *matCInner = (aclsparseDnMatDescr *)matC;
     aclsparseStatus_t st = ValidateSpmmInputs(matAInner, matBInner, matCInner,
                                             opA, opB, computeType, alg);
     if (st != ACL_SPARSE_STATUS_SUCCESS) {
+        OP_LOGE("aclsparseSpMMPreprocess",
+                "ValidateSpmmInputs failed, status=%d", static_cast<int>(st));
         return st;
     }
     if (buffer == nullptr) {
+        OP_LOGE("aclsparseSpMMPreprocess", "buffer is nullptr");
         return ACL_SPARSE_STATUS_INSUFFICIENT_RESOURCES;
     }
 
     st = SpmmBuildTilingToBuffer(matAInner, matBInner, matCInner, opB,
                                  alpha, beta, computeType, alg, buffer);
     if (st != ACL_SPARSE_STATUS_SUCCESS) {
+        OP_LOGE("aclsparseSpMMPreprocess",
+                "SpmmBuildTilingToBuffer failed, status=%d", static_cast<int>(st));
         return st;
     }
 
