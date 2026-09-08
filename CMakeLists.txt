@@ -195,6 +195,12 @@ if(BUILD_TEST)
     add_subdirectory(test)
 endif()
 
+# 可选PyTorch/torch_npu适配层，默认关闭，避免基础算子构建依赖PyTorch环境。
+option(BUILD_TORCH_ADAPTER "Build the PyTorch NPU adapter" OFF)
+if(BUILD_TORCH_ADAPTER)
+    add_subdirectory(python/ops_sparse_torch)
+endif()
+
 if(ENABLE_PACKAGE)
     include(cmake/package.cmake)
     add_dependencies(${OPS_SPARSE} gen_ops_sparse_version_info)

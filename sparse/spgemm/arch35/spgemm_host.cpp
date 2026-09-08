@@ -5,1001 +5,1316 @@
  * CANN Open Software License Agreement Version 2.0 (the "License").
  * Please refer to the License for details. You may not use this file except in compliance with the License.
  * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
- * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY OR FITNESS FOR A PARTICULAR PURPOSE.
+ * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
  * See LICENSE in the root of the software repository for the full text of the License.
  * ----------------------------------------------------------------------------------------------------------
  */
 
-/*
- * SpGEMM Host-side implementation — SpMM-style 3-stage + 7-interface API.
- *
- * Aligned with ops-sparse aclsparseSpMM convention:
- *   1. GetBufferSize  — validate + query workspace size
- *   2. Preprocess     — symbolic phase: C structure + reorder/binEdge → workspace
- *   3. SpGEMM         — numeric phase: fill C values (reuses structure via activeBuffer)
- *
- * Structure reuse: matC->activeBuffer == buffer => symbolic phase already done,
- * SpGEMM skips to numeric kernel directly (same as SpMM's SpmmEnsureTilingReady).
- *
- * Buffer 策略：
- *   3-stage API uses a single buffer (compatibility path, aligned with SpMM).
- *   7-interface API separates buffer1 (symbolic) and buffer2 (numeric):
- *     - WorkEstimation uses buffer1 for symbolic phase
- *     - Compute uses buffer1 for probe (if needed) + buffer2 for numeric
- *     - Copy uses buffer2 for result staging
- *   Both buffers have the same size (workspace layout is identical), but are
- *   independent allocations — allowing symbolic results in buffer1 to persist
- *   while numeric phase writes to buffer2.
- */
-
-#include <cstdint>
-#include <cstdlib>
-#include <cstring>
-#include <vector>
 #include <algorithm>
+#include <cstdint>
+#include <limits>
+#include <new>
 
-#include "acl/acl.h"
+#include "log/log.h"
+#include "securec.h"
 #include "cann_ops_sparse.h"
-#include "spgemm.h"
-#include "aclsparse_host_utils.h"
 #include "aclsparse_descr_internal.h"
 #include "aclsparse_handle_internal.h"
-#include "spgemm_csr_mat.h"
+#include "aclsparse_host_utils.h"
 
-#ifndef __CCE_AICORE__
-#include "tiling/platform/platform_ascendc.h"
+#ifndef GM_ADDR
+#define GM_ADDR uint8_t *
 #endif
+#include "spgemm_kernel.h"
 
 namespace {
 
-/* ops-sparse 风格：复用 aclsparse_host_utils.h 的 GetAivCoreCount()，fallback 64 (950PR). */
-constexpr uint32_t kSpgemmBlockDimFallback = 64u;
+constexpr const char *kSpGemmTag = "aclsparseSpGEMM";
+constexpr size_t kSpGemmAlignment = 128U;
 
-uint32_t GetSpgemmBlockDim()
-{
-    uint32_t aiv = GetAivCoreCount();
-    return (aiv > 0u) ? aiv : kSpgemmBlockDimFallback;
-}
-
-/* 使用 aclsparseGetStream/aclsparseGetPointerMode API 获取流和指针模式。
- * ToMatInnerConst/ToMatInner 用于获取 matA/matB/matC 内部结构。 */
-inline struct aclsparseSpMatDescr *ToMatInnerConst(aclsparseConstSpMatDescr_t desc) {
-    return const_cast<struct aclsparseSpMatDescr *>(
-        reinterpret_cast<const struct aclsparseSpMatDescr *>(desc));
-}
-inline struct aclsparseSpMatDescr *ToMatInner(aclsparseSpMatDescr_t desc) {
-    return reinterpret_cast<struct aclsparseSpMatDescr *>(desc);
-}
-
-int32_t GetComputeDtypeSize(aclDataType computeType) {
-    switch (computeType) {
-        case ACL_FLOAT:   return 4;
-        case ACL_FLOAT16: return 2;
-        case ACL_BF16:    return 2;
-        default:          return 4;
-    }
-}
-
-float ScalarReadF32(const void *p) {
-    if (p == nullptr) return 0.0f;
-    return *static_cast<const float *>(p);
-}
-
-/* Read beta scalar with pointer-mode awareness: HOST → direct deref,
- * DEVICE → D2H copy (avoids host segfault on device pointer). */
-static aclsparseStatus_t SpgemmReadBetaScalar(
-    aclsparseHandle_t handle, const void *beta, float &out) {
-    aclsparsePointerMode_t pointerMode = ACL_SPARSE_POINTER_MODE_HOST;
-    aclsparseGetPointerMode(handle, &pointerMode);
-    if (pointerMode == ACL_SPARSE_POINTER_MODE_HOST) {
-        out = ScalarReadF32(beta);
-    } else {
-        aclrtStream stream = nullptr;
-        aclsparseGetStream(handle, &stream);
-        aclError pmRet = aclrtMemcpy(&out, sizeof(float), beta,
-                                     sizeof(float), ACL_MEMCPY_DEVICE_TO_HOST);
-        if (pmRet != ACL_ERROR_NONE) return ACL_SPARSE_STATUS_EXECUTION_FAILED;
-        aclrtSynchronizeStream(stream);
-    }
-    return ACL_SPARSE_STATUS_SUCCESS;
-}
-
-/* Zero matC values when C_in is not valid; preserve when cInDataValid && β≠0. */
-static aclsparseStatus_t SpgemmZeroOrPreserveCIn(
-    aclsparseHandle_t handle, aclsparseSpMatDescr *matCInner,
-    aclDataType computeType, float betaVal,
-    int32_t cInDataValid, int64_t nnzC) {
-    if (betaVal != 0.0f && cInDataValid == 1 && matCInner->values != nullptr) {
-        if (static_cast<int64_t>(matCInner->nnz) != nnzC) {
-            OP_LOGE("spgemm", "β≠0 + C_in: matC->nnz=%lu != nnzC=%ld",
-                    (unsigned long)matCInner->nnz, nnzC);
-            return ACL_SPARSE_STATUS_INVALID_VALUE;
-        }
-        return ACL_SPARSE_STATUS_SUCCESS;
-    }
-    if (matCInner->values != nullptr && matCInner->nnz > 0) {
-        int32_t dtypeSize = GetComputeDtypeSize(computeType);
-        int64_t bytes = static_cast<int64_t>(matCInner->nnz) * dtypeSize;
-        aclrtStream stream = nullptr;
-        aclsparseGetStream(handle, &stream);
-        aclError zeroRet = aclrtMemsetAsync(matCInner->values,
-                                            static_cast<size_t>(bytes), 0,
-                                            static_cast<size_t>(bytes), stream);
-        if (zeroRet != ACL_ERROR_NONE) return ACL_SPARSE_STATUS_EXECUTION_FAILED;
-        aclrtSynchronizeStream(stream);
-    }
-    return ACL_SPARSE_STATUS_SUCCESS;
-}
-
-static bool IsSupportedDtype(aclDataType dt) {
-    return dt == ACL_FLOAT || dt == ACL_FLOAT16 || dt == ACL_BF16;
-}
-
-static bool IsSupportedSpgemmAlg(aclsparseSpGEMMAlg_t alg)
-{
-    return alg == ACL_SPARSE_SPGEMM_ALG_DEFAULT ||
-           alg == ACL_SPARSE_SPGEMM_ALG1;
-}
-
-/* ---- 输入校验子函数 ---- */
-
-static aclsparseStatus_t ValidateSpMatPointers(
-    const aclsparseSpMatDescr *matA, const aclsparseSpMatDescr *matB,
-    const aclsparseSpMatDescr *matC)
-{
-    if (matA == nullptr || matB == nullptr || matC == nullptr) {
-        OP_LOGE("spgemm", "matA/matB/matC is nullptr");
-        return ACL_SPARSE_STATUS_HANDLE_IS_NULLPTR;
-    }
-    return ACL_SPARSE_STATUS_SUCCESS;
-}
-
-static aclsparseStatus_t ValidateSpMatFormat(
-    const aclsparseSpMatDescr *matA, const aclsparseSpMatDescr *matB,
-    const aclsparseSpMatDescr *matC, aclsparseOperation_t opA,
-    aclsparseOperation_t opB)
-{
-    if (opA != ACL_SPARSE_OP_NON_TRANSPOSE) {
-        OP_LOGE("spgemm", "opA must be NON_TRANSPOSE");
-        return ACL_SPARSE_STATUS_NOT_SUPPORTED;
-    }
-    if (opB != ACL_SPARSE_OP_NON_TRANSPOSE) {
-        OP_LOGE("spgemm", "opB must be NON_TRANSPOSE");
-        return ACL_SPARSE_STATUS_NOT_SUPPORTED;
-    }
-    if (matA->format != ACL_SPARSE_FORMAT_CSR ||
-        matB->format != ACL_SPARSE_FORMAT_CSR ||
-        matC->format != ACL_SPARSE_FORMAT_CSR) {
-        OP_LOGE("spgemm", "only CSR format is supported");
-        return ACL_SPARSE_STATUS_MATRIX_TYPE_NOT_SUPPORTED;
-    }
-    return ACL_SPARSE_STATUS_SUCCESS;
-}
-
-static aclsparseStatus_t ValidateSpMatDtype(
-    const aclsparseSpMatDescr *matA, const aclsparseSpMatDescr *matB,
-    const aclsparseSpMatDescr *matC, aclDataType computeType,
-    aclsparseSpGEMMAlg_t alg)
-{
-    aclsparseStatus_t idxSt = AclsparseValidateSupportedCsrIndexTypes(matA->ptrType, matA->IdxType);
-    if (idxSt != ACL_SPARSE_STATUS_SUCCESS) return idxSt;
-    idxSt = AclsparseValidateSupportedCsrIndexTypes(matB->ptrType, matB->IdxType);
-    if (idxSt != ACL_SPARSE_STATUS_SUCCESS) return idxSt;
-    idxSt = AclsparseValidateSupportedCsrIndexTypes(matC->ptrType, matC->IdxType);
-    if (idxSt != ACL_SPARSE_STATUS_SUCCESS) return idxSt;
-
-    if (matA->baseType != ACL_SPARSE_INDEX_BASE_ZERO ||
-        matB->baseType != ACL_SPARSE_INDEX_BASE_ZERO ||
-        matC->baseType != ACL_SPARSE_INDEX_BASE_ZERO) {
-        OP_LOGE("spgemm", "only zero-based index is supported");
-        return ACL_SPARSE_STATUS_NOT_SUPPORTED;
-    }
-    if (!IsSupportedDtype(matA->valueType) || !IsSupportedDtype(matB->valueType) ||
-        !IsSupportedDtype(matC->valueType)) {
-        OP_LOGE("spgemm", "unsupported value dtype");
-        return ACL_SPARSE_STATUS_NOT_SUPPORTED;
-    }
-    if (matA->valueType != matB->valueType || matA->valueType != matC->valueType ||
-        matA->valueType != computeType) {
-        OP_LOGE("spgemm", "A/B/C/computeType must be the same dtype");
-        return ACL_SPARSE_STATUS_NOT_SUPPORTED;
-    }
-    if (!IsSupportedSpgemmAlg(alg)) {
-        OP_LOGE("spgemm", "unsupported alg");
-        return ACL_SPARSE_STATUS_NOT_SUPPORTED;
-    }
-    return ACL_SPARSE_STATUS_SUCCESS;
-}
-
-static aclsparseStatus_t ValidateSpMatDimensions(
-    const aclsparseSpMatDescr *matA, const aclsparseSpMatDescr *matB,
-    const aclsparseSpMatDescr *matC)
-{
-    if (matA->cols != matB->rows) {
-        OP_LOGE("spgemm", "dimension mismatch: A.cols=%lu, B.rows=%lu",
-                (unsigned long)matA->cols, (unsigned long)matB->rows);
-        return ACL_SPARSE_STATUS_INVALID_VALUE;
-    }
-    if (matA->rows != matC->rows || matB->cols != matC->cols) {
-        OP_LOGE("spgemm", "dimension mismatch: A.rows=%lu C.rows=%lu, B.cols=%lu C.cols=%lu",
-                (unsigned long)matA->rows, (unsigned long)matC->rows,
-                (unsigned long)matB->cols, (unsigned long)matC->cols);
-        return ACL_SPARSE_STATUS_INVALID_VALUE;
-    }
-    if (matA->rows > static_cast<uint64_t>(INT32_MAX) ||
-        matA->cols > static_cast<uint64_t>(INT32_MAX) ||
-        matB->cols > static_cast<uint64_t>(INT32_MAX)) {
-        OP_LOGE("spgemm", "matrix dimensions exceed INT32_MAX");
-        return ACL_SPARSE_STATUS_NOT_SUPPORTED;
-    }
-    return ACL_SPARSE_STATUS_SUCCESS;
-}
-
-static aclsparseStatus_t ValidateSpgemmInputs(
-    const aclsparseSpMatDescr *matA,
-    const aclsparseSpMatDescr *matB,
-    const aclsparseSpMatDescr *matC,
-    aclsparseOperation_t opA,
-    aclsparseOperation_t opB,
-    aclDataType computeType,
-    aclsparseSpGEMMAlg_t alg)
-{
-    aclsparseStatus_t st = ValidateSpMatPointers(matA, matB, matC);
-    if (st != ACL_SPARSE_STATUS_SUCCESS) return st;
-    st = ValidateSpMatFormat(matA, matB, matC, opA, opB);
-    if (st != ACL_SPARSE_STATUS_SUCCESS) return st;
-    st = ValidateSpMatDtype(matA, matB, matC, computeType, alg);
-    if (st != ACL_SPARSE_STATUS_SUCCESS) return st;
-    st = ValidateSpMatDimensions(matA, matB, matC);
-    if (st != ACL_SPARSE_STATUS_SUCCESS) return st;
-    /* β≠0 时 cuSPARSE 要求 C_in 结构与结果一致。
-     * 由于结果结构在符号阶段前未知，这里只校验 matC 的预分配容量 (nnz) 足够大。
-     * β≠0 且 matC->nnz==0 时，C_in 为空 -> β·C_in=0，等价 beta=0，允许通过。
-     * β≠0 且 matC->nnz>0 时，要求用户已按正确结构填充 C_in；符号阶段后会做
-     *   nnzC == matC->nnz 的精确校验 (见 SpGEMM numeric phase). */
-    return ACL_SPARSE_STATUS_SUCCESS;
-}
-
-/* ---- 公共启动上下文 ---- */
-struct SpgemmLaunchCtx {
-    int32_t m, n, k;
-    uint32_t blockDim;
-    int32_t computeDtypeSize;
-    SpgemmWsOffsets off;
-    aclrtStream stream;
-    aclsparseSpMatDescr *matAInner;
-    aclsparseSpMatDescr *matBInner;
-    aclsparseSpMatDescr *matCInner;
+struct SpGemmWorkLayout {
+    size_t counts = 0;
+    size_t offsets = 0;
+    size_t blockSums = 0;
+    size_t blockOffsets = 0;
+    size_t total = 0;
+    size_t regular = 0;
+    size_t error = 0;
+    size_t bytes = 0;
 };
 
-/* SpgemmPrepareLaunch: 校验输入 + 提取维度 + 计算 blockDim + workspace 偏移。
- * GetBufferSize、Preprocess、SpGEMM、WorkEstimation、Compute 共用。 */
-static aclsparseStatus_t SpgemmPrepareLaunch(
-    aclsparseHandle_t handle,
+struct SpGemmComputeLayout {
+    size_t cursors = 0;
+    size_t candidateCols = 0;
+    size_t candidateVals = 0;
+    size_t uniqueCounts = 0;
+    size_t blockSums = 0;
+    size_t blockOffsets = 0;
+    size_t total = 0;
+    size_t error = 0;
+    size_t bytes = 0;
+};
+
+struct SpGemmLegacyLayout {
+    SpGemmWorkLayout work;
+    size_t computeOffset = 0;
+    size_t computeCapacity = 0;
+    size_t zeroScalarOffset = 0;
+    size_t bytes = 0;
+};
+
+static size_t AlignUp(size_t value)
+{
+    if (value > std::numeric_limits<size_t>::max() - (kSpGemmAlignment - 1U)) {
+        return std::numeric_limits<size_t>::max();
+    }
+    return (value + kSpGemmAlignment - 1U) & ~(kSpGemmAlignment - 1U);
+}
+
+static bool AppendRegion(size_t count, size_t elementSize, size_t &cursor, size_t &offset)
+{
+    cursor = AlignUp(cursor);
+    if (cursor == std::numeric_limits<size_t>::max() ||
+        (elementSize != 0U && count > (std::numeric_limits<size_t>::max() - cursor) / elementSize)) {
+        return false;
+    }
+    offset = cursor;
+    cursor += count * elementSize;
+    return true;
+}
+
+static uint32_t ScanChunkSize(uint64_t rows)
+{
+    // Short/medium matrices benefit from many shallow independent scans.  The
+    // 1024-entry chunk remains preferable for very large task-table cases,
+    // where it bounds the serial scan of chunk totals.
+    return rows <= 32768U ? 32U : kSpGemmScanChunk;
+}
+
+static uint64_t NumScanChunks(uint64_t rows)
+{
+    uint32_t chunkSize = ScanChunkSize(rows);
+    if (chunkSize == 0U) {
+        OP_LOGE(kSpGemmTag, "scan chunk size must be nonzero");
+        return 0U;
+    }
+    return rows == 0 ? 1U : (rows + chunkSize - 1U) / chunkSize;
+}
+
+static bool BuildWorkLayout(uint64_t rows, SpGemmWorkLayout &layout)
+{
+    size_t cursor = 0;
+    uint64_t chunks = NumScanChunks(rows);
+    if (chunks == 0U || rows > std::numeric_limits<size_t>::max() ||
+        chunks > std::numeric_limits<size_t>::max()) {
+        return false;
+    }
+    bool ok = AppendRegion(static_cast<size_t>(rows), sizeof(int64_t), cursor, layout.counts) &&
+        AppendRegion(static_cast<size_t>(rows + 1U), sizeof(int64_t), cursor, layout.offsets) &&
+        AppendRegion(static_cast<size_t>(chunks), sizeof(int64_t), cursor, layout.blockSums) &&
+        AppendRegion(static_cast<size_t>(chunks), sizeof(int64_t), cursor, layout.blockOffsets) &&
+        AppendRegion(1U, sizeof(int64_t), cursor, layout.total) &&
+        AppendRegion(1U, sizeof(int32_t), cursor, layout.regular) &&
+        AppendRegion(1U, sizeof(int32_t), cursor, layout.error);
+    layout.bytes = ok ? AlignUp(cursor) : std::numeric_limits<size_t>::max();
+    return ok && layout.bytes != std::numeric_limits<size_t>::max();
+}
+
+static size_t ValueTypeSize(aclDataType type)
+{
+    if (type == ACL_FLOAT16 || type == ACL_BF16) {
+        return 2U;
+    }
+    if (type == ACL_FLOAT) {
+        return 4U;
+    }
+    if (type == ACL_COMPLEX64) {
+        return 8U;
+    }
+    return 0U;
+}
+
+static bool BuildComputeLayout(
+    uint64_t rows, uint64_t nnzA, uint64_t products,
+    aclDataType type, SpGemmComputeLayout &layout)
+{
+    size_t cursor = 0;
+    uint64_t chunks = NumScanChunks(rows);
+    size_t valueSize = ValueTypeSize(type);
+    if (valueSize == 0U || rows > std::numeric_limits<size_t>::max() ||
+        nnzA > std::numeric_limits<size_t>::max() || products > std::numeric_limits<size_t>::max() ||
+        chunks > std::numeric_limits<size_t>::max()) {
+        return false;
+    }
+    bool ok = AppendRegion(static_cast<size_t>(nnzA), sizeof(int32_t), cursor, layout.cursors) &&
+        AppendRegion(static_cast<size_t>(products), sizeof(int32_t), cursor, layout.candidateCols) &&
+        AppendRegion(static_cast<size_t>(products), valueSize, cursor, layout.candidateVals) &&
+        AppendRegion(static_cast<size_t>(rows), sizeof(int32_t), cursor, layout.uniqueCounts) &&
+        AppendRegion(static_cast<size_t>(chunks), sizeof(int64_t), cursor, layout.blockSums) &&
+        AppendRegion(static_cast<size_t>(chunks), sizeof(int64_t), cursor, layout.blockOffsets) &&
+        AppendRegion(1U, sizeof(int64_t), cursor, layout.total) &&
+        AppendRegion(1U, sizeof(int32_t), cursor, layout.error);
+    layout.bytes = ok ? AlignUp(cursor) : std::numeric_limits<size_t>::max();
+    return ok && layout.bytes != std::numeric_limits<size_t>::max();
+}
+
+static bool MultiplyWithoutOverflow(uint64_t lhs, uint64_t rhs, uint64_t &result)
+{
+    if (rhs != 0U && lhs > std::numeric_limits<uint64_t>::max() / rhs) {
+        return false;
+    }
+    result = lhs * rhs;
+    return true;
+}
+
+static bool BuildLegacyLayout(
     aclsparseConstSpMatDescr_t matA, aclsparseConstSpMatDescr_t matB,
-    aclsparseSpMatDescr_t matC,
-    aclsparseOperation_t opA, aclsparseOperation_t opB,
-    aclDataType computeType, aclsparseSpGEMMAlg_t alg,
-    SpgemmLaunchCtx &ctx)
+    aclDataType type, SpGemmLegacyLayout &layout)
 {
-    ctx.matAInner = ToMatInnerConst(matA);
-    ctx.matBInner = ToMatInnerConst(matB);
-    ctx.matCInner = ToMatInner(matC);
-    aclsparseStatus_t st = ValidateSpgemmInputs(ctx.matAInner, ctx.matBInner, ctx.matCInner,
-                                                 opA, opB, computeType, alg);
-    if (st != ACL_SPARSE_STATUS_SUCCESS) return st;
-
-    /* 通过 aclsparseGetStream API 获取流，避免直接解引用内部结构 */
-    ctx.stream = nullptr;
-    if (handle != nullptr) {
-        aclsparseGetStream(handle, &ctx.stream);
+    if (!BuildWorkLayout(matA->rows, layout.work)) {
+        return false;
     }
-    ctx.m = static_cast<int32_t>(ctx.matAInner->rows);
-    ctx.n = static_cast<int32_t>(ctx.matBInner->cols);
-    ctx.k = static_cast<int32_t>(ctx.matAInner->cols);
-    ctx.blockDim = GetSpgemmBlockDim();
-    if (ctx.blockDim > static_cast<uint32_t>(ctx.m) && ctx.m > 0) {
-        ctx.blockDim = static_cast<uint32_t>(ctx.m);
+    uint64_t productsByA = 0;
+    uint64_t productsByRows = 0;
+    if (!MultiplyWithoutOverflow(matA->nnz, std::min(matB->cols, matB->nnz), productsByA) ||
+        !MultiplyWithoutOverflow(matA->rows, matB->nnz, productsByRows)) {
+        return false;
     }
-    if (ctx.blockDim < 1u) ctx.blockDim = 1u;
+    uint64_t maxProducts = std::min(productsByA, productsByRows);
+    maxProducts = std::min<uint64_t>(
+        maxProducts, static_cast<uint64_t>(std::numeric_limits<int32_t>::max()));
+    SpGemmComputeLayout compute{};
+    if (!BuildComputeLayout(matA->rows, matA->nnz, maxProducts, type, compute)) {
+        return false;
+    }
+    layout.computeOffset = AlignUp(layout.work.bytes);
+    if (layout.computeOffset == std::numeric_limits<size_t>::max() ||
+        compute.bytes > std::numeric_limits<size_t>::max() - layout.computeOffset) {
+        return false;
+    }
+    layout.computeCapacity = compute.bytes;
+    layout.zeroScalarOffset = AlignUp(layout.computeOffset + compute.bytes);
+    constexpr size_t kScalarBytes = sizeof(aclsparseComplex);
+    if (layout.zeroScalarOffset == std::numeric_limits<size_t>::max() ||
+        kScalarBytes > std::numeric_limits<size_t>::max() - layout.zeroScalarOffset) {
+        return false;
+    }
+    layout.bytes = AlignUp(layout.zeroScalarOffset + kScalarBytes);
+    return layout.bytes != std::numeric_limits<size_t>::max();
+}
 
-    ctx.computeDtypeSize = GetComputeDtypeSize(computeType);
-    ctx.off = ComputeSpgemmWsOffsets(ctx.m, ctx.n, ctx.k,
-                                      static_cast<int64_t>(ctx.matAInner->nnz),
-                                      static_cast<int32_t>(ctx.blockDim),
-                                      ctx.computeDtypeSize);
+static bool IsSupportedType(aclDataType type)
+{
+    return type == ACL_FLOAT16 || type == ACL_BF16 ||
+        type == ACL_FLOAT || type == ACL_COMPLEX64;
+}
+
+static bool IsSupportedAlg(aclsparseSpGEMMAlg_t alg)
+{
+    return alg == ACL_SPARSE_SPGEMM_DEFAULT || alg == ACL_SPARSE_SPGEMM_ALG1 ||
+        alg == ACL_SPARSE_SPGEMM_ALG2 || alg == ACL_SPARSE_SPGEMM_ALG3;
+}
+
+static aclsparseStatus_t ValidateDescriptor(const aclsparseSpMatDescr *mat, const char *name)
+{
+    if (mat == nullptr) {
+        OP_LOGE(kSpGemmTag, "%s is nullptr", name);
+        return ACL_SPARSE_STATUS_INVALID_VALUE;
+    }
+    if (mat->format != ACL_SPARSE_FORMAT_CSR) {
+        OP_LOGE(kSpGemmTag, "%s must use CSR format", name);
+        return ACL_SPARSE_STATUS_MATRIX_TYPE_NOT_SUPPORTED;
+    }
+    if (mat->ptrType != ACL_SPARSE_INDEX_32I || mat->IdxType != ACL_SPARSE_INDEX_32I) {
+        OP_LOGE(kSpGemmTag, "%s requires int32 row offsets and column indices", name);
+        return ACL_SPARSE_STATUS_NOT_SUPPORTED;
+    }
+    if (mat->baseType != ACL_SPARSE_INDEX_BASE_ZERO) {
+        OP_LOGE(kSpGemmTag, "%s requires zero-based indices", name);
+        return ACL_SPARSE_STATUS_NOT_SUPPORTED;
+    }
+    constexpr uint64_t kI32Max = static_cast<uint64_t>(std::numeric_limits<int32_t>::max());
+    if (mat->rows > kI32Max || mat->cols > kI32Max || mat->nnz > kI32Max) {
+        OP_LOGE(kSpGemmTag, "%s shape/nnz exceeds int32 CSR limits", name);
+        return ACL_SPARSE_STATUS_NOT_SUPPORTED;
+    }
     return ACL_SPARSE_STATUS_SUCCESS;
 }
 
-/* ---- Preprocess 各阶段子函数 ---- */
-
-/* SpgemmPreprocessHostData: 拷贝 B rowPtr + 校验排序 + D2H 拷贝 + 行权重 + bin-pack。 */
-static aclsparseStatus_t SpgemmPreprocessHostData(
-    aclsparseSpMatDescr *matAInner, aclsparseSpMatDescr *matBInner,
-    int32_t m, int32_t k, uint32_t blockDim,
-    void *buffer, const SpgemmWsOffsets &off, aclrtStream stream)
+static aclsparseStatus_t ValidateInputPointers(const aclsparseSpMatDescr *mat, const char *name)
 {
-    /* Copy B rowPtr to workspace */
-    aclsparseStatus_t bRet = SpgemmCopyBRowPtrToWorkspace(matBInner, buffer, off, stream);
-    if (bRet != ACL_SPARSE_STATUS_SUCCESS) return bRet;
-
-    /* 校验 A/B 列索引是否有序 */
-    aclsparseStatus_t sortSt = SpgemmValidateCsrSorted(matAInner, "matA");
-    if (sortSt != ACL_SPARSE_STATUS_SUCCESS) return sortSt;
-    sortSt = SpgemmValidateCsrSorted(matBInner, "matB");
-    if (sortSt != ACL_SPARSE_STATUS_SUCCESS) return sortSt;
-
-    /* D2H copy A rowPtr + A colInd + B rowPtr for host-side weight computation */
-    std::vector<int32_t> aRowPtrHost(m + 1);
-    aclError aclRet = aclrtMemcpy(aRowPtrHost.data(), (m + 1) * sizeof(int32_t),
-                           matAInner->ptrs, (m + 1) * sizeof(int32_t),
-                           ACL_MEMCPY_DEVICE_TO_HOST);
-    if (aclRet != ACL_ERROR_NONE) {
-        OP_LOGE("spgemm", "D2H copy A rowPtr failed, ret=%d", aclRet);
-        return ACL_SPARSE_STATUS_EXECUTION_FAILED;
+    if (mat->rows > 0 && mat->ptrs == nullptr) {
+        OP_LOGE(kSpGemmTag, "%s rowOffsets is nullptr", name);
+        return ACL_SPARSE_STATUS_INVALID_VALUE;
     }
-
-    std::vector<int32_t> aColIndHost(matAInner->nnz);
-    aclRet = aclrtMemcpy(aColIndHost.data(), matAInner->nnz * sizeof(int32_t),
-                          matAInner->idxs, matAInner->nnz * sizeof(int32_t),
-                          ACL_MEMCPY_DEVICE_TO_HOST);
-    if (aclRet != ACL_ERROR_NONE) {
-        OP_LOGE("spgemm", "D2H copy A colInd failed, ret=%d", aclRet);
-        return ACL_SPARSE_STATUS_EXECUTION_FAILED;
+    if (mat->nnz > 0 && (mat->idxs == nullptr || mat->values == nullptr)) {
+        OP_LOGE(kSpGemmTag, "%s column indices or values is nullptr", name);
+        return ACL_SPARSE_STATUS_INVALID_VALUE;
     }
-
-    std::vector<int32_t> bRowPtrHost(k + 1);
-    aclRet = aclrtMemcpy(bRowPtrHost.data(), (k + 1) * sizeof(int32_t),
-                          matBInner->ptrs, (k + 1) * sizeof(int32_t),
-                          ACL_MEMCPY_DEVICE_TO_HOST);
-    if (aclRet != ACL_ERROR_NONE) {
-        OP_LOGE("spgemm", "D2H copy B rowPtr failed, ret=%d", aclRet);
-        return ACL_SPARSE_STATUS_EXECUTION_FAILED;
-    }
-
-    /* Compute row weights + greedy bin-packing */
-    std::vector<int32_t> rowWeights(m, 0);
-    SpgemmComputeRowWeights(aRowPtrHost, aColIndHost, bRowPtrHost, rowWeights);
-    SpgemmRowBinPackResult binPack;
-    SpgemmGreedyRowBinPack(rowWeights, static_cast<int32_t>(blockDim), binPack);
-
-    bRet = SpgemmWriteReorderToWorkspace(binPack, buffer, off, stream);
-    if (bRet != ACL_SPARSE_STATUS_SUCCESS) return bRet;
-
     return ACL_SPARSE_STATUS_SUCCESS;
 }
 
-/* SpgemmPreprocessRunKernels: 符号阶段 kernel + prefixsum + nnzC 回读 + 容量校验。 */
-static aclsparseStatus_t SpgemmPreprocessRunKernels(
-    aclsparseSpMatDescr *matAInner, aclsparseSpMatDescr *matBInner,
-    aclsparseSpMatDescr *matCInner,
-    int32_t m, int32_t n, uint32_t blockDim,
-    void *buffer, const SpgemmWsOffsets &off, aclrtStream stream)
+static aclsparseStatus_t ValidateBasicArguments(
+    aclsparseHandle_t handle, aclsparseOperation_t opA, aclsparseOperation_t opB,
+    const void *alpha, const void *beta, aclDataType computeType,
+    aclsparseSpGEMMAlg_t alg, aclsparseSpGEMMDescr_t descr)
 {
-    /* Zero nnzPerRow before symbolic kernel writes to it */
-    int64_t nnzPerRowBytes = m * sizeof(int32_t);
-    aclError zeroRet = aclrtMemsetAsync(
-        static_cast<uint8_t *>(buffer) + off.nnzPerRowOff,
-        nnzPerRowBytes, 0, nnzPerRowBytes, stream);
-    if (zeroRet != ACL_ERROR_NONE) {
-        OP_LOGE("spgemm", "aclrtMemsetAsync for nnzPerRow failed, ret=%d", zeroRet);
+    if (handle == nullptr) {
+        OP_LOGE(kSpGemmTag, "handle is nullptr");
+        return ACL_SPARSE_STATUS_HANDLE_IS_NULLPTR;
+    }
+    if (descr == nullptr || descr->signature != kSpGemmSignature || alpha == nullptr || beta == nullptr) {
+        OP_LOGE(kSpGemmTag, "descriptor or scalar pointer is invalid");
+        return ACL_SPARSE_STATUS_INVALID_VALUE;
+    }
+    if (opA != ACL_SPARSE_OP_NON_TRANSPOSE || opB != ACL_SPARSE_OP_NON_TRANSPOSE) {
+        OP_LOGE(kSpGemmTag, "only NON_TRANSPOSE is supported, opA=%d, opB=%d",
+            static_cast<int>(opA), static_cast<int>(opB));
+        return ACL_SPARSE_STATUS_NOT_SUPPORTED;
+    }
+    if (!IsSupportedAlg(alg) || !IsSupportedType(computeType)) {
+        OP_LOGE(kSpGemmTag, "unsupported algorithm or compute type, alg=%d, computeType=%d",
+            static_cast<int>(alg), static_cast<int>(computeType));
+        return ACL_SPARSE_STATUS_NOT_SUPPORTED;
+    }
+    return ACL_SPARSE_STATUS_SUCCESS;
+}
+
+static aclsparseStatus_t ValidateMatrices(
+    aclsparseConstSpMatDescr_t matA, aclsparseConstSpMatDescr_t matB,
+    aclsparseSpMatDescr_t matC, aclDataType computeType)
+{
+    aclsparseStatus_t status = ValidateDescriptor(matA, "matA");
+    if (status != ACL_SPARSE_STATUS_SUCCESS) {
+        return status;
+    }
+    status = ValidateDescriptor(matB, "matB");
+    if (status != ACL_SPARSE_STATUS_SUCCESS) {
+        return status;
+    }
+    status = ValidateDescriptor(matC, "matC");
+    if (status != ACL_SPARSE_STATUS_SUCCESS) {
+        return status;
+    }
+    status = ValidateInputPointers(matA, "matA");
+    if (status != ACL_SPARSE_STATUS_SUCCESS) {
+        return status;
+    }
+    status = ValidateInputPointers(matB, "matB");
+    if (status != ACL_SPARSE_STATUS_SUCCESS) {
+        return status;
+    }
+    if (matA->cols != matB->rows || matC->rows != matA->rows || matC->cols != matB->cols) {
+        OP_LOGE(kSpGemmTag, "matrix dimensions are incompatible");
+        return ACL_SPARSE_STATUS_INVALID_VALUE;
+    }
+    if (matA->valueType != computeType || matB->valueType != computeType || matC->valueType != computeType) {
+        OP_LOGE(kSpGemmTag, "matrix value types must match computeType=%d", static_cast<int>(computeType));
+        return ACL_SPARSE_STATUS_NOT_SUPPORTED;
+    }
+    return ACL_SPARSE_STATUS_SUCCESS;
+}
+
+static aclsparseStatus_t ValidateCommon(
+    aclsparseHandle_t handle, aclsparseOperation_t opA, aclsparseOperation_t opB,
+    const void *alpha, aclsparseConstSpMatDescr_t matA,
+    aclsparseConstSpMatDescr_t matB, const void *beta,
+    aclsparseSpMatDescr_t matC, aclDataType computeType,
+    aclsparseSpGEMMAlg_t alg, aclsparseSpGEMMDescr_t descr)
+{
+    aclsparseStatus_t status = ValidateBasicArguments(
+        handle, opA, opB, alpha, beta, computeType, alg, descr);
+    if (status != ACL_SPARSE_STATUS_SUCCESS) {
+        return status;
+    }
+    return ValidateMatrices(matA, matB, matC, computeType);
+}
+
+static void RecordProblem(
+    aclsparseSpGEMMDescr *descr, aclsparseConstSpMatDescr_t matA,
+    aclsparseConstSpMatDescr_t matB, aclsparseSpMatDescr_t matC,
+    aclDataType computeType, aclsparseSpGEMMAlg_t alg)
+{
+    descr->matA = matA;
+    descr->matB = matB;
+    descr->matC = matC;
+    descr->m = matA->rows;
+    descr->k = matA->cols;
+    descr->n = matB->cols;
+    descr->nnzA = matA->nnz;
+    descr->nnzB = matB->nnz;
+    descr->computeType = computeType;
+    descr->alg = alg;
+}
+
+static bool ProblemMatches(
+    const aclsparseSpGEMMDescr *descr, aclsparseConstSpMatDescr_t matA,
+    aclsparseConstSpMatDescr_t matB, aclsparseSpMatDescr_t matC,
+    aclDataType computeType, aclsparseSpGEMMAlg_t alg)
+{
+    return descr->matA == matA && descr->matB == matB && descr->matC == matC &&
+        descr->m == matA->rows && descr->k == matA->cols && descr->n == matB->cols &&
+        descr->nnzA == matA->nnz && descr->nnzB == matB->nnz &&
+        descr->computeType == computeType && descr->alg == alg;
+}
+
+static uint32_t LaunchBlocks(uint64_t rows)
+{
+    uint32_t cores = GetAivCoreCount();
+    if (cores == 0U) {
+        return 0U;
+    }
+    uint64_t needed = (rows + kSpGemmThreads - 1U) / kSpGemmThreads;
+    if (needed == 0U) {
+        needed = 1U;
+    }
+    return static_cast<uint32_t>(std::min<uint64_t>(cores, needed));
+}
+
+static uint32_t RowsPerBlock(uint64_t rows, uint32_t blocks)
+{
+    return blocks == 0U ? 0U : static_cast<uint32_t>((rows + blocks - 1U) / blocks);
+}
+
+static uint32_t ScanBlocks(uint64_t rows)
+{
+    uint32_t cores = GetAivCoreCount();
+    if (cores == 0U) {
+        return 0U;
+    }
+    // One SIMT thread scans one kSpGemmScanChunk chunk. Launching every AIV
+    // core for a short row array leaves almost all blocks idle.
+    uint64_t chunks = NumScanChunks(rows);
+    uint64_t needed = (chunks + kSpGemmThreads - 1U) / kSpGemmThreads;
+    return static_cast<uint32_t>(std::min<uint64_t>(cores, std::max<uint64_t>(1U, needed)));
+}
+
+static int32_t MapValueType(aclDataType type)
+{
+    if (type == ACL_FLOAT16) {
+        return SPGEMM_VAL_FP16;
+    }
+    if (type == ACL_BF16) {
+        return SPGEMM_VAL_BF16;
+    }
+    if (type == ACL_FLOAT) {
+        return SPGEMM_VAL_FP32;
+    }
+    return SPGEMM_VAL_COMPLEX64;
+}
+
+static bool CopyHostValue(void *destination, size_t destinationSize,
+    const void *source, size_t sourceSize)
+{
+    if (memcpy_s(destination, destinationSize, source, sourceSize) != EOK) {
+        OP_LOGE(kSpGemmTag, "failed to copy a host scalar value");
+        return false;
+    }
+    return true;
+}
+
+static bool HalfToFloat(uint16_t bits, float &value)
+{
+    uint32_t sign = static_cast<uint32_t>(bits & 0x8000U) << 16U;
+    uint32_t exponent = (bits >> 10U) & 0x1FU;
+    uint32_t mantissa = bits & 0x03FFU;
+    uint32_t result = 0;
+    if (exponent == 0U && mantissa == 0U) {
+        result = sign;
+    } else if (exponent == 0U) {
+        uint32_t shift = static_cast<uint32_t>(__builtin_clz(mantissa)) - 21U;
+        mantissa <<= shift;
+        result = sign | ((127U - 14U - shift) << 23U) | ((mantissa << 13U) & 0x7FFFFFU);
+    } else if (exponent == 31U) {
+        result = sign | 0x7F800000U | (mantissa << 13U);
+    } else {
+        result = sign | ((exponent + 112U) << 23U) | (mantissa << 13U);
+    }
+    value = 0.0F;
+    return CopyHostValue(&value, sizeof(value), &result, sizeof(result));
+}
+
+static bool BFloat16ToFloat(uint16_t bits, float &value)
+{
+    uint32_t result = static_cast<uint32_t>(bits) << 16U;
+    value = 0.0F;
+    return CopyHostValue(&value, sizeof(value), &result, sizeof(result));
+}
+
+static bool ReadHostScalar(const void *ptr, aclDataType type, float &real, float &imag)
+{
+    real = 0.0F;
+    imag = 0.0F;
+    if (type == ACL_FLOAT16 || type == ACL_BF16) {
+        uint16_t bits = 0;
+        if (!CopyHostValue(&bits, sizeof(bits), ptr, sizeof(bits))) {
+            return false;
+        }
+        return type == ACL_FLOAT16 ? HalfToFloat(bits, real) : BFloat16ToFloat(bits, real);
+    } else if (type == ACL_FLOAT) {
+        return CopyHostValue(&real, sizeof(real), ptr, sizeof(real));
+    } else {
+        aclsparseComplex value{};
+        if (!CopyHostValue(&value, sizeof(value), ptr, sizeof(value))) {
+            return false;
+        }
+        real = value.x;
+        imag = value.y;
+        return true;
+    }
+}
+
+static aclsparseStatus_t ClearDevice(void *ptr, size_t bytes, aclrtStream stream)
+{
+    aclError ret = aclrtMemsetAsync(ptr, bytes, 0, bytes, stream);
+    if (ret != ACL_SUCCESS) {
+        OP_LOGE(kSpGemmTag, "aclrtMemsetAsync failed, bytes=%zu, ret=%d", bytes, static_cast<int>(ret));
         return ACL_SPARSE_STATUS_EXECUTION_FAILED;
     }
+    return ACL_SPARSE_STATUS_SUCCESS;
+}
 
-    /* Sync: ensure H2D copies + D2D visible to kernel */
-    aclError aclRet = aclrtSynchronizeStream(stream);
-    if (aclRet != ACL_ERROR_NONE) {
-        OP_LOGE("spgemm", "Sync before symbolic kernel failed, ret=%d", aclRet);
+static aclsparseStatus_t ReadDeviceResult(
+    const void *totalDevice, const void *regularDevice, const void *errorDevice,
+    aclrtStream stream, int64_t &total, int32_t &regular, int32_t &error)
+{
+    aclError ret = aclrtMemcpyAsync(&total, sizeof(total), totalDevice, sizeof(total),
+        ACL_MEMCPY_DEVICE_TO_HOST, stream);
+    if (ret == ACL_SUCCESS && regularDevice != nullptr) {
+        ret = aclrtMemcpyAsync(&regular, sizeof(regular), regularDevice, sizeof(regular),
+            ACL_MEMCPY_DEVICE_TO_HOST, stream);
+    }
+    if (ret == ACL_SUCCESS) {
+        ret = aclrtMemcpyAsync(&error, sizeof(error), errorDevice, sizeof(error),
+            ACL_MEMCPY_DEVICE_TO_HOST, stream);
+    }
+    if (ret != ACL_SUCCESS || aclrtSynchronizeStream(stream) != ACL_SUCCESS) {
+        OP_LOGE(kSpGemmTag, "failed to read or synchronize a device stage result, ret=%d",
+            static_cast<int>(ret));
         return ACL_SPARSE_STATUS_EXECUTION_FAILED;
     }
+    return ACL_SPARSE_STATUS_SUCCESS;
+}
 
-    /* --- Symbolic kernel: count nnzPerRow --- */
-    SpgemmSymbolicTilingData symTiling{};
-    symTiling.m = m;
-    symTiling.n = n;
-    symTiling.blockDim = static_cast<int32_t>(blockDim);
-    symTiling.baseA = 0;
-    symTiling.baseB = 0;
-    symTiling.baseC = 0;
-    symTiling.reorderOffset = static_cast<int32_t>(off.reorderOff);
-    symTiling.binEdgeOffset = static_cast<int32_t>(off.binEdgeOff);
-    symTiling.symBitmapOffset = off.gmAccumOff;
+static bool IsRegularCandidate(
+    aclsparseConstSpMatDescr_t matA, aclsparseConstSpMatDescr_t matB)
+{
+    return matA->rows > 0 && matA->rows == matA->cols &&
+        matA->rows == matB->rows && matA->rows == matB->cols && matA->nnz == matB->nnz &&
+        matA->nnz % matA->rows == 0 && matA->nnz / matA->rows > 0 &&
+        matA->nnz / matA->rows <= 8 &&
+        (matA->nnz / matA->rows) * (matA->nnz / matA->rows) <= matA->rows;
+}
 
-    GM_ADDR symTilingGM = reinterpret_cast<GM_ADDR>(
-        static_cast<uint8_t *>(buffer) + off.tilingOff);
-    aclrtMemcpy(reinterpret_cast<void *>(symTilingGM), sizeof(symTiling),
-                &symTiling, sizeof(symTiling), ACL_MEMCPY_HOST_TO_DEVICE);
-
-    spgemm_symbolic_kernel_do(
-        reinterpret_cast<GM_ADDR>(matAInner->ptrs),
-        reinterpret_cast<GM_ADDR>(matAInner->idxs),
-        reinterpret_cast<GM_ADDR>(static_cast<uint8_t *>(buffer) + off.bRowPtrOff),
-        reinterpret_cast<GM_ADDR>(matBInner->idxs),
-        reinterpret_cast<GM_ADDR>(static_cast<uint8_t *>(buffer) + off.nnzPerRowOff),
-        reinterpret_cast<GM_ADDR>(buffer),
-        symTilingGM, blockDim, stream);
-
-    /* Sync: symbolic kernel must finish before prefixsum reads nnzPerRow */
-    aclRet = aclrtSynchronizeStream(stream);
-    if (aclRet != ACL_ERROR_NONE) {
-        OP_LOGE("spgemm", "Sync after symbolic kernel failed, ret=%d", aclRet);
+static aclsparseStatus_t InitializeWorkEstimation(
+    uint8_t *base, const SpGemmWorkLayout &layout,
+    bool regularCandidate, aclrtStream stream)
+{
+    aclsparseStatus_t status = ClearDevice(base + layout.error, sizeof(int32_t), stream);
+    if (status != ACL_SPARSE_STATUS_SUCCESS) {
+        return status;
+    }
+    aclError ret = aclrtMemsetAsync(base + layout.regular, sizeof(int32_t),
+        regularCandidate ? 0xFF : 0, sizeof(int32_t), stream);
+    if (ret != ACL_SUCCESS) {
+        OP_LOGE(kSpGemmTag, "failed to initialize regular-path state, ret=%d", static_cast<int>(ret));
         return ACL_SPARSE_STATUS_EXECUTION_FAILED;
     }
+    return ACL_SPARSE_STATUS_SUCCESS;
+}
 
-    /* --- Prefix sum to build rowPtrC --- */
-    SpgemmPrefixSumTilingData psTiling{};
-    psTiling.m = m;
-    psTiling.baseC = 0;
+static SpGemmValidateTilingData MakeValidateTiling(
+    aclsparseConstSpMatDescr_t matA, aclsparseConstSpMatDescr_t matB,
+    bool regularCandidate, uint64_t validationRows, uint32_t validateBlocks)
+{
+    SpGemmValidateTilingData validate{};
+    validate.m = static_cast<int32_t>(matA->rows);
+    validate.k = static_cast<int32_t>(matA->cols);
+    validate.n = static_cast<int32_t>(matB->cols);
+    validate.nnzA = static_cast<int32_t>(matA->nnz);
+    validate.nnzB = static_cast<int32_t>(matB->nnz);
+    validate.regularDegree = regularCandidate ?
+        static_cast<int32_t>(matA->nnz / matA->rows) : 0;
+    validate.rowsPerBlock = RowsPerBlock(validationRows, validateBlocks);
+    return validate;
+}
 
-    GM_ADDR psTilingGM = reinterpret_cast<GM_ADDR>(
-        static_cast<uint8_t *>(buffer) + off.tilingOff);
-    aclrtMemcpy(reinterpret_cast<void *>(psTilingGM), sizeof(psTiling),
-                &psTiling, sizeof(psTiling), ACL_MEMCPY_HOST_TO_DEVICE);
+static void LaunchValidation(
+    aclsparseConstSpMatDescr_t matA, aclsparseConstSpMatDescr_t matB,
+    uint8_t *base, const SpGemmWorkLayout &layout,
+    const SpGemmValidateTilingData &validate, uint32_t validateBlocks,
+    aclrtStream stream)
+{
+    spgemm_validate_kernel_do(
+        reinterpret_cast<GM_ADDR>(matA->ptrs), reinterpret_cast<GM_ADDR>(matA->idxs),
+        reinterpret_cast<GM_ADDR>(matB->ptrs), reinterpret_cast<GM_ADDR>(matB->idxs),
+        reinterpret_cast<GM_ADDR>(base + layout.offsets),
+        reinterpret_cast<GM_ADDR>(base + layout.total),
+        reinterpret_cast<GM_ADDR>(base + layout.regular),
+        reinterpret_cast<GM_ADDR>(base + layout.error), validate, validateBlocks, stream);
+}
 
-    int32_t *nnzCDev = reinterpret_cast<int32_t *>(
-        static_cast<uint8_t *>(buffer) + off.rowPtrCOff) + (m + 1);
-
-    spgemm_prefixsum_kernel_do(
-        reinterpret_cast<GM_ADDR>(static_cast<uint8_t *>(buffer) + off.nnzPerRowOff),
-        reinterpret_cast<GM_ADDR>(matCInner->ptrs),
-        reinterpret_cast<GM_ADDR>(nnzCDev),
-        psTilingGM, stream);
-
-    /* Sync: prefixsum must complete before D2H read of nnzC */
-    aclRet = aclrtSynchronizeStream(stream);
-    if (aclRet != ACL_ERROR_NONE) {
-        OP_LOGE("spgemm", "Sync after prefixsum kernel failed, ret=%d", aclRet);
-        return ACL_SPARSE_STATUS_EXECUTION_FAILED;
+static aclsparseStatus_t LaunchProductCount(
+    aclsparseConstSpMatDescr_t matA, aclsparseConstSpMatDescr_t matB,
+    uint8_t *base, const SpGemmWorkLayout &layout,
+    uint32_t workBlocks, aclrtStream stream)
+{
+    if (matA->rows == 0) {
+        aclsparseStatus_t status = ClearDevice(base + layout.offsets, sizeof(int64_t), stream);
+        if (status == ACL_SPARSE_STATUS_SUCCESS) {
+            status = ClearDevice(base + layout.total, sizeof(int64_t), stream);
+        }
+        return status;
     }
+    SpGemmWorkTilingData work{};
+    work.m = static_cast<int32_t>(matA->rows);
+    work.k = static_cast<int32_t>(matA->cols);
+    work.nnzA = static_cast<int32_t>(matA->nnz);
+    work.nnzB = static_cast<int32_t>(matB->nnz);
+    work.rowsPerBlock = RowsPerBlock(matA->rows, workBlocks);
+    spgemm_work_kernel_do(
+        reinterpret_cast<GM_ADDR>(matA->ptrs), reinterpret_cast<GM_ADDR>(matA->idxs),
+        reinterpret_cast<GM_ADDR>(matB->ptrs), reinterpret_cast<GM_ADDR>(base + layout.counts),
+        reinterpret_cast<GM_ADDR>(base + layout.regular),
+        reinterpret_cast<GM_ADDR>(base + layout.error), work, workBlocks, stream);
+    SpGemmScanTilingData scan{};
+    scan.count = static_cast<int32_t>(matA->rows);
+    scan.numChunks = static_cast<int32_t>(NumScanChunks(matA->rows));
+    scan.chunkSize = static_cast<int32_t>(ScanChunkSize(matA->rows));
+    scan.outerBlocks = ScanBlocks(matA->rows);
+    spgemm_scan_i64_kernel_do(
+        reinterpret_cast<GM_ADDR>(base + layout.counts),
+        reinterpret_cast<GM_ADDR>(base + layout.offsets),
+        reinterpret_cast<GM_ADDR>(base + layout.blockSums),
+        reinterpret_cast<GM_ADDR>(base + layout.blockOffsets),
+        reinterpret_cast<GM_ADDR>(base + layout.total),
+        reinterpret_cast<GM_ADDR>(base + layout.regular),
+        reinterpret_cast<GM_ADDR>(base + layout.error), scan, scan.outerBlocks, stream);
+    return ACL_SPARSE_STATUS_SUCCESS;
+}
 
-    /* D2H read nnzC */
-    int32_t nnzCHost = 0;
-    aclRet = aclrtMemcpy(&nnzCHost, sizeof(int32_t), nnzCDev, sizeof(int32_t),
-                         ACL_MEMCPY_DEVICE_TO_HOST);
-    if (aclRet != ACL_ERROR_NONE) {
-        OP_LOGE("spgemm", "D2H copy nnzC failed, ret=%d", aclRet);
-        return ACL_SPARSE_STATUS_EXECUTION_FAILED;
+static aclsparseStatus_t LaunchWorkEstimation(
+    aclsparseHandle_t handle, aclsparseConstSpMatDescr_t matA,
+    aclsparseConstSpMatDescr_t matB, aclsparseSpGEMMDescr_t descr,
+    const SpGemmWorkLayout &layout, void *buffer)
+{
+    auto *context = reinterpret_cast<aclsparseContext *>(handle);
+    if (context->stream == nullptr) {
+        OP_LOGE(kSpGemmTag, "handle stream is nullptr");
+        return ACL_SPARSE_STATUS_INVALID_VALUE;
     }
+    auto *base = static_cast<uint8_t *>(buffer);
+    bool regularCandidate = IsRegularCandidate(matA, matB);
+    aclsparseStatus_t status = InitializeWorkEstimation(
+        base, layout, regularCandidate, context->stream);
+    if (status != ACL_SPARSE_STATUS_SUCCESS) {
+        return status;
+    }
+    uint64_t validationRows = std::max(matA->rows, matB->rows);
+    uint32_t validateBlocks = LaunchBlocks(validationRows);
+    uint32_t workBlocks = LaunchBlocks(matA->rows);
+    if (validateBlocks == 0U || workBlocks == 0U) {
+        OP_LOGE(kSpGemmTag, "failed to obtain a valid AIV block count");
+        return ACL_SPARSE_STATUS_INTERNAL_ERROR;
+    }
+    SpGemmValidateTilingData validate = MakeValidateTiling(
+        matA, matB, regularCandidate, validationRows, validateBlocks);
+    LaunchValidation(matA, matB, base, layout, validate, validateBlocks, context->stream);
+    status = LaunchProductCount(matA, matB, base, layout, workBlocks, context->stream);
+    if (status != ACL_SPARSE_STATUS_SUCCESS) {
+        return status;
+    }
+    int64_t products = 0;
+    int32_t regular = 0;
+    int32_t error = 0;
+    status = ReadDeviceResult(base + layout.total, base + layout.regular,
+        base + layout.error, context->stream, products, regular, error);
+    if (status != ACL_SPARSE_STATUS_SUCCESS) {
+        return status;
+    }
+    if (error != 0 || products < 0 || products > std::numeric_limits<int32_t>::max()) {
+        OP_LOGE(kSpGemmTag, "invalid CSR input or product count, error=%d, products=%lld",
+            error, static_cast<long long>(products));
+        return error != 0 ? ACL_SPARSE_STATUS_INVALID_VALUE : ACL_SPARSE_STATUS_NOT_SUPPORTED;
+    }
+    descr->numProducts = products;
+    descr->regularDegree = regular != 0 ? validate.regularDegree : 0;
+    return ACL_SPARSE_STATUS_SUCCESS;
+}
 
-    /* Capacity check */
-    int64_t maxNnzC = static_cast<int64_t>(m) * static_cast<int64_t>(n);
-    if (maxNnzC > 500000000) maxNnzC = 500000000;
-    if (maxNnzC < 1024) maxNnzC = 1024;
+static aclsparseStatus_t BuildComputeTiling(
+    aclsparseHandle_t handle, const void *alpha, const void *beta,
+    aclDataType type, uint64_t rows, uint32_t blocks,
+    SpGemmComputeTilingData &tiling)
+{
+    auto *context = reinterpret_cast<aclsparseContext *>(handle);
+    tiling.valType = MapValueType(type);
+    tiling.rowsPerBlock = RowsPerBlock(rows, blocks);
+    if (context->pointerMode == ACL_SPARSE_POINTER_MODE_HOST) {
+        if (!ReadHostScalar(alpha, type, tiling.alphaReal, tiling.alphaImag) ||
+            !ReadHostScalar(beta, type, tiling.betaReal, tiling.betaImag)) {
+            return ACL_SPARSE_STATUS_INTERNAL_ERROR;
+        }
+    } else {
+        tiling.alphaPtr = reinterpret_cast<uint64_t>(alpha);
+        tiling.betaPtr = reinterpret_cast<uint64_t>(beta);
+    }
+    return ACL_SPARSE_STATUS_SUCCESS;
+}
 
-    if (static_cast<int64_t>(nnzCHost) > maxNnzC) {
-        OP_LOGE("spgemm", "nnzC=%d exceeds workspace capacity maxNnzC=%ld", nnzCHost, maxNnzC);
+static aclsparseStatus_t ValidateComputeOutput(
+    aclsparseHandle_t handle, aclsparseSpMatDescr_t matC,
+    const void *beta, aclDataType type)
+{
+    if (matC->ptrs == nullptr) {
+        OP_LOGE(kSpGemmTag, "matC rowOffsets is nullptr");
+        return ACL_SPARSE_STATUS_INVALID_VALUE;
+    }
+    auto *context = reinterpret_cast<aclsparseContext *>(handle);
+    if (context->pointerMode == ACL_SPARSE_POINTER_MODE_DEVICE) {
+        return ACL_SPARSE_STATUS_SUCCESS;
+    }
+    float real = 0.0F;
+    float imag = 0.0F;
+    if (!ReadHostScalar(beta, type, real, imag)) {
+        return ACL_SPARSE_STATUS_INTERNAL_ERROR;
+    }
+    bool betaNonzero = real != 0.0F || imag != 0.0F;
+    if (betaNonzero && matC->nnz > 0 && (matC->idxs == nullptr || matC->values == nullptr)) {
+        OP_LOGE(kSpGemmTag, "beta is nonzero but matC column indices or values is nullptr");
+        return ACL_SPARSE_STATUS_INVALID_VALUE;
+    }
+    return ACL_SPARSE_STATUS_SUCCESS;
+}
+
+static void LaunchComputeKernel(
+    aclsparseConstSpMatDescr_t matA, aclsparseConstSpMatDescr_t matB,
+    aclsparseSpMatDescr_t matC, uint8_t *workBase, uint8_t *computeBase,
+    const SpGemmWorkLayout &workLayout, const SpGemmComputeLayout &computeLayout,
+    const SpGemmComputeTilingData &compute, uint32_t blocks, aclrtStream stream)
+{
+    spgemm_compute_kernel_do(
+        reinterpret_cast<GM_ADDR>(matA->ptrs), reinterpret_cast<GM_ADDR>(matA->idxs),
+        reinterpret_cast<GM_ADDR>(matA->values), reinterpret_cast<GM_ADDR>(matB->ptrs),
+        reinterpret_cast<GM_ADDR>(matB->idxs), reinterpret_cast<GM_ADDR>(matB->values),
+        reinterpret_cast<GM_ADDR>(matC->ptrs), reinterpret_cast<GM_ADDR>(matC->idxs),
+        reinterpret_cast<GM_ADDR>(matC->values), reinterpret_cast<GM_ADDR>(workBase + workLayout.offsets),
+        reinterpret_cast<GM_ADDR>(computeBase + computeLayout.cursors),
+        reinterpret_cast<GM_ADDR>(computeBase + computeLayout.candidateCols),
+        reinterpret_cast<GM_ADDR>(computeBase + computeLayout.candidateVals),
+        reinterpret_cast<GM_ADDR>(computeBase + computeLayout.uniqueCounts),
+        reinterpret_cast<GM_ADDR>(computeBase + computeLayout.error), compute, blocks, stream);
+}
+
+static void LaunchNnzScan(
+    aclsparseConstSpMatDescr_t matA, aclsparseSpMatDescr_t matC,
+    uint8_t *base, const SpGemmComputeLayout &layout, aclrtStream stream)
+{
+    SpGemmScanTilingData scan{};
+    scan.count = static_cast<int32_t>(matA->rows);
+    scan.numChunks = static_cast<int32_t>(NumScanChunks(matA->rows));
+    scan.chunkSize = static_cast<int32_t>(ScanChunkSize(matA->rows));
+    scan.outerBlocks = ScanBlocks(matA->rows);
+    spgemm_scan_i32_kernel_do(
+        reinterpret_cast<GM_ADDR>(base + layout.uniqueCounts),
+        reinterpret_cast<GM_ADDR>(matC->ptrs),
+        reinterpret_cast<GM_ADDR>(base + layout.blockSums),
+        reinterpret_cast<GM_ADDR>(base + layout.blockOffsets),
+        reinterpret_cast<GM_ADDR>(base + layout.total),
+        reinterpret_cast<GM_ADDR>(base + layout.error), scan, scan.outerBlocks, stream);
+}
+
+static aclsparseStatus_t LaunchNonEmptyCompute(
+    aclsparseHandle_t handle, const void *alpha,
+    aclsparseConstSpMatDescr_t matA, aclsparseConstSpMatDescr_t matB,
+    const void *beta, aclsparseSpMatDescr_t matC,
+    aclsparseSpGEMMDescr_t descr, const SpGemmComputeLayout &layout,
+    uint8_t *base, uint32_t blocks, bool &complete)
+{
+    auto *context = reinterpret_cast<aclsparseContext *>(handle);
+    SpGemmComputeTilingData compute{};
+    compute.m = static_cast<int32_t>(matA->rows);
+    compute.k = static_cast<int32_t>(matA->cols);
+    compute.n = static_cast<int32_t>(matB->cols);
+    compute.nnzA = static_cast<int32_t>(matA->nnz);
+    compute.nnzB = static_cast<int32_t>(matB->nnz);
+    aclsparseStatus_t status = BuildComputeTiling(
+        handle, alpha, beta, descr->computeType, matA->rows, blocks, compute);
+    if (status != ACL_SPARSE_STATUS_SUCCESS) {
+        return status;
+    }
+    // DEVICE 模式不在 Host 侧读取标量，避免为判断 beta 引入 D2H 同步；
+    // 由通用 Kernel 直接读取 device beta，可同时覆盖 beta 为零和非零的情况。
+    bool hostZeroBeta = !descr->forceGenericPath &&
+        context->pointerMode == ACL_SPARSE_POINTER_MODE_HOST &&
+        compute.betaReal == 0.0F && compute.betaImag == 0.0F;
+    compute.regularDegree = hostZeroBeta ? descr->regularDegree : 0;
+    compute.directOutput = compute.regularDegree > 0 && matC->idxs != nullptr &&
+        matC->values != nullptr && matC->nnz == static_cast<uint64_t>(descr->numProducts);
+    SpGemmWorkLayout workLayout{};
+    if (!BuildWorkLayout(matA->rows, workLayout)) {
+        OP_LOGE(kSpGemmTag, "failed to build the work workspace layout");
+        return ACL_SPARSE_STATUS_INVALID_VALUE;
+    }
+    auto *workBase = static_cast<uint8_t *>(descr->externalBuffer1);
+    LaunchComputeKernel(matA, matB, matC, workBase, base,
+        workLayout, layout, compute, blocks, context->stream);
+    complete = compute.regularDegree > 0;
+    if (complete) {
+        matC->nnz = static_cast<uint64_t>(descr->numProducts);
+        descr->nnzC = descr->numProducts;
+        descr->copyRequired = compute.directOutput == 0;
+        return ACL_SPARSE_STATUS_SUCCESS;
+    }
+    LaunchNnzScan(matA, matC, base, layout, context->stream);
+    return ACL_SPARSE_STATUS_SUCCESS;
+}
+
+static aclsparseStatus_t FinalizeCompute(
+    uint8_t *base, const SpGemmComputeLayout &layout, aclrtStream stream,
+    aclsparseSpMatDescr_t matC, aclsparseSpGEMMDescr_t descr)
+{
+    int64_t nnzC = 0;
+    int32_t unused = 0;
+    int32_t error = 0;
+    aclsparseStatus_t status = ReadDeviceResult(
+        base + layout.total, nullptr, base + layout.error, stream, nnzC, unused, error);
+    if (status != ACL_SPARSE_STATUS_SUCCESS) {
+        return status;
+    }
+    if (error != 0 || nnzC < 0 || nnzC > std::numeric_limits<int32_t>::max()) {
+        OP_LOGE(kSpGemmTag, "invalid compute result, error=%d, nnzC=%lld",
+            error, static_cast<long long>(nnzC));
+        return error != 0 ? ACL_SPARSE_STATUS_INVALID_VALUE : ACL_SPARSE_STATUS_NOT_SUPPORTED;
+    }
+    matC->nnz = static_cast<uint64_t>(nnzC);
+    descr->nnzC = nnzC;
+    descr->copyRequired = true;
+    return ACL_SPARSE_STATUS_SUCCESS;
+}
+
+static aclsparseStatus_t LaunchCompute(
+    aclsparseHandle_t handle, const void *alpha,
+    aclsparseConstSpMatDescr_t matA, aclsparseConstSpMatDescr_t matB,
+    const void *beta, aclsparseSpMatDescr_t matC,
+    aclsparseSpGEMMDescr_t descr, const SpGemmComputeLayout &layout,
+    void *buffer)
+{
+    auto *context = reinterpret_cast<aclsparseContext *>(handle);
+    if (context->stream == nullptr) {
+        OP_LOGE(kSpGemmTag, "handle stream is nullptr");
+        return ACL_SPARSE_STATUS_INVALID_VALUE;
+    }
+    aclsparseStatus_t status = ValidateComputeOutput(handle, matC, beta, descr->computeType);
+    if (status != ACL_SPARSE_STATUS_SUCCESS) {
+        return status;
+    }
+    auto *base = static_cast<uint8_t *>(buffer);
+    status = ClearDevice(base + layout.error, sizeof(int32_t), context->stream);
+    if (status != ACL_SPARSE_STATUS_SUCCESS) {
+        return status;
+    }
+    uint32_t blocks = LaunchBlocks(matA->rows);
+    if (blocks == 0U) {
+        OP_LOGE(kSpGemmTag, "failed to obtain a valid AIV block count");
+        return ACL_SPARSE_STATUS_INTERNAL_ERROR;
+    }
+    bool complete = false;
+    if (matA->rows > 0) {
+        status = LaunchNonEmptyCompute(
+            handle, alpha, matA, matB, beta, matC, descr, layout, base, blocks, complete);
+        if (status != ACL_SPARSE_STATUS_SUCCESS || complete) {
+            return status;
+        }
+    } else {
+        status = ClearDevice(matC->ptrs, sizeof(int32_t), context->stream);
+        if (status == ACL_SPARSE_STATUS_SUCCESS) {
+            status = ClearDevice(base + layout.total, sizeof(int64_t), context->stream);
+        }
+        if (status != ACL_SPARSE_STATUS_SUCCESS) {
+            return status;
+        }
+    }
+    return FinalizeCompute(base, layout, context->stream, matC, descr);
+}
+
+static aclsparseStatus_t ValidateStageProblem(
+    const aclsparseSpGEMMDescr *descr, aclsparseConstSpMatDescr_t matA,
+    aclsparseConstSpMatDescr_t matB, aclsparseSpMatDescr_t matC,
+    aclDataType type, aclsparseSpGEMMAlg_t alg)
+{
+    return ProblemMatches(descr, matA, matB, matC, type, alg) ?
+        ACL_SPARSE_STATUS_SUCCESS : ACL_SPARSE_STATUS_INVALID_VALUE;
+}
+
+static aclsparseStatus_t ValidateCopyStage(
+    aclsparseConstSpMatDescr_t matA, aclsparseConstSpMatDescr_t matB,
+    aclsparseSpMatDescr_t matC, aclDataType computeType,
+    aclsparseSpGEMMAlg_t alg, aclsparseSpGEMMDescr_t descr)
+{
+    if (descr->state != AclsparseSpGemmState::COMPUTED ||
+        ValidateStageProblem(descr, matA, matB, matC, computeType, alg) != ACL_SPARSE_STATUS_SUCCESS ||
+        descr->externalBuffer1 == nullptr || descr->externalBuffer2 == nullptr) {
+        OP_LOGE(kSpGemmTag, "invalid Copy state, stage problem, or workspace lifetime");
+        return ACL_SPARSE_STATUS_INVALID_VALUE;
+    }
+    if (matC->ptrs == nullptr || (matC->nnz > 0 && (matC->idxs == nullptr || matC->values == nullptr))) {
+        OP_LOGE(kSpGemmTag, "matC output pointers are invalid for nnz=%llu",
+            static_cast<unsigned long long>(matC->nnz));
+        return ACL_SPARSE_STATUS_INVALID_VALUE;
+    }
+    return ACL_SPARSE_STATUS_SUCCESS;
+}
+
+static aclsparseStatus_t LaunchCopy(
+    aclsparseHandle_t handle, aclsparseConstSpMatDescr_t matA,
+    aclsparseSpMatDescr_t matC, aclDataType computeType,
+    aclsparseSpGEMMDescr_t descr)
+{
+    auto *context = reinterpret_cast<aclsparseContext *>(handle);
+    if (context->stream == nullptr) {
+        OP_LOGE(kSpGemmTag, "handle stream is nullptr");
+        return ACL_SPARSE_STATUS_INVALID_VALUE;
+    }
+    SpGemmWorkLayout workLayout{};
+    SpGemmComputeLayout computeLayout{};
+    if (!BuildWorkLayout(matA->rows, workLayout) ||
+        !BuildComputeLayout(matA->rows, matA->nnz,
+            static_cast<uint64_t>(descr->numProducts), computeType, computeLayout)) {
+        OP_LOGE(kSpGemmTag, "failed to rebuild a workspace layout for Copy");
+        return ACL_SPARSE_STATUS_INVALID_VALUE;
+    }
+    uint32_t blocks = LaunchBlocks(matA->rows);
+    if (blocks == 0U) {
+        OP_LOGE(kSpGemmTag, "failed to obtain a valid AIV block count");
+        return ACL_SPARSE_STATUS_INTERNAL_ERROR;
+    }
+    SpGemmCopyTilingData copy{};
+    copy.m = static_cast<int32_t>(matA->rows);
+    copy.valType = MapValueType(computeType);
+    copy.numProducts = static_cast<int32_t>(descr->numProducts);
+    copy.nnzC = static_cast<int32_t>(descr->nnzC);
+    copy.rowsPerBlock = RowsPerBlock(matA->rows, blocks);
+    copy.numBlocks = blocks;
+    auto *workBase = static_cast<uint8_t *>(descr->externalBuffer1);
+    auto *computeBase = static_cast<uint8_t *>(descr->externalBuffer2);
+    spgemm_copy_kernel_do(
+        reinterpret_cast<GM_ADDR>(workBase + workLayout.offsets),
+        reinterpret_cast<GM_ADDR>(computeBase + computeLayout.uniqueCounts),
+        reinterpret_cast<GM_ADDR>(computeBase + computeLayout.candidateCols),
+        reinterpret_cast<GM_ADDR>(computeBase + computeLayout.candidateVals),
+        reinterpret_cast<GM_ADDR>(matC->ptrs), reinterpret_cast<GM_ADDR>(matC->idxs),
+        reinterpret_cast<GM_ADDR>(matC->values), copy, blocks, context->stream);
+    return ACL_SPARSE_STATUS_SUCCESS;
+}
+
+static void ReleaseLegacyDescriptor(aclsparseSpMatDescr_t matC)
+{
+    if (matC != nullptr) {
+        matC->legacySpGemmDescr.reset();
+        matC->legacySpGemmBuffer = nullptr;
+    }
+}
+
+static aclsparseStatus_t PrepareLegacyStages(
+    aclsparseHandle_t handle, aclsparseOperation_t opA, aclsparseOperation_t opB,
+    const void *alpha, aclsparseConstSpMatDescr_t matA,
+    aclsparseConstSpMatDescr_t matB, const void *beta,
+    aclsparseSpMatDescr_t matC, aclDataType computeType,
+    aclsparseSpGEMMAlg_t alg, aclsparseSpGEMMDescr_t descr,
+    const SpGemmLegacyLayout &layout, void *buffer, size_t &size2)
+{
+    size_t size1 = 0;
+    aclsparseStatus_t status = aclsparseSpGEMMWorkEstimation(
+        handle, opA, opB, alpha, matA, matB, beta, matC, computeType, alg,
+        descr, &size1, nullptr);
+    if (status == ACL_SPARSE_STATUS_SUCCESS) {
+        status = aclsparseSpGEMMWorkEstimation(
+            handle, opA, opB, alpha, matA, matB, beta, matC, computeType, alg,
+            descr, &size1, buffer);
+    }
+    size_t size3 = 0;
+    if (status == ACL_SPARSE_STATUS_SUCCESS) {
+        status = aclsparseSpGEMMEstimateMemory(
+            handle, opA, opB, alpha, matA, matB, beta, matC, computeType, alg,
+            descr, 1.0F, &size3, nullptr, &size2);
+    }
+    if (status == ACL_SPARSE_STATUS_SUCCESS && size2 > layout.computeCapacity) {
+        OP_LOGE(kSpGemmTag, "legacy compute workspace exceeds queried capacity");
         return ACL_SPARSE_STATUS_INSUFFICIENT_RESOURCES;
     }
-
-    matCInner->nnz = static_cast<uint64_t>(nnzCHost);
-    return ACL_SPARSE_STATUS_SUCCESS;
+    return status;
 }
 
-} // namespace
-
-extern "C" {
-
-/* ===== Stage 1: GetBufferSize — validate + query workspace size ===== */
-
-aclsparseStatus_t aclsparseSpGEMMGetBufferSize(
-    aclsparseHandle_t handle,
-    aclsparseOperation_t opA, aclsparseOperation_t opB,
-    const void * /*alpha*/,
-    aclsparseConstSpMatDescr_t matA,
-    aclsparseConstSpMatDescr_t matB,
-    const void * /*beta*/,
-    aclsparseSpMatDescr_t matC,
-    aclDataType computeType,
-    aclsparseSpGEMMAlg_t alg,
-    size_t *size)
+static aclsparseStatus_t LaunchLegacyCompute(
+    aclsparseHandle_t handle, aclsparseOperation_t opA, aclsparseOperation_t opB,
+    const void *alpha, aclsparseConstSpMatDescr_t matA,
+    aclsparseConstSpMatDescr_t matB, aclsparseSpMatDescr_t matC,
+    aclDataType computeType, aclsparseSpGEMMAlg_t alg,
+    aclsparseSpGEMMDescr_t descr, const SpGemmLegacyLayout &layout,
+    void *buffer, size_t &size2)
 {
-    if (size == nullptr) {
-        return ACL_SPARSE_STATUS_INVALID_VALUE;
-    }
-    SpgemmLaunchCtx ctx;
-    aclsparseStatus_t st = SpgemmPrepareLaunch(handle, matA, matB, matC,
-                                                 opA, opB, computeType, alg, ctx);
-    if (st != ACL_SPARSE_STATUS_SUCCESS) return st;
-    *size = static_cast<size_t>(ctx.off.totalBytes);
-    return ACL_SPARSE_STATUS_SUCCESS;
-}
-
-/* ===== Stage 2: Preprocess — symbolic phase ===== */
-/* Computes C structure (rowPtrC, nnzC) + reorder/binEdge, writes to workspace.
- * Sets matC->activeBuffer = buffer for structure reuse detection. */
-
-aclsparseStatus_t aclsparseSpGEMMPreprocess(
-    aclsparseHandle_t handle,
-    aclsparseOperation_t opA, aclsparseOperation_t opB,
-    const void * /*alpha*/,
-    aclsparseConstSpMatDescr_t matA,
-    aclsparseConstSpMatDescr_t matB,
-    const void * /*beta*/,
-    aclsparseSpMatDescr_t matC,
-    aclDataType computeType,
-    aclsparseSpGEMMAlg_t alg,
-    void *buffer)
-{
-    if (handle == nullptr) return ACL_SPARSE_STATUS_HANDLE_IS_NULLPTR;
-    if (buffer == nullptr) return ACL_SPARSE_STATUS_INSUFFICIENT_RESOURCES;
-
-    SpgemmLaunchCtx ctx;
-    aclsparseStatus_t st = SpgemmPrepareLaunch(handle, matA, matB, matC,
-                                                 opA, opB, computeType, alg, ctx);
-    if (st != ACL_SPARSE_STATUS_SUCCESS) return st;
-
-    aclsparseSpMatDescr *matAInner = ctx.matAInner;
-    aclsparseSpMatDescr *matBInner = ctx.matBInner;
-    aclsparseSpMatDescr *matCInner = ctx.matCInner;
-    int32_t m = ctx.m;
-    int32_t n = ctx.n;
-    uint32_t blockDim = ctx.blockDim;
-    aclrtStream stream = ctx.stream;
-    SpgemmWsOffsets off = ctx.off;
-
-    /* Zero workspace buffer */
-    aclError aclRet = aclrtMemsetAsync(buffer, static_cast<size_t>(off.totalBytes), 0,
-                                       static_cast<size_t>(off.totalBytes), stream);
-    if (aclRet != ACL_ERROR_NONE) {
-        OP_LOGE("spgemm", "aclrtMemsetAsync failed, ret=%d", aclRet);
-        return ACL_SPARSE_STATUS_EXECUTION_FAILED;
-    }
-
-    /* Empty matrix fast path */
-    if (matAInner->nnz == 0 || matBInner->nnz == 0) {
-        SpgemmFillTilingData fillTiling{};
-        fillTiling.count = m + 1;
-        fillTiling.value = 0;
-        GM_ADDR fillTilingGM = reinterpret_cast<GM_ADDR>(
-            static_cast<uint8_t *>(buffer) + off.tilingOff);
-        aclrtMemcpy(reinterpret_cast<void *>(fillTilingGM), sizeof(fillTiling),
-                    &fillTiling, sizeof(fillTiling), ACL_MEMCPY_HOST_TO_DEVICE);
-        spgemm_fill_kernel_do(
-            reinterpret_cast<GM_ADDR>(matCInner->ptrs), fillTilingGM, stream);
-        matCInner->nnz = 0;
-        matCInner->activeBuffer = buffer;
-        return ACL_SPARSE_STATUS_SUCCESS;
-    }
-
-    /* Stage 1: host-side data preparation (copy B + validate + D2H + weights + bin-pack) */
-    st = SpgemmPreprocessHostData(matAInner, matBInner, m, ctx.k, blockDim, buffer, off, stream);
-    if (st != ACL_SPARSE_STATUS_SUCCESS) return st;
-
-    /* Stage 2: symbolic + prefixsum kernels + nnzC readback */
-    st = SpgemmPreprocessRunKernels(matAInner, matBInner, matCInner,
-                                     m, n, blockDim, buffer, off, stream);
-    if (st != ACL_SPARSE_STATUS_SUCCESS) return st;
-
-    /* Mark structure as computed in this buffer (SpMM-style activeBuffer) */
-    matCInner->activeBuffer = buffer;
-    return ACL_SPARSE_STATUS_SUCCESS;
-}
-
-/* ===== Stage 3: SpGEMM — numeric phase ===== */
-/* Fills C values based on structure from Preprocess.
- * If matC->activeBuffer == buffer, structure is reused (skip symbolic).
- * Otherwise, auto-runs Preprocess first (full symbolic+numeric). */
-
-aclsparseStatus_t aclsparseSpGEMM(
-    aclsparseHandle_t handle,
-    aclsparseOperation_t opA, aclsparseOperation_t opB,
-    const void *alpha,
-    aclsparseConstSpMatDescr_t matA,
-    aclsparseConstSpMatDescr_t matB,
-    const void *beta,
-    aclsparseSpMatDescr_t matC,
-    aclDataType computeType,
-    aclsparseSpGEMMAlg_t alg,
-    void *buffer)
-{
-    if (handle == nullptr) return ACL_SPARSE_STATUS_HANDLE_IS_NULLPTR;
-    if (buffer == nullptr) return ACL_SPARSE_STATUS_INSUFFICIENT_RESOURCES;
-
-    SpgemmLaunchCtx ctx;
-    aclsparseStatus_t st = SpgemmPrepareLaunch(handle, matA, matB, matC,
-                                                 opA, opB, computeType, alg, ctx);
-    if (st != ACL_SPARSE_STATUS_SUCCESS) return st;
-
-    aclsparseSpMatDescr *matAInner = ctx.matAInner;
-    aclsparseSpMatDescr *matBInner = ctx.matBInner;
-    aclsparseSpMatDescr *matCInner = ctx.matCInner;
-    int32_t m = ctx.m;
-    int32_t n = ctx.n;
-    uint32_t blockDim = ctx.blockDim;
-    aclrtStream stream = ctx.stream;
-    SpgemmWsOffsets off = ctx.off;
-    int32_t computeDtypeSize = ctx.computeDtypeSize;
-    int32_t dataType = SpgemmDataTypeFromAcl(computeType);
-
-    /* Structure reuse: if Preprocess was called with this buffer, skip symbolic.
-     * Otherwise, run Preprocess inline (auto-preprocess for single-call convenience). */
-    if (matCInner->activeBuffer != buffer) {
-        st = aclsparseSpGEMMPreprocess(handle, opA, opB, alpha, matA, matB, beta, matC,
-                                       computeType, alg, buffer);
-        if (st != ACL_SPARSE_STATUS_SUCCESS) return st;
-    }
-
-    /* Empty matrix: numeric phase is no-op (rowPtrC already zero-filled by Preprocess) */
-    if (matAInner->nnz == 0 || matBInner->nnz == 0 || matCInner->nnz == 0) {
-        return ACL_SPARSE_STATUS_SUCCESS;
-    }
-
-    /* β≠0 + cInDataValid==1 路径：用户已填充 C_in 数据，保留不清零。
-     * cInDataValid==0 或 β=0：清零 valuesC 避免 kernel 读取未初始化数据。
-     * 由 aclsparseSpGEMMCompute 传入 matCInner->cInDataValid；3 阶段直调时默认 0。 */
-    if (matCInner->values != nullptr && matCInner->nnz > 0 &&
-        matCInner->cInDataValid == 0) {
-        int64_t valuesBytes = static_cast<int64_t>(matCInner->nnz) * computeDtypeSize;
-        aclError zeroRet = aclrtMemsetAsync(matCInner->values,
-                                            static_cast<size_t>(valuesBytes),
-                                            0,
-                                            static_cast<size_t>(valuesBytes),
-                                            stream);
-        if (zeroRet != ACL_ERROR_NONE) {
-            OP_LOGE("spgemm", "aclrtMemsetAsync for valuesC failed, ret=%d", zeroRet);
-            return ACL_SPARSE_STATUS_EXECUTION_FAILED;
-        }
-        /* Sync: memset must complete before numeric kernel reads valuesC */
-        aclError syncRet = aclrtSynchronizeStream(stream);
-        if (syncRet != ACL_ERROR_NONE) {
-            OP_LOGE("spgemm", "Sync after valuesC memset failed, ret=%d", syncRet);
-            return ACL_SPARSE_STATUS_EXECUTION_FAILED;
+    uint64_t hostZero = 0U;
+    const void *zeroBeta = &hostZero;
+    auto *context = reinterpret_cast<aclsparseContext *>(handle);
+    auto *base = static_cast<uint8_t *>(buffer);
+    if (context->pointerMode == ACL_SPARSE_POINTER_MODE_DEVICE) {
+        zeroBeta = base + layout.zeroScalarOffset;
+        aclsparseStatus_t status = ClearDevice(
+            const_cast<void *>(zeroBeta), sizeof(aclsparseComplex), context->stream);
+        if (status != ACL_SPARSE_STATUS_SUCCESS) {
+            return status;
         }
     }
-
-    /* --- Numeric kernel: fill colIdxC + valuesC --- */
-    SpgemmNumericTilingData numTiling{};
-    numTiling.m = m;
-    numTiling.n = n;
-    numTiling.blockDim = static_cast<int32_t>(blockDim);
-    numTiling.baseA = 0;
-    numTiling.baseB = 0;
-    numTiling.baseC = 0;
-    numTiling.reorderOffset = static_cast<int32_t>(off.reorderOff);
-    numTiling.binEdgeOffset = static_cast<int32_t>(off.binEdgeOff);
-    numTiling.rowPtrCOffset = static_cast<int32_t>(off.rowPtrCOff);
-    numTiling.nnzPerRowOffset = static_cast<int32_t>(off.nnzPerRowOff);
-    numTiling.accumOffset = off.gmAccumOff;       /* legacy field, same as numAccumOffset */
-    numTiling.numAccumOffset = off.gmAccumOff;     /* n>64 时 GM-backed 每 block 累加器 */
-    numTiling.symBitmapOffset = off.gmAccumOff;
-
-    /* 对齐 SpMM 风格，用 aclsparseGetPointerMode API 获取指针模式 */
-    aclsparsePointerMode_t pointerMode = ACL_SPARSE_POINTER_MODE_HOST;
-    aclsparseGetPointerMode(handle, &pointerMode);
-    if (pointerMode == ACL_SPARSE_POINTER_MODE_HOST) {
-        numTiling.alphaHost = ScalarReadF32(alpha);
-        numTiling.betaHost  = ScalarReadF32(beta);
-        numTiling.alphaPtr = 0;
-        numTiling.betaPtr  = 0;
-    } else {
-        numTiling.alphaPtr = reinterpret_cast<uint64_t>(alpha);
-        numTiling.betaPtr  = reinterpret_cast<uint64_t>(beta);
-        numTiling.alphaHost = 0.0f;
-        numTiling.betaHost  = 0.0f;
-    }
-
-    /* Fix: tiling 通过 GM 传递（对齐 SpMM 风格） */
-    GM_ADDR numTilingGM = reinterpret_cast<GM_ADDR>(
-        static_cast<uint8_t *>(buffer) + off.tilingOff);
-    aclrtMemcpy(reinterpret_cast<void *>(numTilingGM), sizeof(numTiling),
-                &numTiling, sizeof(numTiling), ACL_MEMCPY_HOST_TO_DEVICE);
-
-    spgemm_numeric_kernel_do(
-        reinterpret_cast<GM_ADDR>(matAInner->ptrs),
-        reinterpret_cast<GM_ADDR>(matAInner->idxs),
-        reinterpret_cast<GM_ADDR>(matAInner->values),
-        reinterpret_cast<GM_ADDR>(static_cast<uint8_t *>(buffer) + off.bRowPtrOff),
-        reinterpret_cast<GM_ADDR>(matBInner->idxs),
-        reinterpret_cast<GM_ADDR>(matBInner->values),
-        reinterpret_cast<GM_ADDR>(matCInner->ptrs),
-        reinterpret_cast<GM_ADDR>(matCInner->idxs),
-        reinterpret_cast<GM_ADDR>(matCInner->values),
-        reinterpret_cast<GM_ADDR>(static_cast<uint8_t *>(buffer) + off.nnzPerRowOff),
-        reinterpret_cast<GM_ADDR>(buffer),
-        numTilingGM, dataType, blockDim, stream);
-
-    return ACL_SPARSE_STATUS_SUCCESS;
+    descr->forceGenericPath = true;
+    aclsparseStatus_t status = aclsparseSpGEMMCompute(
+        handle, opA, opB, alpha, matA, matB, zeroBeta, matC, computeType, alg,
+        descr, &size2, base + layout.computeOffset);
+    descr->forceGenericPath = false;
+    return status;
 }
 
-/* 7 接口完整 API
- *
- * 生命周期：CreateDescr → WorkEstimation → [EstimateMemory] → Compute
- *           → GetNumProducts → Copy → DestroyDescr
- *
- * Compute 实现"调两次"模式：
- *   第一次：探测 maxNnzC 上界（仅符号阶段，无数值）
- *   第二次：执行符号 + 数值，容量已验证
- *
- * Buffer 分离：
- *   buffer1: WorkEstimation + Compute（符号阶段 workspace）
- *   buffer2: Compute + Copy（数值阶段 workspace + 结果暂存）
- *   buffer3: EstimateMemory（仅 ALG2/3；ALG_DEFAULT 返回 0）
- */
+}  // namespace
 
-/* ---- 1. CreateDescr / 2. DestroyDescr ---- */
-
-aclsparseStatus_t aclsparseSpGEMMCreateDescr(aclsparseSpGEMMDescr_t *descr)
+extern "C" aclsparseStatus_t aclsparseSpGEMMCreateDescr(aclsparseSpGEMMDescr_t *descr)
 {
-    if (descr == nullptr) {
+    if (descr == nullptr || *descr != nullptr) {
+        OP_LOGE(kSpGemmTag, "descriptor output is nullptr or already initialized");
         return ACL_SPARSE_STATUS_INVALID_VALUE;
     }
-    SpgemmDescr *inner = new(std::nothrow) SpgemmDescr{};
+    auto *inner = new (std::nothrow) aclsparseSpGEMMDescr();
     if (inner == nullptr) {
+        OP_LOGE(kSpGemmTag, "failed to allocate the SpGEMM descriptor");
         return ACL_SPARSE_STATUS_ALLOC_FAILED;
     }
-    inner->numProds = 0;
-    inner->nnzC = 0;
-    inner->maxNnzC = 0;
-    inner->phase = SPGEMM_PHASE_CREATED;
-    inner->cInDataValid = 0;
-    inner->buffer1Size = 0;
-    inner->buffer2Size = 0;
-    inner->buffer3Size = 0;
-    *descr = reinterpret_cast<aclsparseSpGEMMDescr_t>(inner);
+    inner->signature = kSpGemmSignature;
+    *descr = inner;
     return ACL_SPARSE_STATUS_SUCCESS;
 }
 
-aclsparseStatus_t aclsparseSpGEMMDestroyDescr(aclsparseSpGEMMDescr_t descr)
+extern "C" aclsparseStatus_t aclsparseSpGEMMDestroyDescr(aclsparseSpGEMMDescr_t descr)
 {
     if (descr == nullptr) {
         return ACL_SPARSE_STATUS_SUCCESS;
     }
-    SpgemmDescr *inner = reinterpret_cast<SpgemmDescr *>(descr);
-    delete inner;
-    return ACL_SPARSE_STATUS_SUCCESS;
-}
-
-/* ---- 3. WorkEstimation ---- */
-/* Validates inputs, estimates numProds, computes buffer1 size.
- * If buffer1 is NULL → size query only (no device work).
- * If buffer1 is non-NULL → runs symbolic kernel to get precise numProds + nnzC. */
-
-aclsparseStatus_t aclsparseSpGEMMWorkEstimation(
-    aclsparseHandle_t handle,
-    aclsparseSpGEMMDescr_t descr,
-    size_t *buffer1Size,
-    aclsparseOperation_t opA, aclsparseOperation_t opB,
-    const void * /*alpha*/,
-    aclsparseConstSpMatDescr_t matA,
-    aclsparseConstSpMatDescr_t matB,
-    const void * /*beta*/,
-    aclsparseSpMatDescr_t matC,
-    aclDataType computeType,
-    aclsparseSpGEMMAlg_t alg,
-    void *buffer1)
-{
-    if (buffer1Size == nullptr) return ACL_SPARSE_STATUS_INVALID_VALUE;
-    if (descr == nullptr) return ACL_SPARSE_STATUS_INVALID_VALUE;
-
-    SpgemmLaunchCtx ctx;
-    aclsparseStatus_t st = SpgemmPrepareLaunch(handle, matA, matB, matC,
-                                                 opA, opB, computeType, alg, ctx);
-    if (st != ACL_SPARSE_STATUS_SUCCESS) return st;
-
-    aclsparseSpMatDescr *matAInner = ctx.matAInner;
-    aclsparseSpMatDescr *matBInner = ctx.matBInner;
-    aclsparseSpMatDescr *matCInner = ctx.matCInner;
-    SpgemmDescr *desc = reinterpret_cast<SpgemmDescr *>(descr);
-    int32_t m = ctx.m;
-    int32_t n = ctx.n;
-    int32_t k = ctx.k;
-    SpgemmWsOffsets off = ctx.off;
-    desc->buffer1Size = off.totalBytes;
-    *buffer1Size = static_cast<size_t>(off.totalBytes);
-
-    /* Estimate numProds via host-side computation (D2H A rowPtr + A colInd + B rowPtr) */
-    std::vector<int32_t> aRowPtrHost(m + 1);
-    aclError aclRet = aclrtMemcpy(aRowPtrHost.data(), (m + 1) * sizeof(int32_t),
-                                   matAInner->ptrs, (m + 1) * sizeof(int32_t),
-                                   ACL_MEMCPY_DEVICE_TO_HOST);
-    if (aclRet != ACL_ERROR_NONE) return ACL_SPARSE_STATUS_EXECUTION_FAILED;
-
-    std::vector<int32_t> aColIndHost(matAInner->nnz);
-    aclRet = aclrtMemcpy(aColIndHost.data(), matAInner->nnz * sizeof(int32_t),
-                          matAInner->idxs, matAInner->nnz * sizeof(int32_t),
-                          ACL_MEMCPY_DEVICE_TO_HOST);
-    if (aclRet != ACL_ERROR_NONE) return ACL_SPARSE_STATUS_EXECUTION_FAILED;
-
-    std::vector<int32_t> bRowPtrHost(k + 1);
-    aclRet = aclrtMemcpy(bRowPtrHost.data(), (k + 1) * sizeof(int32_t),
-                          matBInner->ptrs, (k + 1) * sizeof(int32_t),
-                          ACL_MEMCPY_DEVICE_TO_HOST);
-    if (aclRet != ACL_ERROR_NONE) return ACL_SPARSE_STATUS_EXECUTION_FAILED;
-
-    desc->numProds = SpgemmComputeNumProds(aRowPtrHost, aColIndHost, bRowPtrHost);
-
-    /* If buffer1 is provided, run symbolic phase to get precise nnzC */
-    if (buffer1 != nullptr && matAInner->nnz > 0 && matBInner->nnz > 0) {
-        /* Run Preprocess with buffer1 to compute symbolic structure */
-        st = aclsparseSpGEMMPreprocess(handle, opA, opB, nullptr, matA, matB,
-                                        nullptr, matC, computeType, alg, buffer1);
-        if (st != ACL_SPARSE_STATUS_SUCCESS) return st;
-        desc->nnzC = static_cast<int64_t>(matCInner->nnz);
-        desc->maxNnzC = static_cast<int64_t>(m) * static_cast<int64_t>(n);
-        if (desc->maxNnzC > 500000000) desc->maxNnzC = 500000000;
-        if (desc->maxNnzC < 1024) desc->maxNnzC = 1024;
-        desc->phase = SPGEMM_PHASE_SYMBOLIC_DONE;
-    } else {
-        desc->phase = SPGEMM_PHASE_WORK_ESTIMATE;
+    if (descr->signature != kSpGemmSignature) {
+        OP_LOGE(kSpGemmTag, "descriptor signature is invalid");
+        return ACL_SPARSE_STATUS_INVALID_VALUE;
     }
-
-    /* buffer2 = same size as buffer1 (numeric phase reuses workspace layout) */
-    desc->buffer2Size = off.totalBytes;
-
+    delete descr;
     return ACL_SPARSE_STATUS_SUCCESS;
 }
 
-/* ---- 4. EstimateMemory ---- */
-/* ALG_DEFAULT → buffer3Size = 0 (no extra memory needed).
- * ALG2/ALG3 → would compute additional buffer3, but currently not implemented. */
-
-aclsparseStatus_t aclsparseSpGEMMEstimateMemory(
-    aclsparseHandle_t /*handle*/,
-    aclsparseSpGEMMDescr_t descr,
-    size_t *buffer3Size,
-    aclsparseSpMatDescr_t /*matC*/,
-    aclDataType /*computeType*/,
-    aclsparseSpGEMMAlg_t alg,
-    void * /*buffer3*/)
+extern "C" aclsparseStatus_t aclsparseSpGEMMWorkEstimation(
+    aclsparseHandle_t handle, aclsparseOperation_t opA, aclsparseOperation_t opB,
+    const void *alpha, aclsparseConstSpMatDescr_t matA,
+    aclsparseConstSpMatDescr_t matB, const void *beta,
+    aclsparseSpMatDescr_t matC, aclDataType computeType,
+    aclsparseSpGEMMAlg_t alg, aclsparseSpGEMMDescr_t descr,
+    size_t *bufferSize1, void *externalBuffer1)
 {
-    if (buffer3Size == nullptr) return ACL_SPARSE_STATUS_INVALID_VALUE;
-    if (descr == nullptr) return ACL_SPARSE_STATUS_INVALID_VALUE;
-
-    SpgemmDescr *desc = reinterpret_cast<SpgemmDescr *>(descr);
-
-    /* ALG_DEFAULT / ALG1: no buffer3 needed */
-    if (alg == ACL_SPARSE_SPGEMM_ALG_DEFAULT || alg == ACL_SPARSE_SPGEMM_ALG1) {
-        *buffer3Size = 0;
-        desc->buffer3Size = 0;
+    aclsparseStatus_t status = ValidateCommon(
+        handle, opA, opB, alpha, matA, matB, beta, matC, computeType, alg, descr);
+    if (status != ACL_SPARSE_STATUS_SUCCESS) {
+        return status;
+    }
+    if (bufferSize1 == nullptr) {
+        OP_LOGE(kSpGemmTag, "bufferSize1 is nullptr");
+        return ACL_SPARSE_STATUS_INVALID_VALUE;
+    }
+    SpGemmWorkLayout layout{};
+    if (!BuildWorkLayout(matA->rows, layout)) {
+        OP_LOGE(kSpGemmTag, "failed to build the work workspace layout");
+        return ACL_SPARSE_STATUS_INVALID_VALUE;
+    }
+    if (externalBuffer1 == nullptr) {
+        RecordProblem(descr, matA, matB, matC, computeType, alg);
+        descr->requiredBuffer1 = layout.bytes;
+        descr->state = AclsparseSpGemmState::WORK_SIZE_QUERIED;
+        *bufferSize1 = layout.bytes;
         return ACL_SPARSE_STATUS_SUCCESS;
     }
-
-    /* ALG2/ALG3: reserved — not yet implemented */
-    *buffer3Size = 0;
-    desc->buffer3Size = 0;
-    return ACL_SPARSE_STATUS_NOT_SUPPORTED;
+    if (!ProblemMatches(descr, matA, matB, matC, computeType, alg) || *bufferSize1 < layout.bytes) {
+        OP_LOGE(kSpGemmTag, "problem changed or buffer1 is too small, provided=%zu, required=%zu",
+            *bufferSize1, layout.bytes);
+        return *bufferSize1 < layout.bytes ? ACL_SPARSE_STATUS_INSUFFICIENT_RESOURCES :
+            ACL_SPARSE_STATUS_INVALID_VALUE;
+    }
+    status = LaunchWorkEstimation(handle, matA, matB, descr, layout, externalBuffer1);
+    if (status != ACL_SPARSE_STATUS_SUCCESS) {
+        return status;
+    }
+    descr->externalBuffer1 = externalBuffer1;
+    descr->state = AclsparseSpGemmState::WORK_ESTIMATED;
+    *bufferSize1 = layout.bytes;
+    return ACL_SPARSE_STATUS_SUCCESS;
 }
 
-/* ---- 5. Compute ---- */
-/* 符号 + 数值阶段。"调两次"模式：先探测内存上界、再执行。
- *
- * 第一次（探测）：仅跑符号 kernel → 得到 nnzC → 校验容量。
- *   若 nnzC > maxNnzC → 返回 INSUFFICIENT_RESOURCES（用户需重新分配）。
- * 第二次（执行）：跑符号（若未完成）+ 数值 → 填充 C 值。
- *
- * descr->phase 状态机跟踪符号阶段是否已由 WorkEstimation 完成
- * （若已完成，Compute 跳过探测）。 */
-
-aclsparseStatus_t aclsparseSpGEMMCompute(
-    aclsparseHandle_t handle,
-    aclsparseSpGEMMDescr_t descr,
-    aclsparseOperation_t opA, aclsparseOperation_t opB,
-    const void *alpha,
-    aclsparseConstSpMatDescr_t matA,
-    aclsparseConstSpMatDescr_t matB,
-    const void *beta,
-    aclsparseSpMatDescr_t matC,
-    aclDataType computeType,
-    aclsparseSpGEMMAlg_t alg,
-    void *buffer1,
-    void *buffer2)
+extern "C" aclsparseStatus_t aclsparseSpGEMMGetNumProducts(
+    aclsparseSpGEMMDescr_t descr, int64_t *numProds)
 {
-    if (descr == nullptr) return ACL_SPARSE_STATUS_INVALID_VALUE;
-    if (buffer1 == nullptr || buffer2 == nullptr) return ACL_SPARSE_STATUS_INSUFFICIENT_RESOURCES;
-
-    SpgemmDescr *desc = reinterpret_cast<SpgemmDescr *>(descr);
-    SpgemmLaunchCtx ctx;
-    aclsparseStatus_t st = SpgemmPrepareLaunch(handle, matA, matB, matC,
-                                                 opA, opB, computeType, alg, ctx);
-    if (st != ACL_SPARSE_STATUS_SUCCESS) return st;
-
-    aclsparseSpMatDescr *matCInner = ctx.matCInner;
-
-    /* Phase 1: Probe — ensure symbolic structure is computed and capacity verified.
-     * If WorkEstimation already did symbolic (phase == SYMBOLIC_DONE), skip. */
-    if (desc->phase < SPGEMM_PHASE_SYMBOLIC_DONE) {
-        st = aclsparseSpGEMMPreprocess(handle, opA, opB, alpha, matA, matB,
-                                        beta, matC, computeType, alg, buffer1);
-        if (st != ACL_SPARSE_STATUS_SUCCESS) return st;
-        desc->nnzC = static_cast<int64_t>(matCInner->nnz);
-        desc->phase = SPGEMM_PHASE_SYMBOLIC_DONE;
+    if (descr == nullptr || descr->signature != kSpGemmSignature || numProds == nullptr) {
+        OP_LOGE(kSpGemmTag, "descriptor or numProds pointer is invalid");
+        return ACL_SPARSE_STATUS_INVALID_VALUE;
     }
+    if (descr->state < AclsparseSpGemmState::WORK_ESTIMATED) {
+        OP_LOGE(kSpGemmTag, "WorkEstimation must execute before GetNumProducts");
+        return ACL_SPARSE_STATUS_INVALID_VALUE;
+    }
+    *numProds = descr->numProducts;
+    return ACL_SPARSE_STATUS_SUCCESS;
+}
 
-    /* Capacity check (host-compute "double-call" probe) */
-    if (desc->nnzC > desc->maxNnzC) {
-        OP_LOGE("spgemm", "Compute probe: nnzC=%ld exceeds maxNnzC=%ld",
-                desc->nnzC, desc->maxNnzC);
+extern "C" aclsparseStatus_t aclsparseSpGEMMEstimateMemory(
+    aclsparseHandle_t handle, aclsparseOperation_t opA, aclsparseOperation_t opB,
+    const void *alpha, aclsparseConstSpMatDescr_t matA,
+    aclsparseConstSpMatDescr_t matB, const void *beta,
+    aclsparseSpMatDescr_t matC, aclDataType computeType,
+    aclsparseSpGEMMAlg_t alg, aclsparseSpGEMMDescr_t descr,
+    float chunkFraction, size_t *bufferSize3, void *externalBuffer3,
+    size_t *bufferSize2)
+{
+    (void)externalBuffer3;
+    aclsparseStatus_t status = ValidateCommon(
+        handle, opA, opB, alpha, matA, matB, beta, matC, computeType, alg, descr);
+    if (status != ACL_SPARSE_STATUS_SUCCESS) {
+        return status;
+    }
+    if (bufferSize3 == nullptr || bufferSize2 == nullptr ||
+        descr->state < AclsparseSpGemmState::WORK_ESTIMATED ||
+        ValidateStageProblem(descr, matA, matB, matC, computeType, alg) != ACL_SPARSE_STATUS_SUCCESS) {
+        OP_LOGE(kSpGemmTag, "invalid memory-estimation output pointer, state, or stage problem");
+        return ACL_SPARSE_STATUS_INVALID_VALUE;
+    }
+    if ((alg == ACL_SPARSE_SPGEMM_ALG2 || alg == ACL_SPARSE_SPGEMM_ALG3) &&
+        (!(chunkFraction > 0.0F) || chunkFraction > 1.0F)) {
+        OP_LOGE(kSpGemmTag, "chunkFraction must be in (0, 1] for ALG2/ALG3, got %.8f", chunkFraction);
+        return ACL_SPARSE_STATUS_INVALID_VALUE;
+    }
+    SpGemmComputeLayout layout{};
+    if (!BuildComputeLayout(matA->rows, matA->nnz,
+        static_cast<uint64_t>(descr->numProducts), computeType, layout)) {
+        OP_LOGE(kSpGemmTag, "failed to build the compute workspace layout");
+        return ACL_SPARSE_STATUS_INVALID_VALUE;
+    }
+    *bufferSize3 = 0U;
+    *bufferSize2 = layout.bytes;
+    descr->requiredBuffer2 = layout.bytes;
+    descr->chunkFraction = chunkFraction;
+    descr->state = AclsparseSpGemmState::MEMORY_ESTIMATED;
+    return ACL_SPARSE_STATUS_SUCCESS;
+}
+
+extern "C" aclsparseStatus_t aclsparseSpGEMMCompute(
+    aclsparseHandle_t handle, aclsparseOperation_t opA, aclsparseOperation_t opB,
+    const void *alpha, aclsparseConstSpMatDescr_t matA,
+    aclsparseConstSpMatDescr_t matB, const void *beta,
+    aclsparseSpMatDescr_t matC, aclDataType computeType,
+    aclsparseSpGEMMAlg_t alg, aclsparseSpGEMMDescr_t descr,
+    size_t *bufferSize2, void *externalBuffer2)
+{
+    aclsparseStatus_t status = ValidateCommon(
+        handle, opA, opB, alpha, matA, matB, beta, matC, computeType, alg, descr);
+    if (status != ACL_SPARSE_STATUS_SUCCESS) {
+        return status;
+    }
+    if (bufferSize2 == nullptr || descr->state < AclsparseSpGemmState::WORK_ESTIMATED ||
+        ValidateStageProblem(descr, matA, matB, matC, computeType, alg) != ACL_SPARSE_STATUS_SUCCESS) {
+        OP_LOGE(kSpGemmTag, "invalid bufferSize2, state, or stage problem");
+        return ACL_SPARSE_STATUS_INVALID_VALUE;
+    }
+    SpGemmComputeLayout layout{};
+    if (!BuildComputeLayout(matA->rows, matA->nnz,
+        static_cast<uint64_t>(descr->numProducts), computeType, layout)) {
+        OP_LOGE(kSpGemmTag, "failed to build the compute workspace layout");
+        return ACL_SPARSE_STATUS_INVALID_VALUE;
+    }
+    if (externalBuffer2 == nullptr) {
+        *bufferSize2 = layout.bytes;
+        descr->requiredBuffer2 = layout.bytes;
+        descr->state = AclsparseSpGemmState::COMPUTE_SIZE_QUERIED;
+        return ACL_SPARSE_STATUS_SUCCESS;
+    }
+    if (*bufferSize2 < layout.bytes || descr->externalBuffer1 == nullptr) {
+        OP_LOGE(kSpGemmTag, "buffer2 is too small or WorkEstimation has no workspace, provided=%zu, required=%zu",
+            *bufferSize2, layout.bytes);
+        return *bufferSize2 < layout.bytes ? ACL_SPARSE_STATUS_INSUFFICIENT_RESOURCES :
+            ACL_SPARSE_STATUS_INVALID_VALUE;
+    }
+    status = LaunchCompute(handle, alpha, matA, matB, beta, matC, descr, layout, externalBuffer2);
+    if (status != ACL_SPARSE_STATUS_SUCCESS) {
+        return status;
+    }
+    descr->externalBuffer2 = externalBuffer2;
+    descr->state = AclsparseSpGemmState::COMPUTED;
+    *bufferSize2 = layout.bytes;
+    return ACL_SPARSE_STATUS_SUCCESS;
+}
+
+extern "C" aclsparseStatus_t aclsparseSpGEMMCopy(
+    aclsparseHandle_t handle, aclsparseOperation_t opA, aclsparseOperation_t opB,
+    const void *alpha, aclsparseConstSpMatDescr_t matA,
+    aclsparseConstSpMatDescr_t matB, const void *beta,
+    aclsparseSpMatDescr_t matC, aclDataType computeType,
+    aclsparseSpGEMMAlg_t alg, aclsparseSpGEMMDescr_t descr)
+{
+    aclsparseStatus_t status = ValidateCommon(
+        handle, opA, opB, alpha, matA, matB, beta, matC, computeType, alg, descr);
+    if (status != ACL_SPARSE_STATUS_SUCCESS) {
+        return status;
+    }
+    status = ValidateCopyStage(matA, matB, matC, computeType, alg, descr);
+    if (status != ACL_SPARSE_STATUS_SUCCESS) {
+        return status;
+    }
+    if (!descr->copyRequired) {
+        descr->state = AclsparseSpGemmState::COPIED;
+        return ACL_SPARSE_STATUS_SUCCESS;
+    }
+    if (matC->nnz == 0) {
+        descr->state = AclsparseSpGemmState::COPIED;
+        return ACL_SPARSE_STATUS_SUCCESS;
+    }
+    status = LaunchCopy(handle, matA, matC, computeType, descr);
+    if (status != ACL_SPARSE_STATUS_SUCCESS) {
+        return status;
+    }
+    descr->state = AclsparseSpGemmState::COPIED;
+    return ACL_SPARSE_STATUS_SUCCESS;
+}
+
+extern "C" aclsparseStatus_t aclsparseSpGEMMSetCInValid(
+    aclsparseSpGEMMDescr_t descr, int32_t cInDataValid)
+{
+    if (descr == nullptr || descr->signature != kSpGemmSignature ||
+        descr->state < AclsparseSpGemmState::WORK_ESTIMATED) {
+        OP_LOGE(kSpGemmTag, "WorkEstimation must execute before SetCInValid");
+        return ACL_SPARSE_STATUS_INVALID_VALUE;
+    }
+    descr->cInDataValid = cInDataValid != 0 ? 1 : 0;
+    if (descr->matC != nullptr) {
+        descr->matC->cInDataValid = descr->cInDataValid;
+    }
+    return ACL_SPARSE_STATUS_SUCCESS;
+}
+
+extern "C" aclsparseStatus_t aclsparseSpGEMMGetBufferSize(
+    aclsparseHandle_t handle, aclsparseOperation_t opA, aclsparseOperation_t opB,
+    const void *alpha, aclsparseConstSpMatDescr_t matA,
+    aclsparseConstSpMatDescr_t matB, const void *beta,
+    aclsparseSpMatDescr_t matC, aclDataType computeType,
+    aclsparseSpGEMMAlg_t alg, size_t *size)
+{
+    if (size == nullptr) {
+        OP_LOGE(kSpGemmTag, "legacy workspace size output is nullptr");
+        return ACL_SPARSE_STATUS_INVALID_VALUE;
+    }
+    aclsparseSpGEMMDescr validator{};
+    validator.signature = kSpGemmSignature;
+    aclsparseStatus_t status = ValidateCommon(
+        handle, opA, opB, alpha, matA, matB, beta, matC, computeType, alg, &validator);
+    if (status != ACL_SPARSE_STATUS_SUCCESS) {
+        return status;
+    }
+    SpGemmLegacyLayout layout{};
+    if (!BuildLegacyLayout(matA, matB, computeType, layout)) {
+        OP_LOGE(kSpGemmTag, "failed to build the legacy workspace layout");
+        return ACL_SPARSE_STATUS_NOT_SUPPORTED;
+    }
+    *size = layout.bytes;
+    return ACL_SPARSE_STATUS_SUCCESS;
+}
+
+extern "C" aclsparseStatus_t aclsparseSpGEMMPreprocess(
+    aclsparseHandle_t handle, aclsparseOperation_t opA, aclsparseOperation_t opB,
+    const void *alpha, aclsparseConstSpMatDescr_t matA,
+    aclsparseConstSpMatDescr_t matB, const void *beta,
+    aclsparseSpMatDescr_t matC, aclDataType computeType,
+    aclsparseSpGEMMAlg_t alg, void *buffer)
+{
+    if (buffer == nullptr) {
         return ACL_SPARSE_STATUS_INSUFFICIENT_RESOURCES;
     }
-
-    /* Phase 2: prepare valuesC — zero or preserve C_in based on β/cInDataValid */
-    float betaVal = 0.0f;
-    st = SpgemmReadBetaScalar(handle, beta, betaVal);
-    if (st != ACL_SPARSE_STATUS_SUCCESS) return st;
-    st = SpgemmZeroOrPreserveCIn(handle, matCInner, computeType,
-                                  betaVal, desc->cInDataValid, desc->nnzC);
-    if (st != ACL_SPARSE_STATUS_SUCCESS) return st;
-
-    /* Run numeric phase using buffer2.
-     * Propagate cInDataValid to matC so the 3-stage aclsparseSpGEMM
-     * does not memset valuesC when user has filled valid C_in data. */
-    matCInner->cInDataValid = desc->cInDataValid;
-    st = aclsparseSpGEMM(handle, opA, opB, alpha, matA, matB, beta, matC,
-                         computeType, alg, buffer2);
-    if (st != ACL_SPARSE_STATUS_SUCCESS) return st;
-
-    desc->phase = SPGEMM_PHASE_COMPUTED;
-    return ACL_SPARSE_STATUS_SUCCESS;
-}
-
-/* ---- 5b. SetCInValid — 标记 matC->values 包含有效 C_in ---- */
-/* 当 β≠0 且 matC 带内容时，按 cuSPARSE 语义叠加 β·C_in。
- * 用户在 WorkEstimation（符号完成）后、填充 matC->values 为 C_in 数据后调用。 */
-
-aclsparseStatus_t aclsparseSpGEMMSetCInValid(
-    aclsparseSpGEMMDescr_t descr,
-    int32_t cInDataValid)
-{
-    if (descr == nullptr) return ACL_SPARSE_STATUS_INVALID_VALUE;
-    SpgemmDescr *desc = reinterpret_cast<SpgemmDescr *>(descr);
-    if (desc->phase < SPGEMM_PHASE_SYMBOLIC_DONE) {
-        OP_LOGE("spgemm", "SetCInValid called before symbolic phase (phase=%d), "
-                "call WorkEstimation first", desc->phase);
-        return ACL_SPARSE_STATUS_INVALID_VALUE;
+    size_t legacyBytes = 0;
+    aclsparseStatus_t status = aclsparseSpGEMMGetBufferSize(
+        handle, opA, opB, alpha, matA, matB, beta, matC, computeType, alg, &legacyBytes);
+    if (status != ACL_SPARSE_STATUS_SUCCESS) {
+        return status;
     }
-    desc->cInDataValid = cInDataValid ? 1 : 0;
-    return ACL_SPARSE_STATUS_SUCCESS;
-}
-
-/* ---- 6. GetNumProducts ---- */
-
-aclsparseStatus_t aclsparseSpGEMMGetNumProducts(
-    aclsparseSpGEMMDescr_t descr,
-    int64_t *numProducts)
-{
-    if (numProducts == nullptr) return ACL_SPARSE_STATUS_INVALID_VALUE;
-    if (descr == nullptr) return ACL_SPARSE_STATUS_INVALID_VALUE;
-    SpgemmDescr *desc = reinterpret_cast<SpgemmDescr *>(descr);
-    *numProducts = desc->numProds;
-    return ACL_SPARSE_STATUS_SUCCESS;
-}
-
-/* ---- 7. Copy ---- */
-/* Writes result from workspace buffer2 to matC CSR arrays.
- * In the current implementation, numeric kernel writes directly to matC,
- * so Copy is effectively a no-op (structure already in matC from Preprocess).
- * This interface exists for API completeness and future workspace-staging
- * architectures where Compute writes to an intermediate buffer. */
-
-aclsparseStatus_t aclsparseSpGEMMCopy(
-    aclsparseHandle_t /*handle*/,
-    aclsparseSpGEMMDescr_t descr,
-    aclsparseOperation_t /*opA*/, aclsparseOperation_t /*opB*/,
-    const void * /*alpha*/,
-    aclsparseConstSpMatDescr_t /*matA*/,
-    aclsparseConstSpMatDescr_t /*matB*/,
-    const void * /*beta*/,
-    aclsparseSpMatDescr_t matC,
-    aclDataType /*computeType*/,
-    aclsparseSpGEMMAlg_t /*alg*/,
-    void * /*buffer2*/)
-{
-    if (descr == nullptr) return ACL_SPARSE_STATUS_INVALID_VALUE;
-    SpgemmDescr *desc = reinterpret_cast<SpgemmDescr *>(descr);
-
-    if (desc->phase < SPGEMM_PHASE_COMPUTED) {
-        OP_LOGE("spgemm", "Copy called before Compute (phase=%d)", desc->phase);
-        return ACL_SPARSE_STATUS_INVALID_VALUE;
+    SpGemmLegacyLayout layout{};
+    if (!BuildLegacyLayout(matA, matB, computeType, layout) || layout.bytes != legacyBytes) {
+        return ACL_SPARSE_STATUS_INTERNAL_ERROR;
     }
 
-    /* In current implementation, numeric kernel writes directly to matC.
-     * Copy is a no-op — matC already contains the final result.
-     * Future: if Compute stages to workspace, Copy would transfer to matC. */
-    aclsparseSpMatDescr *matCInner = ToMatInner(matC);
-    matCInner->activeBuffer = nullptr;  /* clear reuse marker */
-    desc->phase = SPGEMM_PHASE_COPIED;
-
+    ReleaseLegacyDescriptor(matC);
+    auto *descr = new (std::nothrow) aclsparseSpGEMMDescr();
+    if (descr == nullptr) {
+        return ACL_SPARSE_STATUS_ALLOC_FAILED;
+    }
+    descr->signature = kSpGemmSignature;
+    size_t size2 = 0;
+    status = PrepareLegacyStages(
+        handle, opA, opB, alpha, matA, matB, beta, matC, computeType, alg,
+        descr, layout, buffer, size2);
+    if (status == ACL_SPARSE_STATUS_SUCCESS) {
+        status = LaunchLegacyCompute(
+            handle, opA, opB, alpha, matA, matB, matC, computeType, alg,
+            descr, layout, buffer, size2);
+    }
+    if (status != ACL_SPARSE_STATUS_SUCCESS) {
+        delete descr;
+        return status;
+    }
+    matC->legacySpGemmDescr.reset(descr);
+    matC->legacySpGemmBuffer = buffer;
+    matC->activeBuffer = buffer;
     return ACL_SPARSE_STATUS_SUCCESS;
 }
 
-} /* extern "C" */
+extern "C" aclsparseStatus_t aclsparseSpGEMM(
+    aclsparseHandle_t handle, aclsparseOperation_t opA, aclsparseOperation_t opB,
+    const void *alpha, aclsparseConstSpMatDescr_t matA,
+    aclsparseConstSpMatDescr_t matB, const void *beta,
+    aclsparseSpMatDescr_t matC, aclDataType computeType,
+    aclsparseSpGEMMAlg_t alg, void *buffer)
+{
+    if (buffer == nullptr) {
+        return ACL_SPARSE_STATUS_INSUFFICIENT_RESOURCES;
+    }
+    size_t legacyBytes = 0;
+    aclsparseStatus_t status = aclsparseSpGEMMGetBufferSize(
+        handle, opA, opB, alpha, matA, matB, beta, matC, computeType, alg, &legacyBytes);
+    if (status != ACL_SPARSE_STATUS_SUCCESS) {
+        return status;
+    }
+    if (matC->legacySpGemmDescr == nullptr || matC->legacySpGemmBuffer != buffer ||
+        !ProblemMatches(matC->legacySpGemmDescr.get(), matA, matB, matC, computeType, alg)) {
+        status = aclsparseSpGEMMPreprocess(
+            handle, opA, opB, alpha, matA, matB, beta, matC, computeType, alg, buffer);
+        if (status != ACL_SPARSE_STATUS_SUCCESS) {
+            return status;
+        }
+    }
+    SpGemmLegacyLayout layout{};
+    if (!BuildLegacyLayout(matA, matB, computeType, layout) || layout.bytes != legacyBytes) {
+        return ACL_SPARSE_STATUS_INTERNAL_ERROR;
+    }
+    aclsparseSpGEMMDescr_t descr = matC->legacySpGemmDescr.get();
+    size_t size2 = descr->requiredBuffer2;
+    if (size2 > layout.computeCapacity) {
+        return ACL_SPARSE_STATUS_INSUFFICIENT_RESOURCES;
+    }
+    descr->forceGenericPath = false;
+    status = aclsparseSpGEMMCompute(
+        handle, opA, opB, alpha, matA, matB, beta, matC, computeType, alg,
+        descr, &size2, static_cast<uint8_t *>(buffer) + layout.computeOffset);
+    if (status != ACL_SPARSE_STATUS_SUCCESS) {
+        return status;
+    }
+    status = aclsparseSpGEMMCopy(
+        handle, opA, opB, alpha, matA, matB, beta, matC, computeType, alg, descr);
+    if (status == ACL_SPARSE_STATUS_SUCCESS) {
+        matC->activeBuffer = buffer;
+    }
+    return status;
+}

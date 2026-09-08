@@ -25,14 +25,56 @@
 #define ACLSPARSE_DESCR_INTERNAL_H
 
 #include <cstdint>
+#include <memory>
 #include <acl/acl.h>
 #include "cann_ops_sparse.h"
 
-// 描述符签名常量，用于 Destroy/Get/Set 校验，防止悬垂指针误操作。
+// 描述符签名常量，用于在 Destroy/Get/Set/Execute 前识别不透明句柄的描述符类型，
+// 并拒绝错误类型的句柄。
 enum DescrSignature : uint32_t {
     kDnVecSignature = 0xD0D2D4D6,
     kSpVecSignature = 0x51705663,
     kDnMatSignature = 0xD0D2D4D8,
+    kSpGemmSignature = 0x5350474D,  // ASCII "SPGM"，表示 SpGEMM 描述符类型。
+};
+
+enum class AclsparseSpGemmState : uint32_t {
+    CREATED = 0,
+    WORK_SIZE_QUERIED,
+    WORK_ESTIMATED,
+    MEMORY_ESTIMATED,
+    COMPUTE_SIZE_QUERIED,
+    COMPUTED,
+    COPIED
+};
+
+// Multi-stage SpGEMM descriptor. Device buffers remain caller-owned; the
+// descriptor only keeps weak references needed to enforce stage order and to
+// let Copy consume the exact intermediate data produced by Compute.
+struct aclsparseSpGEMMDescr {
+    uint32_t signature = 0;
+    AclsparseSpGemmState state = AclsparseSpGemmState::CREATED;
+    aclsparseSpGEMMAlg_t alg = ACL_SPARSE_SPGEMM_DEFAULT;
+    aclDataType computeType = ACL_FLOAT;
+    const aclsparseSpMatDescr *matA = nullptr;
+    const aclsparseSpMatDescr *matB = nullptr;
+    aclsparseSpMatDescr *matC = nullptr;
+    uint64_t m = 0;
+    uint64_t k = 0;
+    uint64_t n = 0;
+    uint64_t nnzA = 0;
+    uint64_t nnzB = 0;
+    int64_t numProducts = 0;
+    int64_t nnzC = 0;
+    int32_t regularDegree = 0;
+    bool copyRequired = true;
+    bool forceGenericPath = false;
+    int32_t cInDataValid = 0;
+    size_t requiredBuffer1 = 0;
+    size_t requiredBuffer2 = 0;
+    void *externalBuffer1 = nullptr;
+    void *externalBuffer2 = nullptr;
+    float chunkFraction = 1.0F;
 };
 
 // 稀疏矩阵描述符内部结构（CSR / CSC / COO / BELL / SLICED_ELL 共用）。
@@ -41,6 +83,10 @@ struct aclsparseSpMatDescr {
     // SpMM/SpMV 据此决定走快路径(复用)还是就地重算（active buffer 机制）。
     const void *activeBuffer = nullptr;
     int32_t cInDataValid = 0;
+    // 旧三阶段 SpGEMM 接口复用新多阶段实现时保存的内部描述符及 workspace。
+    // 生命周期随 matC 结束，避免旧接口额外暴露描述符管理要求。
+    std::unique_ptr<aclsparseSpGEMMDescr> legacySpGemmDescr;
+    const void *legacySpGemmBuffer = nullptr;
     aclsparseFormat_t format{};
     uint64_t rows = 0;
     uint64_t cols = 0;

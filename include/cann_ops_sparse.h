@@ -34,6 +34,7 @@ struct aclsparseDnMatDescr;
 struct aclsparseCubeSpmmMatDescr;
 struct aclsparseSpVecDescr;
 struct aclsparseSpSMDescr;
+struct aclsparseSpGEMMDescr;
 
 typedef struct aclsparseContext* aclsparseHandle_t;
 typedef struct aclsparseSpMatDescr* aclsparseSpMatDescr_t;
@@ -42,6 +43,7 @@ typedef struct aclsparseDnMatDescr* aclsparseDnMatDescr_t;
 typedef struct aclsparseCubeSpmmMatDescr* aclsparseCubeSpmmMatDescr_t;
 typedef struct aclsparseSpVecDescr* aclsparseSpVecDescr_t;
 typedef struct aclsparseSpSMDescr* aclsparseSpSMDescr_t;
+typedef struct aclsparseSpGEMMDescr* aclsparseSpGEMMDescr_t;
 
 typedef struct aclsparseSpMatDescr const* aclsparseConstSpMatDescr_t;
 typedef struct aclsparseDnVecDescr const* aclsparseConstDnVecDescr_t;
@@ -96,6 +98,18 @@ typedef enum aclsparseSpMMAlg_t {
     // remain the high-performance choice with standard (lower) fp32 precision.
     // ACL_SPARSE_SPMM_COO_ALG1,  // Reserved: COO support (V2).
 } aclsparseSpMMAlg_t;
+
+// Algorithm selection for the multi-stage sparse matrix-matrix product.
+// DEFAULT and ALG1 use the deterministic full-product workspace path. ALG2
+// and ALG3 retain the same public staging contract and accept a chunkFraction
+// through aclsparseSpGEMMEstimateMemory.
+typedef enum aclsparseSpGEMMAlg_t {
+    ACL_SPARSE_SPGEMM_DEFAULT = 0,
+    ACL_SPARSE_SPGEMM_ALG_DEFAULT = ACL_SPARSE_SPGEMM_DEFAULT,
+    ACL_SPARSE_SPGEMM_ALG1 = 1,
+    ACL_SPARSE_SPGEMM_ALG2 = 2,
+    ACL_SPARSE_SPGEMM_ALG3 = 3
+} aclsparseSpGEMMAlg_t;
 
 // This data type represents the status returned by the library functions and it can have the following values:
 typedef enum aclsparseStatus_t {
@@ -2275,40 +2289,21 @@ aclsparseStatus_t aclsparseIcsr2gebsr(
     int rowBlockDim, int colBlockDim,
     void *pBuffer);
 
-/* SpGEMM 算子 API，对齐 cuSPARSE cusparseSpGEMM 和 aclsparseSpMM 风格。
- *
- * 7 接口完整生命周期：
- *   1. aclsparseSpGEMMCreateDescr    — 创建内部描述符
- *   2. aclsparseSpGEMMWorkEstimation — 估算 numProds + buffer1 大小
- *   3. aclsparseSpGEMMEstimateMemory — ALG2/3 的 buffer3；ALG_DEFAULT 返回 0
- *   4. aclsparseSpGEMMCompute        — 符号+数值阶段（调两次：探测+执行）
- *   5. aclsparseSpGEMMGetNumProducts — 返回总乘积对数
- *   6. aclsparseSpGEMMCopy           — 将结果写入 matC CSR 数组
- *   7. aclsparseSpGEMMDestroyDescr   — 释放内部描述符
- *
- * 兼容的 3 阶段 API（封装 7 接口流程）：
- *   aclsparseSpGEMMGetBufferSize / aclsparseSpGEMMPreprocess / aclsparseSpGEMM
+/**
+ * @brief Create/destroy a reusable descriptor for multi-stage CSR SpGEMM.
  */
-typedef enum aclsparseSpGEMMAlg_t {
-    ACL_SPARSE_SPGEMM_ALG_DEFAULT = 0,
-    ACL_SPARSE_SPGEMM_ALG1         = 1,
-    ACL_SPARSE_SPGEMM_ALG2         = 2,
-    ACL_SPARSE_SPGEMM_ALG3         = 3,
-} aclsparseSpGEMMAlg_t;
-
-/* Opaque descriptor handle for the 7-interface lifecycle */
-typedef struct aclsparseSpGEMMDescr *aclsparseSpGEMMDescr_t;
-
-/* ---- 7 接口完整 API ---- */
-
 aclsparseStatus_t aclsparseSpGEMMCreateDescr(aclsparseSpGEMMDescr_t *descr);
-
 aclsparseStatus_t aclsparseSpGEMMDestroyDescr(aclsparseSpGEMMDescr_t descr);
 
+/**
+ * @brief Stage 1: query/execute intermediate-product work estimation.
+ *
+ * Call with externalBuffer1 == nullptr to query bufferSize1, then call again
+ * with a device buffer of at least that size. The execution call records the
+ * exact intermediate product count in spgemmDescr.
+ */
 aclsparseStatus_t aclsparseSpGEMMWorkEstimation(
     aclsparseHandle_t handle,
-    aclsparseSpGEMMDescr_t descr,
-    size_t *buffer1Size,           /* out: required buffer1 size */
     aclsparseOperation_t opA, aclsparseOperation_t opB,
     const void *alpha,
     aclsparseConstSpMatDescr_t matA,
@@ -2317,20 +2312,43 @@ aclsparseStatus_t aclsparseSpGEMMWorkEstimation(
     aclsparseSpMatDescr_t matC,
     aclDataType computeType,
     aclsparseSpGEMMAlg_t alg,
-    void *buffer1);                /* in: buffer1 (may be NULL for size query) */
+    aclsparseSpGEMMDescr_t spgemmDescr,
+    size_t *bufferSize1, void *externalBuffer1);
 
+/** @brief Return the exact product count after WorkEstimation execution. */
+aclsparseStatus_t aclsparseSpGEMMGetNumProducts(
+    aclsparseSpGEMMDescr_t spgemmDescr, int64_t *numProds);
+
+/**
+ * @brief Stage 2: estimate auxiliary and compute workspace sizes.
+ *
+ * ALG2/ALG3 consume chunkFraction in (0, 1]. The deterministic A5
+ * implementation reports a zero-byte auxiliary buffer and a full exact
+ * compute buffer; externalBuffer3 is reserved for source compatibility.
+ */
 aclsparseStatus_t aclsparseSpGEMMEstimateMemory(
     aclsparseHandle_t handle,
-    aclsparseSpGEMMDescr_t descr,
-    size_t *buffer3Size,           /* out: required buffer3 size (0 for ALG_DEFAULT) */
+    aclsparseOperation_t opA, aclsparseOperation_t opB,
+    const void *alpha,
+    aclsparseConstSpMatDescr_t matA,
+    aclsparseConstSpMatDescr_t matB,
+    const void *beta,
     aclsparseSpMatDescr_t matC,
     aclDataType computeType,
     aclsparseSpGEMMAlg_t alg,
-    void *buffer3);                /* in: buffer3 (may be NULL for size query) */
+    aclsparseSpGEMMDescr_t spgemmDescr,
+    float chunkFraction,
+    size_t *bufferSize3, void *externalBuffer3,
+    size_t *bufferSize2);
 
+/**
+ * @brief Stage 3: query/execute deterministic CSR structure and value compute.
+ *
+ * The execution call writes matC row offsets and updates the descriptor nnz.
+ * Call aclsparseCsrSetPointers after it to attach output column/value storage.
+ */
 aclsparseStatus_t aclsparseSpGEMMCompute(
     aclsparseHandle_t handle,
-    aclsparseSpGEMMDescr_t descr,
     aclsparseOperation_t opA, aclsparseOperation_t opB,
     const void *alpha,
     aclsparseConstSpMatDescr_t matA,
@@ -2339,16 +2357,12 @@ aclsparseStatus_t aclsparseSpGEMMCompute(
     aclsparseSpMatDescr_t matC,
     aclDataType computeType,
     aclsparseSpGEMMAlg_t alg,
-    void *buffer1,
-    void *buffer2);
+    aclsparseSpGEMMDescr_t spgemmDescr,
+    size_t *bufferSize2, void *externalBuffer2);
 
-aclsparseStatus_t aclsparseSpGEMMGetNumProducts(
-    aclsparseSpGEMMDescr_t descr,
-    int64_t *numProducts);
-
+/** @brief Stage 4: asynchronously compact computed columns/values into matC. */
 aclsparseStatus_t aclsparseSpGEMMCopy(
     aclsparseHandle_t handle,
-    aclsparseSpGEMMDescr_t descr,
     aclsparseOperation_t opA, aclsparseOperation_t opB,
     const void *alpha,
     aclsparseConstSpMatDescr_t matA,
@@ -2357,18 +2371,18 @@ aclsparseStatus_t aclsparseSpGEMMCopy(
     aclsparseSpMatDescr_t matC,
     aclDataType computeType,
     aclsparseSpGEMMAlg_t alg,
-    void *buffer2);
+    aclsparseSpGEMMDescr_t spgemmDescr);
 
-/* 标记 matC->values 包含有效的 C_in 数据（β≠0 路径）。
- * WorkEstimation 计算出符号结构后，用户填充 matC->values 为 C_in 数据，
- * 调用此接口告知 Compute 需叠加 β·C_in（而非 memset 清零）。
- * β≠0 且 matC 带内容时，按 cuSPARSE 语义叠加 β·C_in。 */
+/**
+ * @brief 保留旧版 C 输入有效标记接口以兼容已有调用方。
+ *
+ * 新多阶段接口根据 beta 和 matC 指针直接判定 C 输入；该接口保留调用语义并记录标记，
+ * 已有源码无需删除调用。
+ */
 aclsparseStatus_t aclsparseSpGEMMSetCInValid(
-    aclsparseSpGEMMDescr_t descr,
-    int32_t cInDataValid);
+    aclsparseSpGEMMDescr_t spgemmDescr, int32_t cInDataValid);
 
-/* ---- Legacy 3-stage API (backward compatible) ---- */
-
+/** @brief 兼容接口：查询旧三阶段 SpGEMM 共用 workspace 大小。 */
 aclsparseStatus_t aclsparseSpGEMMGetBufferSize(
     aclsparseHandle_t handle,
     aclsparseOperation_t opA, aclsparseOperation_t opB,
@@ -2381,6 +2395,7 @@ aclsparseStatus_t aclsparseSpGEMMGetBufferSize(
     aclsparseSpGEMMAlg_t alg,
     size_t *size);
 
+/** @brief 兼容接口：执行旧三阶段 SpGEMM 的结构预处理。 */
 aclsparseStatus_t aclsparseSpGEMMPreprocess(
     aclsparseHandle_t handle,
     aclsparseOperation_t opA, aclsparseOperation_t opB,
@@ -2393,6 +2408,7 @@ aclsparseStatus_t aclsparseSpGEMMPreprocess(
     aclsparseSpGEMMAlg_t alg,
     void *buffer);
 
+/** @brief 兼容接口：执行旧三阶段 SpGEMM 的数值计算。 */
 aclsparseStatus_t aclsparseSpGEMM(
     aclsparseHandle_t handle,
     aclsparseOperation_t opA, aclsparseOperation_t opB,

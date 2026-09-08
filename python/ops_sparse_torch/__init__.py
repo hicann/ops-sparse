@@ -8,20 +8,27 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # ----------------------------------------------------------------------------------------------------------
 
-ops_sparse_add_gtest_tests(spgemm ${OPS_SPARSE} WARN_ON_MISSING_SRC)
-if(TARGET spgemm_test)
-    target_compile_features(spgemm_test PRIVATE cxx_std_17)
+"""加载ops-sparse ATen注册库。"""
 
-    add_executable(spgemm_perf arch35/spgemm_perf.cpp)
-    target_compile_features(spgemm_perf PRIVATE cxx_std_17)
-    target_include_directories(spgemm_perf PRIVATE
-        ${CMAKE_SOURCE_DIR}/include
-        ${CMAKE_SOURCE_DIR}/sparse/common
-        ${CMAKE_SOURCE_DIR}/test/frame
-        ${ASCEND_CANN_PACKAGE_PATH}/${CMAKE_SYSTEM_PROCESSOR}-linux/include
-        $ENV{LINUX_INCLUDE_PATH})
-    target_link_libraries(spgemm_perf PRIVATE
-        ${OPS_SPARSE}
-        ${_ops_sparse_ascendcl_lib}
-        ${_ops_sparse_libc_sec})
-endif()
+from __future__ import annotations
+
+import os
+from pathlib import Path
+
+import torch
+
+
+def _library_path() -> Path:
+    configured = os.environ.get("OPS_SPARSE_TORCH_LIBRARY")
+    if configured:
+        return Path(configured).expanduser().resolve()
+    candidate = Path(__file__).with_name("libops_sparse_torch.so")
+    if candidate.is_file():
+        return candidate
+    raise ImportError(
+        "libops_sparse_torch.so was not found; set OPS_SPARSE_TORCH_LIBRARY "
+        "to the CMake build output"
+    )
+
+
+torch.ops.load_library(str(_library_path()))

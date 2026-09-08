@@ -5,1139 +5,1441 @@
  * CANN Open Software License Agreement Version 2.0 (the "License").
  * Please refer to the License for details. You may not use this file except in compliance with the License.
  * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
- * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY OR FITNESS FOR A PARTICULAR PURPOSE.
+ * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
  * See LICENSE in the root of the software repository for the full text of the License.
  * ----------------------------------------------------------------------------------------------------------
  */
 
-// SpGEMM SIMT kernel for Ascend 950PR (dav-3510)。
-//
-// 两阶段：符号阶段（结构）+ 数值阶段（值）。
-// 使用 SIMT 编程模型：__aicore__ SPMD 外层 + asc_vf_call / __simt_vf__ 内层。
-// 支持 fp32 / fp16 / bf16；fp16/bf16 在 fp32 中累加。
-//
-// β≠0 路径：host 侧 memset valuesC 后再跑数值 kernel → β·C_in = 0
-// FP16/BF16 路径：在 __simt_vf__ 中手动 IEEE754 位转换（uint16↔float），
-//   因 SIMT __simt_vf__ 的 half 类型 GM 读写不可靠，读为 uint16 手动转换可修复。
-// n>64 路径：GM-backed 每 block bitmap（符号）+ float 累加器（数值），
-//   替代 local 数组溢出路径。
-//
-// 仅 arch35（__NPU_ARCH__==3510）；fp32 要求 bit-wise 确定性。
-
-#include <stdint.h>
-#include <type_traits>
-
+#include <cstdint>
 #include "kernel_operator.h"
 #include "simt_api/asc_simt.h"
-#include "simt_api/common_functions.h"
-#include "spgemm.h"
-
-#if defined(__NPU_ARCH__) && (__NPU_ARCH__ != 3510)
-#error "SpGEMM SIMT: this TU is only for dav-3510 / Ascend 950PR (__NPU_ARCH__==3510)."
-#endif
-
-using namespace AscendC;
+#include "simt_api/device_warp_functions.h"
+#include "spgemm_kernel.h"
 
 namespace {
 
-constexpr uint32_t kMaxSimtThreadsPerBlock = 512u;
-constexpr int32_t kMaxDenseCols = 64;      /* threshold for multi-threaded local path */
-constexpr int32_t kMaxLocalAccumN = 256;   /* threshold for single-threaded local path */
-/* Tile width for n > kSpgemmTileN path. Each tile uses local accBuf[128] (512B)
- * + maskBuf[16] (16B) = 528B, fitting in register file without spill.
- * Aligned with spgemm.h kSpgemmTileN. */
-constexpr int32_t kTileN = 128;
+struct SpGemmComplex64 {
+    float real;
+    float imag;
+};
 
-/* IEEE 754 手动位转换工具
- *
- * 问题：__simt_vf__ 中 static_cast<half>(float) 和 static_cast<float>(half)
- *   在 arch35 SIMT 向量核上产生 NaN/垃圾值。half 类型的 GM 加载/存储
- *   和类型转换指令在 bisheng 编译器的 __simt_vf__ 上下文中不可靠。
- *
- * 方案：将 half/bf16 作为 uint16 从 GM 读写，用手动 IEEE 754 位操作
- *   转换为/自 float。仅使用 uint32/float 操作，SIMT 可靠支持。
- */
-
-static __simt_callee__ __aicore__ inline void HalfToFloat(uint16_t h, float &out) {
-    uint32_t sign = (static_cast<uint32_t>(h) >> 15) & 1u;
-    uint32_t exp  = (static_cast<uint32_t>(h) >> 10) & 0x1Fu;
-    uint32_t mant = static_cast<uint32_t>(h) & 0x3FFu;
-
-    uint32_t f;
-    if (exp == 0u) {
-        if (mant == 0u) {
-            f = sign << 31;                                    /* ±0 */
-        } else {
-            /* Denormalized half → normalize */
-            int32_t e = -1;
-            uint32_t m = mant;
-            do { ++e; m <<= 1; } while ((m & 0x400u) == 0u);
-            f = (sign << 31) | ((static_cast<uint32_t>(127 - 15 - e)) << 23) | ((m & 0x3FFu) << 13);
-        }
-    } else if (exp == 0x1Fu) {
-        f = (sign << 31) | (0xFFu << 23) | (mant << 13);      /* Inf/NaN */
-    } else {
-        f = (sign << 31) | ((exp + 127u - 15u) << 23) | (mant << 13);
-    }
-
-    float result;
-    __builtin_memcpy(&out, &f, sizeof(float));
+__simt_callee__ __aicore__ inline void SetError(__gm__ int32_t *error)
+{
+    *error = 1;
 }
 
-static __simt_callee__ __aicore__ inline void FloatToHalf(float val, uint16_t &out) {
-    /* Saturate to FP16 range before conversion */
-    constexpr float kFp16Max = 65504.0f;
-    constexpr float kFp16Min = -65504.0f;
-    if (val > kFp16Max) val = kFp16Max;
-    if (val < kFp16Min) val = kFp16Min;
+__simt_callee__ __aicore__ inline bool ValidRow(
+    __gm__ const int32_t *rowPtr, int32_t row, int32_t nnz,
+    int32_t &begin, int32_t &end)
+{
+    begin = rowPtr[row];
+    end = rowPtr[row + 1];
+    return begin >= 0 && begin <= end && end <= nnz;
+}
 
-    uint32_t bits;
-    __builtin_memcpy(&bits, &val, sizeof(float));
+__simt_callee__ __aicore__ inline void SetRegularOffset(
+    __gm__ int64_t *regularOffsets, __gm__ int64_t *regularTotal,
+    int32_t row, int32_t m, int32_t regularDegree)
+{
+    if (regularDegree <= 0) {
+        return;
+    }
+    int64_t productsPerRow = static_cast<int64_t>(regularDegree) * regularDegree;
+    regularOffsets[row] = static_cast<int64_t>(row) * productsPerRow;
+    if (row + 1 == m) {
+        regularOffsets[m] = static_cast<int64_t>(m) * productsPerRow;
+        *regularTotal = static_cast<int64_t>(m) * productsPerRow;
+    }
+}
 
-    uint32_t sign = (bits >> 31) & 1u;
-    int32_t  exp  = static_cast<int32_t>((bits >> 23) & 0xFFu);
-    uint32_t mant = bits & 0x7FFFFFu;
+__simt_callee__ __aicore__ inline void ValidateARow(
+    __gm__ const int32_t *rowPtrA, __gm__ const int32_t *colIndA,
+    __gm__ int32_t *regular, __gm__ int32_t *error,
+    int32_t row, int32_t k, int32_t n, int32_t nnzA, int32_t regularDegree)
+{
+    int32_t begin = 0;
+    int32_t end = 0;
+    if (!ValidRow(rowPtrA, row, nnzA, begin, end)) {
+        SetError(error);
+        return;
+    }
+    if (regularDegree > 0 && end - begin != regularDegree) {
+        *regular = 0;
+    }
+    int32_t previous = -1;
+    for (int32_t p = begin; p < end; ++p) {
+        int32_t col = colIndA[p];
+        if (col < 0 || col >= k || col < previous) {
+            SetError(error);
+        }
+        if (regularDegree > 0 && col >= 0 && col < n) {
+            int32_t delta = col - row;
+            if (delta < 0) {
+                delta += n;
+            }
+            if (delta >= regularDegree) {
+                *regular = 0;
+            }
+        }
+        previous = col;
+    }
+}
 
-    uint16_t h;
-    if (exp == 0xFF) {
-        /* Inf/NaN */
-        out = static_cast<uint16_t>((sign << 15) | 0x7C00u | (mant ? 1u : 0u));
-    } else {
-        int32_t newExp = exp - 127 + 15;
-        if (newExp >= 0x1F) {
-            out = static_cast<uint16_t>((sign << 15) | 0x7C00u);    /* Overflow → Inf */
-        } else if (newExp <= 0) {
-            if (newExp < -10) {
-                out = static_cast<uint16_t>(sign << 15);             /* Underflow → 0 */
+__simt_callee__ __aicore__ inline void ValidateBRow(
+    __gm__ const int32_t *rowPtrB, __gm__ const int32_t *colIndB,
+    __gm__ int32_t *regular, __gm__ int32_t *error,
+    int32_t row, int32_t n, int32_t nnzB, int32_t regularDegree)
+{
+    int32_t begin = 0;
+    int32_t end = 0;
+    if (!ValidRow(rowPtrB, row, nnzB, begin, end)) {
+        SetError(error);
+        return;
+    }
+    if (regularDegree > 0 && end - begin != regularDegree) {
+        *regular = 0;
+    }
+    int32_t previous = -1;
+    for (int32_t p = begin; p < end; ++p) {
+        int32_t col = colIndB[p];
+        if (col < 0 || col >= n || col < previous) {
+            SetError(error);
+        }
+        if (regularDegree > 0 && col >= 0 && col < n) {
+            int32_t delta = col - row;
+            if (delta < 0) {
+                delta += n;
+            }
+            if (delta % regularDegree != 0 || delta / regularDegree >= regularDegree) {
+                *regular = 0;
+            }
+        }
+        previous = col;
+    }
+}
+
+__simt_vf__ __aicore__ __launch_bounds__(kSpGemmThreads) inline void SpGemmValidateSimt(
+    __gm__ const int32_t *rowPtrA, __gm__ const int32_t *colIndA,
+    __gm__ const int32_t *rowPtrB, __gm__ const int32_t *colIndB,
+    __gm__ int64_t *regularOffsets, __gm__ int64_t *regularTotal,
+    __gm__ int32_t *regular, __gm__ int32_t *error,
+    int32_t m, int32_t k, int32_t n,
+    int32_t nnzA, int32_t nnzB, int32_t rowStart, int32_t rowEnd,
+    int32_t threadCount, int32_t regularDegree)
+{
+    for (int32_t row = rowStart + static_cast<int32_t>(threadIdx.x);
+        row < rowEnd; row += threadCount) {
+        if (row < m) {
+            SetRegularOffset(regularOffsets, regularTotal, row, m, regularDegree);
+            ValidateARow(rowPtrA, colIndA, regular, error, row, k, n, nnzA, regularDegree);
+        }
+        if (row < k) {
+            ValidateBRow(rowPtrB, colIndB, regular, error, row, n, nnzB, regularDegree);
+        }
+    }
+}
+
+__simt_vf__ __aicore__ __launch_bounds__(kSpGemmThreads) inline void SpGemmWorkSimt(
+    __gm__ const int32_t *rowPtrA, __gm__ const int32_t *colIndA,
+    __gm__ const int32_t *rowPtrB, __gm__ int64_t *productCounts,
+    __gm__ int32_t *error, int32_t m, int32_t k, int32_t nnzA,
+    int32_t nnzB, int32_t rowStart, int32_t rowEnd, int32_t threadCount)
+{
+    for (int32_t row = rowStart + static_cast<int32_t>(threadIdx.x);
+         row < rowEnd; row += threadCount) {
+        int32_t aBegin = 0;
+        int32_t aEnd = 0;
+        int64_t products = 0;
+        if (!ValidRow(rowPtrA, row, nnzA, aBegin, aEnd)) {
+            SetError(error);
+            productCounts[row] = 0;
+            continue;
+        }
+        for (int32_t p = aBegin; p < aEnd; ++p) {
+            int32_t bRow = colIndA[p];
+            if (bRow < 0 || bRow >= k) {
+                SetError(error);
+                continue;
+            }
+            int32_t bBegin = 0;
+            int32_t bEnd = 0;
+            if (!ValidRow(rowPtrB, bRow, nnzB, bBegin, bEnd)) {
+                SetError(error);
+                continue;
+            }
+            products += static_cast<int64_t>(bEnd - bBegin);
+        }
+        productCounts[row] = products;
+    }
+}
+
+template <typename CountT, typename OffsetT>
+__simt_vf__ __aicore__ __launch_bounds__(kSpGemmThreads) inline void SpGemmScanLocalSimt(
+    __gm__ const CountT *counts, __gm__ OffsetT *offsets,
+    __gm__ int64_t *blockSums, __gm__ int32_t *error,
+    int32_t count, int32_t numChunks, int32_t chunkSize,
+    int32_t outerId, int32_t outerBlocks, int32_t threadCount)
+{
+    int32_t chunk = outerId * threadCount + static_cast<int32_t>(threadIdx.x);
+    int32_t stride = outerBlocks * threadCount;
+    for (; chunk < numChunks; chunk += stride) {
+        int32_t begin = chunk * chunkSize;
+        int32_t end = begin + chunkSize;
+        if (end > count) {
+            end = count;
+        }
+        int64_t running = 0;
+        for (int32_t i = begin; i < end; ++i) {
+            offsets[i] = static_cast<OffsetT>(running);
+            int64_t next = running + static_cast<int64_t>(counts[i]);
+            if (next < running) {
+                SetError(error);
+            }
+            running = next;
+        }
+        blockSums[chunk] = running;
+    }
+}
+
+template <typename OffsetT>
+__simt_vf__ __aicore__ __launch_bounds__(kSpGemmWarpSize) inline void SpGemmScanBlocksSimt(
+    __gm__ OffsetT *offsets, __gm__ const int64_t *blockSums,
+    __gm__ int64_t *blockOffsets, __gm__ int64_t *total,
+    __gm__ int32_t *error, int32_t count, int32_t numChunks)
+{
+    int32_t lane = static_cast<int32_t>(threadIdx.x);
+    int32_t chunksPerLane = (numChunks + static_cast<int32_t>(kSpGemmWarpSize) - 1) /
+        static_cast<int32_t>(kSpGemmWarpSize);
+    int32_t begin = lane * chunksPerLane;
+    int32_t end = begin + chunksPerLane;
+    if (end > numChunks) {
+        end = numChunks;
+    }
+    int64_t laneSum = 0;
+    for (int32_t chunk = begin; chunk < end; ++chunk) {
+        blockOffsets[chunk] = laneSum;
+        int64_t next = laneSum + blockSums[chunk];
+        if (next < laneSum) {
+            SetError(error);
+        }
+        laneSum = next;
+    }
+
+    int64_t inclusive = laneSum;
+    for (int32_t offset = 1; offset < static_cast<int32_t>(kSpGemmWarpSize); offset <<= 1) {
+        uint32_t low = static_cast<uint32_t>(inclusive);
+        uint32_t high = static_cast<uint32_t>(static_cast<uint64_t>(inclusive) >> 32U);
+        uint32_t previousLow = static_cast<uint32_t>(asc_shfl_up(static_cast<int32_t>(low), offset));
+        uint32_t previousHigh = static_cast<uint32_t>(asc_shfl_up(static_cast<int32_t>(high), offset));
+        if (lane >= offset) {
+            inclusive += static_cast<int64_t>((static_cast<uint64_t>(previousHigh) << 32U) | previousLow);
+        }
+    }
+    int64_t laneOffset = inclusive - laneSum;
+    for (int32_t chunk = begin; chunk < end; ++chunk) {
+        blockOffsets[chunk] += laneOffset;
+    }
+    if (lane == static_cast<int32_t>(kSpGemmWarpSize) - 1) {
+        if (sizeof(OffsetT) == sizeof(int32_t) && inclusive > 0x7FFFFFFFLL) {
+            SetError(error);
+        }
+        offsets[count] = static_cast<OffsetT>(inclusive);
+        *total = inclusive;
+    }
+}
+
+template <typename OffsetT>
+__simt_vf__ __aicore__ __launch_bounds__(kSpGemmThreads) inline void SpGemmScanAddSimt(
+    __gm__ OffsetT *offsets, __gm__ const int64_t *blockOffsets,
+    __gm__ int32_t *error, int32_t count, int32_t chunkSize,
+    int32_t rowStart, int32_t rowEnd, int32_t threadCount)
+{
+    for (int32_t i = rowStart + static_cast<int32_t>(threadIdx.x);
+         i < rowEnd; i += threadCount) {
+        int64_t value = static_cast<int64_t>(offsets[i]) + blockOffsets[i / chunkSize];
+        if (sizeof(OffsetT) == sizeof(int32_t) && value > 0x7FFFFFFFLL) {
+            SetError(error);
+        }
+        offsets[i] = static_cast<OffsetT>(value);
+    }
+}
+
+template <typename T>
+__simt_callee__ __aicore__ inline float SpGemmToFloat(T value)
+{
+    return static_cast<float>(value);
+}
+
+template <typename T>
+__simt_callee__ __aicore__ inline T SpGemmFromFloat(float value)
+{
+    return static_cast<T>(value);
+}
+
+template <typename T>
+__simt_callee__ __aicore__ inline float SpGemmReadRealScalar(
+    uint64_t ptr, float hostValue)
+{
+    if (ptr == 0) {
+        return hostValue;
+    }
+    __gm__ const T *deviceValue = reinterpret_cast<__gm__ const T *>(ptr);
+    return SpGemmToFloat<T>(*deviceValue);
+}
+
+__simt_callee__ __aicore__ inline SpGemmComplex64 SpGemmReadComplexScalar(
+    uint64_t ptr, float hostReal, float hostImag)
+{
+    if (ptr == 0) {
+        return {hostReal, hostImag};
+    }
+    __gm__ const SpGemmComplex64 *deviceValue =
+        reinterpret_cast<__gm__ const SpGemmComplex64 *>(ptr);
+    SpGemmComplex64 value{deviceValue->real, deviceValue->imag};
+    return value;
+}
+
+template <typename T>
+__simt_callee__ __aicore__ inline float SpGemmAccumulateRealColumn(
+    int32_t minCol, int32_t aBegin, int32_t aEnd,
+    __gm__ const int32_t *colIndA, __gm__ const T *valA,
+    __gm__ const int32_t *rowPtrB, __gm__ const int32_t *colIndB,
+    __gm__ const T *valB, __gm__ int32_t *cursors)
+{
+    float sum = 0.0F;
+    for (int32_t aPos = aBegin; aPos < aEnd; ++aPos) {
+        int32_t cursor = cursors[aPos];
+        int32_t bEnd = rowPtrB[colIndA[aPos] + 1];
+        while (cursor < bEnd && colIndB[cursor] == minCol) {
+            sum += SpGemmToFloat<T>(valA[aPos]) * SpGemmToFloat<T>(valB[cursor]);
+            ++cursor;
+        }
+        cursors[aPos] = cursor;
+    }
+    return sum;
+}
+
+__simt_callee__ __aicore__ inline SpGemmComplex64 SpGemmAccumulateComplexColumn(
+    int32_t minCol, int32_t aBegin, int32_t aEnd,
+    __gm__ const int32_t *colIndA, __gm__ const SpGemmComplex64 *valA,
+    __gm__ const int32_t *rowPtrB, __gm__ const int32_t *colIndB,
+    __gm__ const SpGemmComplex64 *valB, __gm__ int32_t *cursors)
+{
+    SpGemmComplex64 sum{0.0F, 0.0F};
+    for (int32_t aPos = aBegin; aPos < aEnd; ++aPos) {
+        int32_t cursor = cursors[aPos];
+        int32_t bEnd = rowPtrB[colIndA[aPos] + 1];
+        while (cursor < bEnd && colIndB[cursor] == minCol) {
+            SpGemmComplex64 lhs{valA[aPos].real, valA[aPos].imag};
+            SpGemmComplex64 rhs{valB[cursor].real, valB[cursor].imag};
+            sum.real += lhs.real * rhs.real - lhs.imag * rhs.imag;
+            sum.imag += lhs.real * rhs.imag + lhs.imag * rhs.real;
+            ++cursor;
+        }
+        cursors[aPos] = cursor;
+    }
+    return sum;
+}
+
+__simt_callee__ __aicore__ inline int32_t SpGemmFindMinColumn(
+    int32_t aBegin, int32_t aEnd, __gm__ const int32_t *colIndA,
+    __gm__ const int32_t *rowPtrB, __gm__ const int32_t *colIndB,
+    __gm__ const int32_t *cursors)
+{
+    int32_t minCol = 0x7FFFFFFF;
+    for (int32_t aPos = aBegin; aPos < aEnd; ++aPos) {
+        int32_t cursor = cursors[aPos];
+        int32_t bEnd = rowPtrB[colIndA[aPos] + 1];
+        if (cursor < bEnd && colIndB[cursor] < minCol) {
+            minCol = colIndB[cursor];
+        }
+    }
+    return minCol;
+}
+
+__simt_callee__ __aicore__ inline int32_t SpGemmShufflePair(
+    int32_t first, int32_t second, int32_t index)
+{
+    uint32_t sourceLane = static_cast<uint32_t>(index >> 1);
+    return (index & 1) == 0 ? asc_shfl(first, sourceLane) : asc_shfl(second, sourceLane);
+}
+
+__simt_callee__ __aicore__ inline float SpGemmShufflePair(
+    float first, float second, int32_t index)
+{
+    uint32_t sourceLane = static_cast<uint32_t>(index >> 1);
+    return (index & 1) == 0 ? asc_shfl(first, sourceLane) : asc_shfl(second, sourceLane);
+}
+
+__simt_callee__ __aicore__ inline int32_t SpGemmSortWidth(int32_t count)
+{
+    if (count <= 1) { return 1; }
+    if (count <= 2) { return 2; }
+    if (count <= 4) { return 4; }
+    if (count <= 8) { return 8; }
+    if (count <= 16) { return 16; }
+    if (count <= 32) { return 32; }
+    return 64;
+}
+
+__simt_callee__ __aicore__ inline float SpGemmShuffleValue(
+    float first, float second, int32_t index)
+{
+    return SpGemmShufflePair(first, second, index);
+}
+
+__simt_callee__ __aicore__ inline SpGemmComplex64 SpGemmShuffleValue(
+    const SpGemmComplex64 &first, const SpGemmComplex64 &second, int32_t index)
+{
+    return {
+        SpGemmShufflePair(first.real, second.real, index),
+        SpGemmShufflePair(first.imag, second.imag, index)};
+}
+
+template <typename ValueT>
+__simt_callee__ __aicore__ inline void SpGemmSortPair(
+    int32_t lane, int32_t width,
+    int32_t &col0, ValueT &value0, int32_t &col1, ValueT &value1)
+{
+    int32_t index0 = lane << 1;
+    int32_t index1 = index0 + 1;
+    for (int32_t size = 2; size <= width; size <<= 1) {
+        for (int32_t stride = size >> 1; stride > 0; stride >>= 1) {
+            int32_t oldCol0 = col0;
+            int32_t oldCol1 = col1;
+            ValueT oldValue0 = value0;
+            ValueT oldValue1 = value1;
+            int32_t peer0 = index0 ^ stride;
+            int32_t peer1 = index1 ^ stride;
+            int32_t peerCol0 = SpGemmShufflePair(oldCol0, oldCol1, peer0);
+            int32_t peerCol1 = SpGemmShufflePair(oldCol0, oldCol1, peer1);
+            ValueT peerValue0 = SpGemmShuffleValue(oldValue0, oldValue1, peer0);
+            ValueT peerValue1 = SpGemmShuffleValue(oldValue0, oldValue1, peer1);
+            bool wantMin0 = ((index0 & size) == 0) == ((index0 & stride) == 0);
+            bool wantMin1 = ((index1 & size) == 0) == ((index1 & stride) == 0);
+            bool takePeer0 = wantMin0 ? peerCol0 < oldCol0 : peerCol0 > oldCol0;
+            bool takePeer1 = wantMin1 ? peerCol1 < oldCol1 : peerCol1 > oldCol1;
+            col0 = takePeer0 ? peerCol0 : oldCol0;
+            col1 = takePeer1 ? peerCol1 : oldCol1;
+            value0 = takePeer0 ? peerValue0 : oldValue0;
+            value1 = takePeer1 ? peerValue1 : oldValue1;
+        }
+    }
+}
+
+struct SpGemmProductPosition {
+    int32_t aPos;
+    int32_t bPos;
+};
+
+__simt_callee__ __aicore__ inline SpGemmProductPosition SpGemmLocateProduct(
+    int32_t product, int32_t count, int32_t aBegin, int32_t aEnd,
+    __gm__ const int32_t *colIndA, __gm__ const int32_t *rowPtrB)
+{
+    if (product >= count) {
+        return {-1, -1};
+    }
+    int32_t remaining = product;
+    for (int32_t aPos = aBegin; aPos < aEnd; ++aPos) {
+        int32_t bBegin = rowPtrB[colIndA[aPos]];
+        int32_t bEnd = rowPtrB[colIndA[aPos] + 1];
+        int32_t length = bEnd - bBegin;
+        if (remaining < length) {
+            return {aPos, bBegin + remaining};
+        }
+        remaining -= length;
+    }
+    return {-1, -1};
+}
+
+template <typename T>
+__simt_callee__ __aicore__ inline void SpGemmLoadRealProduct(
+    int32_t product, int32_t count, int32_t aBegin, int32_t aEnd,
+    __gm__ const int32_t *colIndA, __gm__ const T *valA,
+    __gm__ const int32_t *rowPtrB, __gm__ const int32_t *colIndB,
+    __gm__ const T *valB, float alpha, int32_t &col, float &value)
+{
+    col = 0x7FFFFFFF;
+    value = 0.0F;
+    SpGemmProductPosition position = SpGemmLocateProduct(
+        product, count, aBegin, aEnd, colIndA, rowPtrB);
+    if (position.aPos < 0) {
+        return;
+    }
+    col = colIndB[position.bPos];
+    value = alpha * SpGemmToFloat<T>(valA[position.aPos]) *
+        SpGemmToFloat<T>(valB[position.bPos]);
+}
+
+__simt_callee__ __aicore__ inline void SpGemmLoadComplexProduct(
+    int32_t product, int32_t count, int32_t aBegin, int32_t aEnd,
+    __gm__ const int32_t *colIndA, __gm__ const SpGemmComplex64 *valA,
+    __gm__ const int32_t *rowPtrB, __gm__ const int32_t *colIndB,
+    __gm__ const SpGemmComplex64 *valB, SpGemmComplex64 alpha,
+    int32_t &col, SpGemmComplex64 &value)
+{
+    col = 0x7FFFFFFF;
+    value = {0.0F, 0.0F};
+    SpGemmProductPosition position = SpGemmLocateProduct(
+        product, count, aBegin, aEnd, colIndA, rowPtrB);
+    if (position.aPos < 0) {
+        return;
+    }
+    SpGemmComplex64 lhs{valA[position.aPos].real, valA[position.aPos].imag};
+    SpGemmComplex64 rhs{valB[position.bPos].real, valB[position.bPos].imag};
+    SpGemmComplex64 productValue{
+        lhs.real * rhs.real - lhs.imag * rhs.imag,
+        lhs.real * rhs.imag + lhs.imag * rhs.real};
+    value = {
+        alpha.real * productValue.real - alpha.imag * productValue.imag,
+        alpha.real * productValue.imag + alpha.imag * productValue.real};
+    col = colIndB[position.bPos];
+}
+
+__simt_callee__ __aicore__ inline void SpGemmSetEmitPositions(
+    int32_t lane, int32_t count, int32_t col0, int32_t col1,
+    int32_t &position0, int32_t &position1, bool &emit0, bool &emit1)
+{
+    int32_t index0 = lane << 1;
+    int32_t index1 = index0 + 1;
+    emit0 = index0 < count &&
+        (index0 + 1 == count || col0 != SpGemmShufflePair(col0, col1, index0 + 1));
+    emit1 = index1 < count &&
+        (index1 + 1 == count || col1 != SpGemmShufflePair(col0, col1, index1 + 1));
+    position0 = emit0 ? 1 : 0;
+    position1 = emit1 ? 1 : 0;
+    for (int32_t offset = 1; offset < 64; offset <<= 1) {
+        int32_t oldPosition0 = position0;
+        int32_t oldPosition1 = position1;
+        int32_t previous0 = index0 - offset;
+        int32_t previous1 = index1 - offset;
+        if (previous0 >= 0) {
+            position0 += SpGemmShufflePair(oldPosition0, oldPosition1, previous0);
+        }
+        if (previous1 >= 0) {
+            position1 += SpGemmShufflePair(oldPosition0, oldPosition1, previous1);
+        }
+    }
+}
+
+__simt_callee__ __aicore__ inline void SpGemmMergeRealPair(
+    int32_t lane, int32_t count, int32_t col0, int32_t col1,
+    float &value0, float &value1, int32_t &position0, int32_t &position1,
+    bool &emit0, bool &emit1)
+{
+    int32_t index0 = lane << 1;
+    int32_t index1 = index0 + 1;
+    for (int32_t offset = 1; offset < 64; offset <<= 1) {
+        float oldValue0 = value0;
+        float oldValue1 = value1;
+        int32_t previous0 = index0 - offset;
+        int32_t previous1 = index1 - offset;
+        if (previous0 >= 0 && col0 == SpGemmShufflePair(col0, col1, previous0)) {
+            value0 += SpGemmShufflePair(oldValue0, oldValue1, previous0);
+        }
+        if (previous1 >= 0 && col1 == SpGemmShufflePair(col0, col1, previous1)) {
+            value1 += SpGemmShufflePair(oldValue0, oldValue1, previous1);
+        }
+    }
+    SpGemmSetEmitPositions(
+        lane, count, col0, col1, position0, position1, emit0, emit1);
+}
+
+__simt_callee__ __aicore__ inline void SpGemmMergeComplexPair(
+    int32_t lane, int32_t count, int32_t col0, int32_t col1,
+    SpGemmComplex64 &value0, SpGemmComplex64 &value1,
+    int32_t &position0, int32_t &position1, bool &emit0, bool &emit1)
+{
+    int32_t index0 = lane << 1;
+    int32_t index1 = index0 + 1;
+    for (int32_t offset = 1; offset < 64; offset <<= 1) {
+        SpGemmComplex64 oldValue0 = value0;
+        SpGemmComplex64 oldValue1 = value1;
+        int32_t previous0 = index0 - offset;
+        int32_t previous1 = index1 - offset;
+        if (previous0 >= 0 && col0 == SpGemmShufflePair(col0, col1, previous0)) {
+            value0.real += SpGemmShufflePair(oldValue0.real, oldValue1.real, previous0);
+            value0.imag += SpGemmShufflePair(oldValue0.imag, oldValue1.imag, previous0);
+        }
+        if (previous1 >= 0 && col1 == SpGemmShufflePair(col0, col1, previous1)) {
+            value1.real += SpGemmShufflePair(oldValue0.real, oldValue1.real, previous1);
+            value1.imag += SpGemmShufflePair(oldValue0.imag, oldValue1.imag, previous1);
+        }
+    }
+    SpGemmSetEmitPositions(
+        lane, count, col0, col1, position0, position1, emit0, emit1);
+}
+
+struct SpGemmMergedRowState {
+    int32_t aBegin;
+    int32_t aEnd;
+    int32_t cPos;
+    int32_t cEnd;
+    int32_t count;
+};
+
+__simt_callee__ __aicore__ inline SpGemmMergedRowState SpGemmInitializeMergedRow(
+    __gm__ const int32_t *rowPtrA, __gm__ const int32_t *colIndA,
+    __gm__ const int32_t *rowPtrB, __gm__ const int32_t *oldRowPtrC,
+    __gm__ int32_t *cursors, int32_t row, bool useC)
+{
+    SpGemmMergedRowState state{
+        rowPtrA[row], rowPtrA[row + 1],
+        useC ? oldRowPtrC[row] : 0, useC ? oldRowPtrC[row + 1] : 0, 0};
+    for (int32_t aPos = state.aBegin; aPos < state.aEnd; ++aPos) {
+        cursors[aPos] = rowPtrB[colIndA[aPos]];
+    }
+    return state;
+}
+
+template <typename T>
+__simt_callee__ __aicore__ inline void SpGemmComputeRealMergedRow(
+    __gm__ const int32_t *rowPtrA, __gm__ const int32_t *colIndA, __gm__ const T *valA,
+    __gm__ const int32_t *rowPtrB, __gm__ const int32_t *colIndB, __gm__ const T *valB,
+    __gm__ const int32_t *oldRowPtrC, __gm__ const int32_t *oldColIndC, __gm__ const T *oldValC,
+    __gm__ int32_t *cursors, __gm__ int32_t *candidateCols,
+    __gm__ T *candidateVals, __gm__ int32_t *uniqueCounts, __gm__ int32_t *error,
+    int32_t row, int64_t outBase, float alpha, float beta, bool useC)
+{
+    SpGemmMergedRowState state = SpGemmInitializeMergedRow(
+        rowPtrA, colIndA, rowPtrB, oldRowPtrC, cursors, row, useC);
+    while (true) {
+        int32_t minCol = SpGemmFindMinColumn(
+            state.aBegin, state.aEnd, colIndA, rowPtrB, colIndB, cursors);
+        if (minCol == 0x7FFFFFFF) {
+            break;
+        }
+        float value = alpha * SpGemmAccumulateRealColumn<T>(
+            minCol, state.aBegin, state.aEnd, colIndA, valA,
+            rowPtrB, colIndB, valB, cursors);
+        if (useC) {
+            if (state.cPos >= state.cEnd || oldColIndC[state.cPos] != minCol) {
+                SetError(error);
             } else {
-                /* Denormalized half */
-                uint32_t m = mant | 0x800000u;
-                int32_t shift = 14 - newExp;
-                out = static_cast<uint16_t>((sign << 15) | (m >> shift));
+                value += beta * SpGemmToFloat<T>(oldValC[state.cPos]);
+                ++state.cPos;
             }
+        }
+        candidateCols[outBase + state.count] = minCol;
+        candidateVals[outBase + state.count] = SpGemmFromFloat<T>(value);
+        ++state.count;
+    }
+    if (useC && state.cPos != state.cEnd) {
+        SetError(error);
+    }
+    uniqueCounts[row] = state.count;
+}
+
+__simt_callee__ __aicore__ inline void SpGemmAddOldComplex(
+    __gm__ const int32_t *oldColIndC, __gm__ const SpGemmComplex64 *oldValC,
+    __gm__ int32_t *error, int32_t minCol, int32_t cEnd,
+    const SpGemmComplex64 &beta, SpGemmComplex64 &value, int32_t &cPos)
+{
+    if (cPos >= cEnd || oldColIndC[cPos] != minCol) {
+        SetError(error);
+        return;
+    }
+    SpGemmComplex64 old{oldValC[cPos].real, oldValC[cPos].imag};
+    value.real += beta.real * old.real - beta.imag * old.imag;
+    value.imag += beta.real * old.imag + beta.imag * old.real;
+    ++cPos;
+}
+
+__simt_callee__ __aicore__ inline void SpGemmComputeComplexMergedRow(
+    __gm__ const int32_t *rowPtrA, __gm__ const int32_t *colIndA,
+    __gm__ const SpGemmComplex64 *valA, __gm__ const int32_t *rowPtrB,
+    __gm__ const int32_t *colIndB, __gm__ const SpGemmComplex64 *valB,
+    __gm__ const int32_t *oldRowPtrC, __gm__ const int32_t *oldColIndC,
+    __gm__ const SpGemmComplex64 *oldValC, __gm__ int32_t *cursors,
+    __gm__ int32_t *candidateCols, __gm__ SpGemmComplex64 *candidateVals,
+    __gm__ int32_t *uniqueCounts, __gm__ int32_t *error, int32_t row,
+    int64_t outBase, const SpGemmComplex64 &alpha,
+    const SpGemmComplex64 &beta, bool useC)
+{
+    SpGemmMergedRowState state = SpGemmInitializeMergedRow(
+        rowPtrA, colIndA, rowPtrB, oldRowPtrC, cursors, row, useC);
+    while (true) {
+        int32_t minCol = SpGemmFindMinColumn(
+            state.aBegin, state.aEnd, colIndA, rowPtrB, colIndB, cursors);
+        if (minCol == 0x7FFFFFFF) {
+            break;
+        }
+        SpGemmComplex64 product = SpGemmAccumulateComplexColumn(
+            minCol, state.aBegin, state.aEnd, colIndA, valA,
+            rowPtrB, colIndB, valB, cursors);
+        SpGemmComplex64 value{
+            alpha.real * product.real - alpha.imag * product.imag,
+            alpha.real * product.imag + alpha.imag * product.real};
+        if (useC) {
+            SpGemmAddOldComplex(oldColIndC, oldValC, error, minCol,
+                state.cEnd, beta, value, state.cPos);
+        }
+        candidateCols[outBase + state.count] = minCol;
+        candidateVals[outBase + state.count].real = value.real;
+        candidateVals[outBase + state.count].imag = value.imag;
+        ++state.count;
+    }
+    if (useC && state.cPos != state.cEnd) {
+        SetError(error);
+    }
+    uniqueCounts[row] = state.count;
+}
+
+template <typename T>
+__simt_callee__ __aicore__ inline void SpGemmComputeRealSmallRow(
+    __gm__ const int32_t *rowPtrA, __gm__ const int32_t *colIndA, __gm__ const T *valA,
+    __gm__ const int32_t *rowPtrB, __gm__ const int32_t *colIndB, __gm__ const T *valB,
+    __gm__ int32_t *candidateCols, __gm__ T *candidateVals,
+    __gm__ int32_t *uniqueCounts, int32_t row, int32_t lane,
+    int32_t count, int64_t outBase, float alpha)
+{
+    int32_t aBegin = rowPtrA[row];
+    int32_t aEnd = rowPtrA[row + 1];
+    int32_t col0 = 0;
+    int32_t col1 = 0;
+    float value0 = 0.0F;
+    float value1 = 0.0F;
+    int32_t width = SpGemmSortWidth(count);
+    SpGemmLoadRealProduct<T>(lane << 1, count, aBegin, aEnd,
+        colIndA, valA, rowPtrB, colIndB, valB, alpha, col0, value0);
+    SpGemmLoadRealProduct<T>((lane << 1) + 1, count, aBegin, aEnd,
+        colIndA, valA, rowPtrB, colIndB, valB, alpha, col1, value1);
+    SpGemmSortPair(lane, width, col0, value0, col1, value1);
+    int32_t position0 = 0;
+    int32_t position1 = 0;
+    bool emit0 = false;
+    bool emit1 = false;
+    SpGemmMergeRealPair(lane, count, col0, col1, value0, value1,
+        position0, position1, emit0, emit1);
+    if (emit0) {
+        candidateCols[outBase + position0 - 1] = col0;
+        candidateVals[outBase + position0 - 1] = SpGemmFromFloat<T>(value0);
+    }
+    if (emit1) {
+        candidateCols[outBase + position1 - 1] = col1;
+        candidateVals[outBase + position1 - 1] = SpGemmFromFloat<T>(value1);
+    }
+    if (lane == 0) {
+        uniqueCounts[row] = asc_shfl(position1, 31U);
+    }
+}
+
+__simt_callee__ __aicore__ inline void SpGemmComputeComplexSmallRow(
+    __gm__ const int32_t *rowPtrA, __gm__ const int32_t *colIndA,
+    __gm__ const SpGemmComplex64 *valA, __gm__ const int32_t *rowPtrB,
+    __gm__ const int32_t *colIndB, __gm__ const SpGemmComplex64 *valB,
+    __gm__ int32_t *candidateCols, __gm__ SpGemmComplex64 *candidateVals,
+    __gm__ int32_t *uniqueCounts, int32_t row, int32_t lane,
+    int32_t count, int64_t outBase, const SpGemmComplex64 &alpha)
+{
+    int32_t aBegin = rowPtrA[row];
+    int32_t aEnd = rowPtrA[row + 1];
+    int32_t col0 = 0;
+    int32_t col1 = 0;
+    SpGemmComplex64 value0{0.0F, 0.0F};
+    SpGemmComplex64 value1{0.0F, 0.0F};
+    int32_t width = SpGemmSortWidth(count);
+    SpGemmLoadComplexProduct(lane << 1, count, aBegin, aEnd,
+        colIndA, valA, rowPtrB, colIndB, valB, alpha, col0, value0);
+    SpGemmLoadComplexProduct((lane << 1) + 1, count, aBegin, aEnd,
+        colIndA, valA, rowPtrB, colIndB, valB, alpha, col1, value1);
+    SpGemmSortPair(lane, width, col0, value0, col1, value1);
+    int32_t position0 = 0;
+    int32_t position1 = 0;
+    bool emit0 = false;
+    bool emit1 = false;
+    SpGemmMergeComplexPair(lane, count, col0, col1, value0, value1,
+        position0, position1, emit0, emit1);
+    if (emit0) {
+        candidateCols[outBase + position0 - 1] = col0;
+        candidateVals[outBase + position0 - 1].real = value0.real;
+        candidateVals[outBase + position0 - 1].imag = value0.imag;
+    }
+    if (emit1) {
+        candidateCols[outBase + position1 - 1] = col1;
+        candidateVals[outBase + position1 - 1].real = value1.real;
+        candidateVals[outBase + position1 - 1].imag = value1.imag;
+    }
+    if (lane == 0) {
+        uniqueCounts[row] = asc_shfl(position1, 31U);
+    }
+}
+
+template <typename T>
+__simt_vf__ __aicore__ __launch_bounds__(kSpGemmThreads) inline void SpGemmComputeRealWarpSimt(
+    __gm__ const int32_t *rowPtrA, __gm__ const int32_t *colIndA, __gm__ const T *valA,
+    __gm__ const int32_t *rowPtrB, __gm__ const int32_t *colIndB, __gm__ const T *valB,
+    __gm__ const int32_t *oldRowPtrC, __gm__ const int32_t *oldColIndC, __gm__ const T *oldValC,
+    __gm__ const int64_t *productOffsets, __gm__ int32_t *cursors,
+    __gm__ int32_t *candidateCols, __gm__ T *candidateVals, __gm__ int32_t *uniqueCounts,
+    __gm__ int32_t *error, int32_t m, float alphaHost, float betaHost,
+    uint64_t alphaPtr, uint64_t betaPtr, int32_t rowStart, int32_t rowEnd, int32_t threadCount)
+{
+    int32_t lane = static_cast<int32_t>(threadIdx.x) & 31;
+    int32_t warp = static_cast<int32_t>(threadIdx.x) >> 5;
+    int32_t warps = threadCount >> 5;
+    float alpha = SpGemmReadRealScalar<T>(alphaPtr, alphaHost);
+    float beta = SpGemmReadRealScalar<T>(betaPtr, betaHost);
+    bool useC = beta != 0.0F;
+    for (int32_t row = rowStart + warp; row < rowEnd && row < m; row += warps) {
+        int64_t outBase = productOffsets[row];
+        int64_t productCount64 = productOffsets[row + 1] - outBase;
+        if (!useC && productCount64 <= 64) {
+            int32_t count = static_cast<int32_t>(productCount64);
+            SpGemmComputeRealSmallRow<T>(
+                rowPtrA, colIndA, valA, rowPtrB, colIndB, valB,
+                candidateCols, candidateVals, uniqueCounts,
+                row, lane, count, outBase, alpha);
+            continue;
+        }
+        if (lane != 0) {
+            continue;
+        }
+        SpGemmComputeRealMergedRow<T>(
+            rowPtrA, colIndA, valA, rowPtrB, colIndB, valB,
+            oldRowPtrC, oldColIndC, oldValC, cursors, candidateCols,
+            candidateVals, uniqueCounts, error, row, outBase, alpha, beta, useC);
+    }
+}
+
+__simt_vf__ __aicore__ __launch_bounds__(kSpGemmThreads) inline void SpGemmComputeComplexWarpSimt(
+    __gm__ const int32_t *rowPtrA, __gm__ const int32_t *colIndA,
+    __gm__ const SpGemmComplex64 *valA, __gm__ const int32_t *rowPtrB,
+    __gm__ const int32_t *colIndB, __gm__ const SpGemmComplex64 *valB,
+    __gm__ const int32_t *oldRowPtrC, __gm__ const int32_t *oldColIndC,
+    __gm__ const SpGemmComplex64 *oldValC, __gm__ const int64_t *productOffsets,
+    __gm__ int32_t *cursors, __gm__ int32_t *candidateCols,
+    __gm__ SpGemmComplex64 *candidateVals, __gm__ int32_t *uniqueCounts,
+    __gm__ int32_t *error, int32_t m, float alphaReal, float alphaImag,
+    float betaReal, float betaImag, uint64_t alphaPtr, uint64_t betaPtr,
+    int32_t rowStart, int32_t rowEnd, int32_t threadCount)
+{
+    int32_t lane = static_cast<int32_t>(threadIdx.x) & 31;
+    int32_t warp = static_cast<int32_t>(threadIdx.x) >> 5;
+    int32_t warps = threadCount >> 5;
+    SpGemmComplex64 alpha = SpGemmReadComplexScalar(alphaPtr, alphaReal, alphaImag);
+    SpGemmComplex64 beta = SpGemmReadComplexScalar(betaPtr, betaReal, betaImag);
+    bool useC = beta.real != 0.0F || beta.imag != 0.0F;
+    for (int32_t row = rowStart + warp; row < rowEnd && row < m; row += warps) {
+        int64_t outBase = productOffsets[row];
+        int64_t productCount64 = productOffsets[row + 1] - outBase;
+        if (!useC && productCount64 <= 64) {
+            int32_t count = static_cast<int32_t>(productCount64);
+            SpGemmComputeComplexSmallRow(
+                rowPtrA, colIndA, valA, rowPtrB, colIndB, valB,
+                candidateCols, candidateVals, uniqueCounts,
+                row, lane, count, outBase, alpha);
+            continue;
+        }
+        if (lane != 0) {
+            continue;
+        }
+        SpGemmComputeComplexMergedRow(
+            rowPtrA, colIndA, valA, rowPtrB, colIndB, valB,
+            oldRowPtrC, oldColIndC, oldValC, cursors, candidateCols,
+            candidateVals, uniqueCounts, error, row, outBase, alpha, beta, useC);
+    }
+}
+
+struct SpGemmRegularPosition {
+    int32_t aPos;
+    int32_t bPos;
+    int32_t col;
+};
+
+__simt_callee__ __aicore__ inline SpGemmRegularPosition GetRegularPosition(
+    __gm__ const int32_t *rowPtrA, __gm__ const int32_t *rowPtrB,
+    int32_t row, int32_t outputInRow, int32_t n,
+    int32_t degree, int32_t productsPerRow)
+{
+    int32_t firstProduct = row + productsPerRow > n ? n - row : 0;
+    int32_t product = firstProduct + outputInRow;
+    if (product >= productsPerRow) {
+        product -= productsPerRow;
+    }
+    int32_t aLogical = product % degree;
+    int32_t bLogical = product / degree;
+    int32_t firstA = row + degree > n ? n - row : 0;
+    int32_t aSlot = aLogical - firstA;
+    if (aSlot < 0) {
+        aSlot += degree;
+    }
+    int32_t bRow = row + aLogical;
+    if (bRow >= n) {
+        bRow -= n;
+    }
+    int32_t lastBOffset = (degree - 1) * degree;
+    int32_t firstB = bRow + lastBOffset >= n ?
+        (n - bRow + degree - 1) / degree : 0;
+    int32_t bSlot = bLogical - firstB;
+    if (bSlot < 0) {
+        bSlot += degree;
+    }
+    int32_t col = row + product;
+    if (col >= n) {
+        col -= n;
+    }
+    return {rowPtrA[row] + aSlot, rowPtrB[bRow] + bSlot, col};
+}
+
+__simt_callee__ __aicore__ inline void StoreRegularRowMetadata(
+    __gm__ int32_t *uniqueCounts, __gm__ int32_t *rowPtrC,
+    int32_t row, int32_t n, int32_t outputInRow,
+    int32_t productsPerRow, int64_t output)
+{
+    if (outputInRow != 0) {
+        return;
+    }
+    uniqueCounts[row] = productsPerRow;
+    rowPtrC[row] = static_cast<int32_t>(output);
+    if (row + 1 == n) {
+        rowPtrC[n] = static_cast<int32_t>(output + productsPerRow);
+    }
+}
+
+template <typename T>
+__simt_vf__ __aicore__ __launch_bounds__(kSpGemmThreads) inline void SpGemmComputeRegularRealSimt(
+    __gm__ const int32_t *rowPtrA, __gm__ const T *valA,
+    __gm__ const int32_t *rowPtrB, __gm__ const T *valB,
+    __gm__ const int64_t *productOffsets, __gm__ int32_t *candidateCols,
+    __gm__ T *candidateVals, __gm__ int32_t *uniqueCounts,
+    __gm__ int32_t *rowPtrC, __gm__ int32_t *directCols, __gm__ T *directVals,
+    int32_t n, int32_t degree, float alphaHost, uint64_t alphaPtr,
+    int32_t directOutput, int32_t rowStart, int32_t rowEnd, int32_t threadCount)
+{
+    float alpha = SpGemmReadRealScalar<T>(alphaPtr, alphaHost);
+    int32_t productsPerRow = degree * degree;
+    int32_t localProducts = (rowEnd - rowStart) * productsPerRow;
+    for (int32_t index = static_cast<int32_t>(threadIdx.x);
+         index < localProducts; index += threadCount) {
+        int32_t row = rowStart + index / productsPerRow;
+        int32_t outputInRow = index % productsPerRow;
+        SpGemmRegularPosition position = GetRegularPosition(
+            rowPtrA, rowPtrB, row, outputInRow, n, degree, productsPerRow);
+        int64_t output = productOffsets[row] + outputInRow;
+        float value = alpha * SpGemmToFloat<T>(valA[position.aPos]) *
+            SpGemmToFloat<T>(valB[position.bPos]);
+        if (directOutput != 0) {
+            directCols[output] = position.col;
+            directVals[output] = SpGemmFromFloat<T>(value);
         } else {
-            /* Normalized — round to nearest even */
-            uint32_t roundingBias = 0x1000u + ((mant >> 13) & 1u);
-            uint32_t rounded = (mant + roundingBias) >> 13;
-            if (rounded > 0x3FFu) {  /* mantissa overflow → exponent increment */
-                rounded = 0u;
-                newExp += 1;
-            }
-            if (newExp >= 0x1F) {
-                out = static_cast<uint16_t>((sign << 15) | 0x7C00u);    /* Overflow → Inf */
-            } else {
-                out = static_cast<uint16_t>((sign << 15) | (static_cast<uint32_t>(newExp) << 10) | rounded);
-            }
+            candidateCols[output] = position.col;
+            candidateVals[output] = SpGemmFromFloat<T>(value);
         }
+        StoreRegularRowMetadata(
+            uniqueCounts, rowPtrC, row, n, outputInRow, productsPerRow, output);
     }
 }
 
-static __simt_callee__ __aicore__ inline void Bf16ToFloat(uint16_t b, float &out) {
-    /* BF16 is the upper 16 bits of FP32 — just extend with zero lower bits */
-    uint32_t f = static_cast<uint32_t>(b) << 16;
-    float result;
-    __builtin_memcpy(&out, &f, sizeof(float));
-}
-
-static __simt_callee__ __aicore__ inline void FloatToBf16(float val, uint16_t &out) {
-    uint32_t bits;
-    __builtin_memcpy(&bits, &val, sizeof(float));
-    /* Round to nearest even: add 0x7FFF + (lsb of upper half) */
-    uint32_t lsb = (bits >> 16) & 1u;
-    uint32_t roundingBias = 0x7FFFu + lsb;
-    uint32_t rounded = bits + roundingBias;
-    out = static_cast<uint16_t>(rounded >> 16);
-}
-
-/* Read a value from GM as float — __simt_callee__ allows non-void return. */
-template<typename ValT>
-static __simt_callee__ __aicore__ inline float ReadGmAsFloat(
-    __gm__ const ValT *gmBuf, int32_t idx)
+__simt_vf__ __aicore__ __launch_bounds__(kSpGemmThreads) inline void SpGemmComputeRegularComplexSimt(
+    __gm__ const int32_t *rowPtrA, __gm__ const SpGemmComplex64 *valA,
+    __gm__ const int32_t *rowPtrB, __gm__ const SpGemmComplex64 *valB,
+    __gm__ const int64_t *productOffsets, __gm__ int32_t *candidateCols,
+    __gm__ SpGemmComplex64 *candidateVals, __gm__ int32_t *uniqueCounts,
+    __gm__ int32_t *rowPtrC, __gm__ int32_t *directCols,
+    __gm__ SpGemmComplex64 *directVals,
+    int32_t n, int32_t degree, float alphaReal, float alphaImag,
+    uint64_t alphaPtr, int32_t directOutput,
+    int32_t rowStart, int32_t rowEnd, int32_t threadCount)
 {
-    if constexpr (std::is_same<ValT, float>::value) {
-        return gmBuf[idx];
-    } else {
-        __gm__ const uint16_t *u16Buf =
-            reinterpret_cast<__gm__ const uint16_t *>(gmBuf);
-        if constexpr (std::is_same<ValT, half>::value) {
-            float out; HalfToFloat(u16Buf[idx], out); return out;
+    SpGemmComplex64 alpha = SpGemmReadComplexScalar(alphaPtr, alphaReal, alphaImag);
+    int32_t productsPerRow = degree * degree;
+    int32_t localProducts = (rowEnd - rowStart) * productsPerRow;
+    for (int32_t index = static_cast<int32_t>(threadIdx.x);
+         index < localProducts; index += threadCount) {
+        int32_t row = rowStart + index / productsPerRow;
+        int32_t outputInRow = index % productsPerRow;
+        SpGemmRegularPosition position = GetRegularPosition(
+            rowPtrA, rowPtrB, row, outputInRow, n, degree, productsPerRow);
+        SpGemmComplex64 lhs{valA[position.aPos].real, valA[position.aPos].imag};
+        SpGemmComplex64 rhs{valB[position.bPos].real, valB[position.bPos].imag};
+        SpGemmComplex64 productValue{
+            lhs.real * rhs.real - lhs.imag * rhs.imag,
+            lhs.real * rhs.imag + lhs.imag * rhs.real};
+        SpGemmComplex64 value{
+            alpha.real * productValue.real - alpha.imag * productValue.imag,
+            alpha.real * productValue.imag + alpha.imag * productValue.real};
+        int64_t output = productOffsets[row] + outputInRow;
+        if (directOutput != 0) {
+            directCols[output] = position.col;
+            directVals[output].real = value.real;
+            directVals[output].imag = value.imag;
         } else {
-            float out; Bf16ToFloat(u16Buf[idx], out); return out;
+            candidateCols[output] = position.col;
+            candidateVals[output].real = value.real;
+            candidateVals[output].imag = value.imag;
+        }
+        StoreRegularRowMetadata(
+            uniqueCounts, rowPtrC, row, n, outputInRow, productsPerRow, output);
+    }
+}
+
+template <typename T>
+__simt_vf__ __aicore__ __launch_bounds__(kSpGemmThreads) inline void SpGemmCopySimt(
+    __gm__ const int64_t *productOffsets, __gm__ const int32_t *uniqueCounts,
+    __gm__ const int32_t *candidateCols, __gm__ const T *candidateVals,
+    __gm__ const int32_t *rowPtrC, __gm__ int32_t *colIndC, __gm__ T *valC,
+    int32_t m, int32_t rowStart, int32_t rowEnd, int32_t threadCount)
+{
+    for (int32_t row = rowStart + static_cast<int32_t>(threadIdx.x);
+         row < rowEnd && row < m; row += threadCount) {
+        int64_t src = productOffsets[row];
+        int32_t dst = rowPtrC[row];
+        int32_t count = uniqueCounts[row];
+        for (int32_t j = 0; j < count; ++j) {
+            colIndC[dst + j] = candidateCols[src + j];
+            valC[dst + j] = candidateVals[src + j];
         }
     }
 }
 
-/* Write a float value to GM as target dtype. */
-template<typename ValT>
-static __simt_callee__ __aicore__ inline void WriteFloatToGm(
-    __gm__ ValT *gmBuf, int32_t idx, float val)
+template <typename T>
+__simt_vf__ __aicore__ __launch_bounds__(kSpGemmThreads) inline void SpGemmCopyFlatSimt(
+    __gm__ const int32_t *candidateCols, __gm__ const T *candidateVals,
+    __gm__ int32_t *colIndC, __gm__ T *valC, int32_t count,
+    int32_t block, int32_t blocks, int32_t threadCount)
 {
-    if constexpr (std::is_same<ValT, float>::value) {
-        gmBuf[idx] = val;
-    } else {
-        __gm__ uint16_t *u16Buf =
-            reinterpret_cast<__gm__ uint16_t *>(gmBuf);
-        uint16_t bits = 0;
-        if constexpr (std::is_same<ValT, half>::value) {
-            FloatToHalf(val, bits);
-        } else {
-            FloatToBf16(val, bits);
-        }
-        u16Buf[idx] = bits;
+    int32_t index = block * threadCount + static_cast<int32_t>(threadIdx.x);
+    int32_t stride = blocks * threadCount;
+    for (; index < count; index += stride) {
+        colIndC[index] = candidateCols[index];
+        valC[index] = candidateVals[index];
     }
 }
 
-/* Read existing GM value as float (for β·C_in path). */
-template<typename ValT>
-static __simt_callee__ __aicore__ inline float ReadGmValAsFloat(
-    __gm__ ValT *gmBuf, int32_t idx)
+__simt_vf__ __aicore__ __launch_bounds__(kSpGemmThreads) inline void SpGemmCopyComplexFlatSimt(
+    __gm__ const int32_t *candidateCols, __gm__ const SpGemmComplex64 *candidateVals,
+    __gm__ int32_t *colIndC, __gm__ SpGemmComplex64 *valC, int32_t count,
+    int32_t block, int32_t blocks, int32_t threadCount)
 {
-    return ReadGmAsFloat<ValT>(gmBuf, idx);
-}
-
-/* ---- Common helpers shared across kernel classes ---- */
-
-/* Get row bounds from binEdge for current block. */
-static __aicore__ inline void SpgemmGetRowBounds(
-    int32_t blockDim, __gm__ const int32_t *binEdge,
-    int32_t &rowStart, int32_t &rowEnd)
-{
-    int32_t outerId = static_cast<int32_t>(GetBlockIdx());
-    rowStart = 0;
-    rowEnd = 0;
-    if (outerId >= 0 && outerId < blockDim) {
-        rowStart = binEdge[outerId];
-        rowEnd = binEdge[outerId + 1];
+    int32_t index = block * threadCount + static_cast<int32_t>(threadIdx.x);
+    int32_t stride = blocks * threadCount;
+    for (; index < count; index += stride) {
+        colIndC[index] = candidateCols[index];
+        valC[index].real = candidateVals[index].real;
+        valC[index].imag = candidateVals[index].imag;
     }
 }
 
-/* Compute SIMT thread count for non-tiled kernels. */
-static __aicore__ inline uint32_t SpgemmComputeSimtThreads(
-    int32_t numRows, int32_t rowBinNum, int32_t n, bool forceSingleThread)
+__simt_vf__ __aicore__ __launch_bounds__(kSpGemmThreads) inline void SpGemmCopyComplexSimt(
+    __gm__ const int64_t *productOffsets, __gm__ const int32_t *uniqueCounts,
+    __gm__ const int32_t *candidateCols, __gm__ const SpGemmComplex64 *candidateVals,
+    __gm__ const int32_t *rowPtrC, __gm__ int32_t *colIndC,
+    __gm__ SpGemmComplex64 *valC, int32_t m, int32_t rowStart,
+    int32_t rowEnd, int32_t threadCount)
 {
-    if (forceSingleThread) return 1u;
-    if (n > kMaxDenseCols) return 1u;  /* n > 64: single thread to avoid register pressure */
-
-    uint32_t simtThreads = 1u;
-    const uint64_t totalWork = static_cast<uint64_t>(numRows);
-    if (totalWork > 0u && rowBinNum > 0) {
-        simtThreads = static_cast<uint32_t>(
-            (totalWork + static_cast<uint64_t>(rowBinNum) - 1u) /
-            static_cast<uint64_t>(rowBinNum));
-        if (simtThreads > kMaxSimtThreadsPerBlock) {
-            simtThreads = kMaxSimtThreadsPerBlock;
-        }
-    }
-    if (simtThreads < kSpgemmWarpSize) simtThreads = kSpgemmWarpSize;
-    return simtThreads;
-}
-
-/* Write accumulated result to GM with β·C_in blending. */
-template<typename ValT>
-static __simt_callee__ __aicore__ inline void SpgemmWriteResult(
-    __gm__ ValT *valuesC, int32_t outIdx,
-    float alpha, float accumVal,
-    float beta, bool betaZero)
-{
-    float result = alpha * accumVal;
-    if (!betaZero) {
-        float cInVal = ReadGmValAsFloat<ValT>(valuesC, outIdx);
-        result += beta * cInVal;
-    }
-    WriteFloatToGm<ValT>(valuesC, outIdx, result);
-}
-
-/* 从 tiling 读取 alpha/beta（支持 host 指针或 device 指针）。 */
-static __aicore__ inline void SpgemmReadAlphaBeta(
-    const SpgemmNumericTilingData &tiling,
-    float &alpha, float &beta)
-{
-    if (tiling.alphaPtr != 0) {
-        alpha = *reinterpret_cast<__gm__ const float *>(tiling.alphaPtr);
-    } else {
-        alpha = tiling.alphaHost;
-    }
-    if (tiling.betaPtr != 0) {
-        beta = *reinterpret_cast<__gm__ const float *>(tiling.betaPtr);
-    } else {
-        beta = tiling.betaHost;
-    }
-}
-
-/* ============================================================================
- * ---- Symbolic phase SIMT compute (per-thread) ----
- * ============================================================================ */
-template<bool UseGmBitmap>
-__simt_vf__ __aicore__ __launch_bounds__(kMaxSimtThreadsPerBlock) inline void SpgemmSymbolicSimtCompute(
-    __gm__ const int32_t *aRowPtr,
-    __gm__ const int32_t *aColInd,
-    __gm__ const int32_t *bRowPtr,
-    __gm__ const int32_t *bColInd,
-    __gm__ int32_t *nnzPerRow,
-    __gm__ int32_t *reorder,
-    __gm__ uint8_t *wsBase,
-    int64_t gmAccumOffset,
-    int32_t n,
-    int32_t rowStart,
-    int32_t rowEnd,
-    int32_t blockId)
-{
-    const int32_t numRows = rowEnd - rowStart;
-    if (numRows <= 0) return;
-
-    const uint32_t threadNum = blockDim.x;
-    const uint32_t tid = threadIdx.x;
-
-    if constexpr (UseGmBitmap) {
-        /* n > 64 时使用 GM-backed 每 block bitmap。
-         * Only tid==0 processes rows sequentially (one bitmap per block).
-         * Other threads must still participate in SIMT dispatch (no early return
-         * before asc_vf_call returns). */
-        if (tid != 0u) return;
-
-        int32_t bitmapBytes = (n + 7) / 8;
-        int64_t blockStride = static_cast<int64_t>(n) * static_cast<int64_t>(sizeof(float));
-        __gm__ uint8_t *bitmap = wsBase + gmAccumOffset +
-            static_cast<int64_t>(blockId) * blockStride;
-
-        for (int32_t r = 0; r < numRows; ++r) {
-            int32_t logicalRow = rowStart + r;
-            int32_t row = reorder[logicalRow];
-            int32_t aStart = aRowPtr[row];
-            int32_t aEnd   = aRowPtr[row + 1];
-
-            /* Zero bitmap */
-            for (int32_t i = 0; i < bitmapBytes; ++i) bitmap[i] = 0;
-
-            /* Set bits for each column encountered */
-            for (int32_t p = aStart; p < aEnd; ++p) {
-                int32_t k = aColInd[p];
-                int32_t bStart = bRowPtr[k];
-                int32_t bEnd   = bRowPtr[k + 1];
-                for (int32_t q = bStart; q < bEnd; ++q) {
-                    int32_t j = bColInd[q];
-                    if (j >= 0 && j < n) {
-                        bitmap[j >> 3] |= static_cast<uint8_t>(1u << (j & 7));
-                    }
-                }
-            }
-
-            /* Count set bits (popcount) */
-            int32_t colCount = 0;
-            for (int32_t i = 0; i < bitmapBytes; ++i) {
-                uint8_t b = bitmap[i];
-                while (b != 0) {
-                    colCount += (b & 1u);
-                    b >>= 1;
-                }
-            }
-            nnzPerRow[row] = colCount;
-        }
-    } else {
-        /* n ≤ 64: use local bitmask (original path, correct and fast) */
-        for (int32_t r = static_cast<int32_t>(tid); r < numRows; r += static_cast<int32_t>(threadNum)) {
-            int32_t logicalRow = rowStart + r;
-            int32_t row = reorder[logicalRow];
-            int32_t aStart = aRowPtr[row];
-            int32_t aEnd   = aRowPtr[row + 1];
-            int32_t colCount = 0;
-
-            uint8_t maskBuf[kMaxLocalAccumN / 8];
-            for (int32_t i = 0; i < (n + 7) / 8; ++i) maskBuf[i] = 0;
-
-            for (int32_t p = aStart; p < aEnd; ++p) {
-                int32_t k = aColInd[p];
-                int32_t bStart = bRowPtr[k];
-                int32_t bEnd   = bRowPtr[k + 1];
-                for (int32_t q = bStart; q < bEnd; ++q) {
-                    int32_t j = bColInd[q];
-                    if (j >= 0 && j < n) {
-                        int32_t byteIdx = j >> 3;
-                        uint8_t bitMask = static_cast<uint8_t>(1u << (j & 7));
-                        if ((maskBuf[byteIdx] & bitMask) == 0u) {
-                            maskBuf[byteIdx] |= bitMask;
-                            ++colCount;
-                        }
-                    }
-                }
-            }
-            nnzPerRow[row] = colCount;
+    for (int32_t row = rowStart + static_cast<int32_t>(threadIdx.x);
+         row < rowEnd && row < m; row += threadCount) {
+        int64_t src = productOffsets[row];
+        int32_t dst = rowPtrC[row];
+        int32_t count = uniqueCounts[row];
+        for (int32_t j = 0; j < count; ++j) {
+            colIndC[dst + j] = candidateCols[src + j];
+            valC[dst + j].real = candidateVals[src + j].real;
+            valC[dst + j].imag = candidateVals[src + j].imag;
         }
     }
 }
 
-/* ---- 符号阶段 SIMT compute：n > 128 的分块路径 ----
- *
- * local 路径（n ≤ 256）的 maskBuf[32] 在寄存器中，但数值阶段的 accBuf[256]
- * 会导致溢出。GM-backed 路径（n > 256）有 GM 缓存一致性问题。
- *
- * 方案：将 n 按 kTileN（128）列分块。每块使用 maskBuf[16]（16 字节），
- * 遍历 A×B 一次，只统计落在该块范围内的列。无溢出风险。
- *
- * 确保符号和数值阶段使用相同的分块遍历，消除列集不一致问题。
- */
-__simt_vf__ __aicore__ __launch_bounds__(kMaxSimtThreadsPerBlock) inline void SpgemmSymbolicSimtComputeTiled(
-    __gm__ const int32_t *aRowPtr,
-    __gm__ const int32_t *aColInd,
-    __gm__ const int32_t *bRowPtr,
-    __gm__ const int32_t *bColInd,
-    __gm__ int32_t *nnzPerRow,
-    __gm__ int32_t *reorder,
-    int32_t n,
-    int32_t rowStart,
-    int32_t rowEnd)
+__aicore__ inline void SpGemmRowRange(
+    int32_t totalRows, uint32_t rowsPerBlock,
+    int32_t &rowStart, int32_t &rowEnd, uint32_t &threadCount)
 {
-    const int32_t numRows = rowEnd - rowStart;
-    if (numRows <= 0) return;
-
-    const uint32_t threadNum = blockDim.x;
-    const uint32_t tid = threadIdx.x;
-
-    /* Single-thread for tile path (n > 64 → register pressure concern) */
-    if (tid != 0u) return;
-
-    const int32_t numTiles = (n + kTileN - 1) / kTileN;
-
-    for (int32_t r = 0; r < numRows; ++r) {
-        int32_t logicalRow = rowStart + r;
-        int32_t row = reorder[logicalRow];
-        int32_t aStart = aRowPtr[row];
-        int32_t aEnd   = aRowPtr[row + 1];
-        int32_t colCount = 0;
-
-        /* Flush GM cache before reading B data for this row.
-         * Ensures symbolic and numeric phases see consistent B.colInd. */
-        asc_threadfence();
-
-        for (int32_t tileIdx = 0; tileIdx < numTiles; ++tileIdx) {
-            int32_t tileStart = tileIdx * kTileN;
-            int32_t tileEnd = tileStart + kTileN;
-            if (tileEnd > n) tileEnd = n;
-            int32_t tileLen = tileEnd - tileStart;
-            int32_t maskBytes = (tileLen + 7) / 8;
-
-            /* Local bitmask — max 16 bytes for tile=128, always in register file */
-            uint8_t maskBuf[kTileN / 8];
-            for (int32_t i = 0; i < maskBytes; ++i) maskBuf[i] = 0;
-
-            for (int32_t p = aStart; p < aEnd; ++p) {
-                int32_t k = aColInd[p];
-                int32_t bStart = bRowPtr[k];
-                int32_t bEnd   = bRowPtr[k + 1];
-                for (int32_t q = bStart; q < bEnd; ++q) {
-                    int32_t j = bColInd[q];
-                    if (j >= tileStart && j < tileEnd) {
-                        int32_t localJ = j - tileStart;
-                        maskBuf[localJ >> 3] |= static_cast<uint8_t>(1u << (localJ & 7));
-                    }
-                }
-            }
-
-            /* Count set bits (popcount) for this tile */
-            for (int32_t i = 0; i < maskBytes; ++i) {
-                uint8_t b = maskBuf[i];
-                while (b != 0) {
-                    colCount += (b & 1u);
-                    b >>= 1;
-                }
-            }
-        }
-        nnzPerRow[row] = colCount;
+    rowStart = static_cast<int32_t>(AscendC::GetBlockIdx()) * static_cast<int32_t>(rowsPerBlock);
+    rowEnd = rowStart + static_cast<int32_t>(rowsPerBlock);
+    if (rowEnd > totalRows) {
+        rowEnd = totalRows;
     }
+    int32_t range = rowEnd - rowStart;
+    threadCount = range > 0 ? static_cast<uint32_t>(range) : 1U;
+    if (threadCount > kSpGemmThreads) {
+        threadCount = kSpGemmThreads;
+    }
+    threadCount = (threadCount + kSpGemmWarpSize - 1U) & ~(kSpGemmWarpSize - 1U);
 }
 
-/* ============================================================================
- * ---- Numeric phase SIMT compute (per-thread) ----
- * ============================================================================ */
-template<typename ValT, bool UseGmAccum>
-__simt_vf__ __aicore__ __launch_bounds__(kMaxSimtThreadsPerBlock) inline void SpgemmNumericSimtCompute(
-    __gm__ const int32_t *aRowPtr,
-    __gm__ const int32_t *aColInd,
-    __gm__ const ValT *aValues,
-    __gm__ const int32_t *bRowPtr,
-    __gm__ const int32_t *bColInd,
-    __gm__ const ValT *bValues,
-    __gm__ const int32_t *rowPtrC,
-    __gm__ int32_t *colIndC,
-    __gm__ ValT *valuesC,
-    __gm__ int32_t *reorder,
-    __gm__ int32_t *nnzPerRow,
-    __gm__ uint8_t *wsBase,
-    int64_t numAccumOffset,
-    int32_t n,
-    float alpha,
-    float beta,
-    int32_t rowStart,
-    int32_t rowEnd,
-    int32_t blockId)
+template <typename T>
+__aicore__ inline void SpGemmDispatchRealCompute(
+    GM_ADDR rowPtrA, GM_ADDR colIndA, GM_ADDR valA,
+    GM_ADDR rowPtrB, GM_ADDR colIndB, GM_ADDR valB,
+    GM_ADDR oldRowPtrC, GM_ADDR oldColIndC, GM_ADDR oldValC,
+    GM_ADDR productOffsets, GM_ADDR cursors, GM_ADDR candidateCols,
+    GM_ADDR candidateVals, GM_ADDR uniqueCounts, GM_ADDR error,
+    const SpGemmComputeTilingData &tiling,
+    int32_t rowStart, int32_t rowEnd, uint32_t threads)
 {
-    const int32_t numRows = rowEnd - rowStart;
-    if (numRows <= 0) return;
-
-    const uint32_t threadNum = blockDim.x;
-    const uint32_t tid = threadIdx.x;
-    const bool betaZero = (beta == 0.0f);
-
-    if constexpr (UseGmAccum) {
-        /* n > 64 时使用 GM 累加器：每个 block 一块 GM 内存存放 dense float 数组。
-         * 仅 tid==0 顺序处理各行。maskBuf 是小的 local 数组（最多 128 字节），
-         * 放在寄存器中；accum 是较大的 GM 数组。两者分离避免寄存器溢出。
-         *
-         * Per-block layout: [float accum[n]] (GM)
-         * Per-block stride = n * sizeof(float) */
-        if (tid != 0u) return;
-
-        int64_t blockStride = static_cast<int64_t>(n) * static_cast<int64_t>(sizeof(float));
-        __gm__ float *accum = reinterpret_cast<__gm__ float *>(
-            wsBase + numAccumOffset + static_cast<int64_t>(blockId) * blockStride);
-
-        /* Local bitmask — max 128 bytes for n=1024, fits in register file */
-        constexpr int32_t kMaxMaskBytes = 128;
-
-        for (int32_t r = 0; r < numRows; ++r) {
-            int32_t logicalRow = rowStart + r;
-            int32_t row = reorder[logicalRow];
-            int32_t aStart = aRowPtr[row];
-            int32_t aEnd   = aRowPtr[row + 1];
-            int32_t cStart = rowPtrC[row];
-
-            int32_t maskBytes = (n + 7) / 8;
-            if (maskBytes > kMaxMaskBytes) maskBytes = kMaxMaskBytes;
-
-            /* Zero accumulator (GM) + local maskBuf (register) */
-            uint8_t maskBuf[kMaxMaskBytes];
-            for (int32_t j = 0; j < n; ++j) accum[j] = 0.0f;
-            for (int32_t i = 0; i < maskBytes; ++i) maskBuf[i] = 0;
-
-            /* Accumulate products + set mask bits — same logic as n≤64 path */
-            for (int32_t p = aStart; p < aEnd; ++p) {
-                int32_t k = aColInd[p];
-                float aVal = ReadGmAsFloat<ValT>(aValues, p);
-                int32_t bStart = bRowPtr[k];
-                int32_t bEnd   = bRowPtr[k + 1];
-                for (int32_t q = bStart; q < bEnd; ++q) {
-                    int32_t j = bColInd[q];
-                    if (j >= 0 && j < n) {
-                        float bVal = ReadGmAsFloat<ValT>(bValues, q);
-                        accum[j] += aVal * bVal;
-                        maskBuf[j >> 3] |= static_cast<uint8_t>(1u << (j & 7));
-                    }
-                }
-            }
-
-            /* Output sorted by column — use local maskBuf (NOT accum!=0) */
-            int32_t outIdx = cStart;
-            for (int32_t j = 0; j < n; ++j) {
-                if (maskBuf[j >> 3] & static_cast<uint8_t>(1u << (j & 7))) {
-                    colIndC[outIdx] = j;
-                    SpgemmWriteResult<ValT>(valuesC, outIdx, alpha, accum[j], beta, betaZero);
-                    ++outIdx;
-                }
-            }
-        }
-    } else {
-        /* n ≤ 64: local dense accumulator (original path, correct and fast) */
-        for (int32_t r = static_cast<int32_t>(tid); r < numRows; r += static_cast<int32_t>(threadNum)) {
-            int32_t logicalRow = rowStart + r;
-            int32_t row = reorder[logicalRow];
-            int32_t aStart = aRowPtr[row];
-            int32_t aEnd   = aRowPtr[row + 1];
-            int32_t cStart = rowPtrC[row];
-
-            float accBuf[kMaxLocalAccumN];
-            uint8_t maskBuf[kMaxLocalAccumN / 8];
-            for (int32_t i = 0; i < n; ++i) accBuf[i] = 0.0f;
-            for (int32_t i = 0; i < (n + 7) / 8; ++i) maskBuf[i] = 0;
-
-            for (int32_t p = aStart; p < aEnd; ++p) {
-                int32_t k = aColInd[p];
-                float aVal = ReadGmAsFloat<ValT>(aValues, p);
-                int32_t bStart = bRowPtr[k];
-                int32_t bEnd   = bRowPtr[k + 1];
-                for (int32_t q = bStart; q < bEnd; ++q) {
-                    int32_t j = bColInd[q];
-                    if (j >= 0 && j < n) {
-                        float bVal = ReadGmAsFloat<ValT>(bValues, q);
-                        accBuf[j] += aVal * bVal;
-                        maskBuf[j >> 3] |= static_cast<uint8_t>(1u << (j & 7));
-                    }
-                }
-            }
-
-            int32_t outIdx = cStart;
-            for (int32_t j = 0; j < n; ++j) {
-                int32_t byteIdx = j >> 3;
-                uint8_t bitMask = static_cast<uint8_t>(1u << (j & 7));
-                if (maskBuf[byteIdx] & bitMask) {
-                    colIndC[outIdx] = j;
-                    SpgemmWriteResult<ValT>(valuesC, outIdx, alpha, accBuf[j], beta, betaZero);
-                    ++outIdx;
-                }
-            }
-        }
+    if (tiling.regularDegree > 0) {
+        asc_vf_call<SpGemmComputeRegularRealSimt<T>>(dim3{threads},
+            (__gm__ const int32_t *)rowPtrA, (__gm__ const T *)valA,
+            (__gm__ const int32_t *)rowPtrB, (__gm__ const T *)valB,
+            (__gm__ const int64_t *)productOffsets, (__gm__ int32_t *)candidateCols,
+            (__gm__ T *)candidateVals, (__gm__ int32_t *)uniqueCounts,
+            (__gm__ int32_t *)oldRowPtrC, (__gm__ int32_t *)oldColIndC, (__gm__ T *)oldValC,
+            tiling.n, tiling.regularDegree, tiling.alphaReal, tiling.alphaPtr,
+            tiling.directOutput, rowStart, rowEnd, static_cast<int32_t>(threads));
+        return;
     }
+    asc_vf_call<SpGemmComputeRealWarpSimt<T>>(dim3{threads},
+        (__gm__ const int32_t *)rowPtrA, (__gm__ const int32_t *)colIndA, (__gm__ const T *)valA,
+        (__gm__ const int32_t *)rowPtrB, (__gm__ const int32_t *)colIndB, (__gm__ const T *)valB,
+        (__gm__ const int32_t *)oldRowPtrC, (__gm__ const int32_t *)oldColIndC, (__gm__ const T *)oldValC,
+        (__gm__ const int64_t *)productOffsets, (__gm__ int32_t *)cursors,
+        (__gm__ int32_t *)candidateCols, (__gm__ T *)candidateVals, (__gm__ int32_t *)uniqueCounts,
+        (__gm__ int32_t *)error, tiling.m, tiling.alphaReal, tiling.betaReal,
+        tiling.alphaPtr, tiling.betaPtr, rowStart, rowEnd, static_cast<int32_t>(threads));
 }
 
-/* ============================================================================
- * ---- Numeric phase SIMT compute: tile-based path for n > 128 ----
- *
- * Same tiling strategy as SpgemmSymbolicSimtComputeTiled.
- * Each tile uses local accBuf[kTileN] (512B) + maskBuf[kTileN/8] (16B) = 528B,
- * which fits in the SIMT register file without spill.
- *
- * For each tile, traverse A.row × B.row and accumulate only columns within
- * the tile range [tileStart, tileEnd). Output sorted by column within each
- * tile, advancing outIdx sequentially across tiles.
- *
- * This ensures the numeric phase's column set exactly matches the symbolic
- * phase's column set (same tile boundaries, same traversal order), because
- * both phases use the same local-sized maskBuf with no GM spill interference.
- * ============================================================================ */
-template<typename ValT>
-__simt_vf__ __aicore__ __launch_bounds__(kMaxSimtThreadsPerBlock) inline void SpgemmNumericSimtComputeTiled(
-    __gm__ const int32_t *aRowPtr,
-    __gm__ const int32_t *aColInd,
-    __gm__ const ValT *aValues,
-    __gm__ const int32_t *bRowPtr,
-    __gm__ const int32_t *bColInd,
-    __gm__ const ValT *bValues,
-    __gm__ const int32_t *rowPtrC,
-    __gm__ int32_t *colIndC,
-    __gm__ ValT *valuesC,
-    __gm__ int32_t *reorder,
-    int32_t n,
-    float alpha,
-    float beta,
-    int32_t rowStart,
-    int32_t rowEnd)
+__aicore__ inline void SpGemmDispatchComplexCompute(
+    GM_ADDR rowPtrA, GM_ADDR colIndA, GM_ADDR valA,
+    GM_ADDR rowPtrB, GM_ADDR colIndB, GM_ADDR valB,
+    GM_ADDR oldRowPtrC, GM_ADDR oldColIndC, GM_ADDR oldValC,
+    GM_ADDR productOffsets, GM_ADDR cursors, GM_ADDR candidateCols,
+    GM_ADDR candidateVals, GM_ADDR uniqueCounts, GM_ADDR error,
+    const SpGemmComputeTilingData &tiling,
+    int32_t rowStart, int32_t rowEnd, uint32_t threads)
 {
-    const int32_t numRows = rowEnd - rowStart;
-    if (numRows <= 0) return;
-
-    const uint32_t tid = threadIdx.x;
-    const bool betaZero = (beta == 0.0f);
-
-    /* Single-thread for tile path */
-    if (tid != 0u) return;
-
-    const int32_t numTiles = (n + kTileN - 1) / kTileN;
-
-    for (int32_t r = 0; r < numRows; ++r) {
-        int32_t logicalRow = rowStart + r;
-        int32_t row = reorder[logicalRow];
-        int32_t aStart = aRowPtr[row];
-        int32_t aEnd   = aRowPtr[row + 1];
-        int32_t cStart = rowPtrC[row];
-
-        int32_t outIdx = cStart;
-
-        /* Flush GM cache before reading B data for this row.
-         * Ensures symbolic and numeric phases see consistent B.colInd. */
-        asc_threadfence();
-
-        for (int32_t tileIdx = 0; tileIdx < numTiles; ++tileIdx) {
-            int32_t tileStart = tileIdx * kTileN;
-            int32_t tileEnd = tileStart + kTileN;
-            if (tileEnd > n) tileEnd = n;
-            int32_t tileLen = tileEnd - tileStart;
-            int32_t maskBytes = (tileLen + 7) / 8;
-
-            /* Local dense accumulator + bitmask — 528B total, no spill */
-            float accBuf[kTileN];
-            uint8_t maskBuf[kTileN / 8];
-            for (int32_t i = 0; i < tileLen; ++i) accBuf[i] = 0.0f;
-            for (int32_t i = 0; i < maskBytes; ++i) maskBuf[i] = 0;
-
-            /* Accumulate products for columns in [tileStart, tileEnd) */
-            for (int32_t p = aStart; p < aEnd; ++p) {
-                int32_t k = aColInd[p];
-                float aVal = ReadGmAsFloat<ValT>(aValues, p);
-                int32_t bStart = bRowPtr[k];
-                int32_t bEnd   = bRowPtr[k + 1];
-                for (int32_t q = bStart; q < bEnd; ++q) {
-                    int32_t j = bColInd[q];
-                    if (j >= tileStart && j < tileEnd) {
-                        int32_t localJ = j - tileStart;
-                        float bVal = ReadGmAsFloat<ValT>(bValues, q);
-                        accBuf[localJ] += aVal * bVal;
-                        maskBuf[localJ >> 3] |= static_cast<uint8_t>(1u << (localJ & 7));
-                    }
-                }
-            }
-
-            /* Output sorted by column within this tile.
-             * "宁多不漏": output all maskBuf-marked columns, including
-             * those where accum cancelled to 0. */
-            for (int32_t localJ = 0; localJ < tileLen; ++localJ) {
-                if (maskBuf[localJ >> 3] & static_cast<uint8_t>(1u << (localJ & 7))) {
-                    int32_t j = tileStart + localJ;
-                    colIndC[outIdx] = j;
-                    SpgemmWriteResult<ValT>(valuesC, outIdx, alpha, accBuf[localJ], beta, betaZero);
-                    ++outIdx;
-                }
-            }
-        }
+    if (tiling.regularDegree > 0) {
+        asc_vf_call<SpGemmComputeRegularComplexSimt>(dim3{threads},
+            (__gm__ const int32_t *)rowPtrA, (__gm__ const SpGemmComplex64 *)valA,
+            (__gm__ const int32_t *)rowPtrB, (__gm__ const SpGemmComplex64 *)valB,
+            (__gm__ const int64_t *)productOffsets, (__gm__ int32_t *)candidateCols,
+            (__gm__ SpGemmComplex64 *)candidateVals, (__gm__ int32_t *)uniqueCounts,
+            (__gm__ int32_t *)oldRowPtrC, (__gm__ int32_t *)oldColIndC,
+            (__gm__ SpGemmComplex64 *)oldValC,
+            tiling.n, tiling.regularDegree, tiling.alphaReal, tiling.alphaImag,
+            tiling.alphaPtr, tiling.directOutput,
+            rowStart, rowEnd, static_cast<int32_t>(threads));
+        return;
     }
+    asc_vf_call<SpGemmComputeComplexWarpSimt>(dim3{threads},
+        (__gm__ const int32_t *)rowPtrA, (__gm__ const int32_t *)colIndA,
+        (__gm__ const SpGemmComplex64 *)valA, (__gm__ const int32_t *)rowPtrB,
+        (__gm__ const int32_t *)colIndB, (__gm__ const SpGemmComplex64 *)valB,
+        (__gm__ const int32_t *)oldRowPtrC, (__gm__ const int32_t *)oldColIndC,
+        (__gm__ const SpGemmComplex64 *)oldValC, (__gm__ const int64_t *)productOffsets,
+        (__gm__ int32_t *)cursors, (__gm__ int32_t *)candidateCols,
+        (__gm__ SpGemmComplex64 *)candidateVals, (__gm__ int32_t *)uniqueCounts,
+        (__gm__ int32_t *)error, tiling.m, tiling.alphaReal, tiling.alphaImag,
+        tiling.betaReal, tiling.betaImag, tiling.alphaPtr, tiling.betaPtr,
+        rowStart, rowEnd, static_cast<int32_t>(threads));
 }
 
-template<bool UseGmBitmap>
-class KernelSpgemmSymbolic {
-public:
-    __aicore__ inline KernelSpgemmSymbolic() {}
-
-    __aicore__ inline void Init(
-        GM_ADDR aRowPtrGM, GM_ADDR aColIndGM,
-        GM_ADDR bRowPtrGM, GM_ADDR bColIndGM,
-        GM_ADDR nnzPerRowGM, GM_ADDR workspaceGM,
-        const SpgemmSymbolicTilingData &tiling)
-    {
-        tiling_ = tiling;
-        aRowPtr_  = reinterpret_cast<__gm__ const int32_t *>(aRowPtrGM);
-        aColInd_  = reinterpret_cast<__gm__ const int32_t *>(aColIndGM);
-        bRowPtr_  = reinterpret_cast<__gm__ const int32_t *>(bRowPtrGM);
-        bColInd_  = reinterpret_cast<__gm__ const int32_t *>(bColIndGM);
-        nnzPerRow_ = reinterpret_cast<__gm__ int32_t *>(nnzPerRowGM);
-        wsBase_   = reinterpret_cast<__gm__ uint8_t *>(workspaceGM);
-        reorder_  = reinterpret_cast<__gm__ int32_t *>(wsBase_ + tiling_.reorderOffset);
-        binEdge_  = reinterpret_cast<__gm__ int32_t *>(wsBase_ + tiling_.binEdgeOffset);
-    }
-
-    __aicore__ inline void Process()
-    {
-        int32_t rowBinNum = tiling_.blockDim;
-        int32_t rowStart = 0, rowEnd = 0;
-        SpgemmGetRowBounds(rowBinNum, binEdge_, rowStart, rowEnd);
-
-        /* 不能对空 bin 提前 return（950PR 上有死锁风险），每个核都必须到达 asc_vf_call。 */
-        const int32_t numRows = rowEnd - rowStart;
-        uint32_t simtThreads = SpgemmComputeSimtThreads(
-            numRows, rowBinNum, tiling_.n, /*forceSingleThread=*/UseGmBitmap);
-        int32_t outerId = static_cast<int32_t>(GetBlockIdx());
-
-        asc_vf_call<SpgemmSymbolicSimtCompute<UseGmBitmap>>(
-            dim3{simtThreads},
-            aRowPtr_, aColInd_, bRowPtr_, bColInd_, nnzPerRow_,
-            reorder_, wsBase_, tiling_.symBitmapOffset,
-            tiling_.n, rowStart, rowEnd, outerId);
-    }
-
-private:
-    __gm__ const int32_t *aRowPtr_{nullptr};
-    __gm__ const int32_t *aColInd_{nullptr};
-    __gm__ const int32_t *bRowPtr_{nullptr};
-    __gm__ const int32_t *bColInd_{nullptr};
-    __gm__ int32_t *nnzPerRow_{nullptr};
-    __gm__ uint8_t *wsBase_{nullptr};
-    __gm__ int32_t *reorder_{nullptr};
-    __gm__ int32_t *binEdge_{nullptr};
-    SpgemmSymbolicTilingData tiling_{};
-};
-
-/* Tile-based symbolic kernel for n > 128.
- * Calls SpgemmSymbolicSimtComputeTiled which splits n into tiles of kTileN. */
-class KernelSpgemmSymbolicTiled {
-public:
-    __aicore__ inline KernelSpgemmSymbolicTiled() {}
-
-    __aicore__ inline void Init(
-        GM_ADDR aRowPtrGM, GM_ADDR aColIndGM,
-        GM_ADDR bRowPtrGM, GM_ADDR bColIndGM,
-        GM_ADDR nnzPerRowGM, GM_ADDR workspaceGM,
-        const SpgemmSymbolicTilingData &tiling)
-    {
-        tiling_ = tiling;
-        aRowPtr_  = reinterpret_cast<__gm__ const int32_t *>(aRowPtrGM);
-        aColInd_  = reinterpret_cast<__gm__ const int32_t *>(aColIndGM);
-        bRowPtr_  = reinterpret_cast<__gm__ const int32_t *>(bRowPtrGM);
-        bColInd_  = reinterpret_cast<__gm__ const int32_t *>(bColIndGM);
-        nnzPerRow_ = reinterpret_cast<__gm__ int32_t *>(nnzPerRowGM);
-        wsBase_   = reinterpret_cast<__gm__ uint8_t *>(workspaceGM);
-        reorder_  = reinterpret_cast<__gm__ int32_t *>(wsBase_ + tiling_.reorderOffset);
-        binEdge_  = reinterpret_cast<__gm__ int32_t *>(wsBase_ + tiling_.binEdgeOffset);
-    }
-
-    __aicore__ inline void Process()
-    {
-        int32_t rowBinNum = tiling_.blockDim;
-        int32_t rowStart = 0, rowEnd = 0;
-        SpgemmGetRowBounds(rowBinNum, binEdge_, rowStart, rowEnd);
-
-        /* 每个核都必须到达 asc_vf_call，否则死锁。 */
-        asc_vf_call<SpgemmSymbolicSimtComputeTiled>(
-            dim3{1u},
-            aRowPtr_, aColInd_, bRowPtr_, bColInd_, nnzPerRow_,
-            reorder_, tiling_.n, rowStart, rowEnd);
-    }
-
-private:
-    __gm__ const int32_t *aRowPtr_{nullptr};
-    __gm__ const int32_t *aColInd_{nullptr};
-    __gm__ const int32_t *bRowPtr_{nullptr};
-    __gm__ const int32_t *bColInd_{nullptr};
-    __gm__ int32_t *nnzPerRow_{nullptr};
-    __gm__ uint8_t *wsBase_{nullptr};
-    __gm__ int32_t *reorder_{nullptr};
-    __gm__ int32_t *binEdge_{nullptr};
-    SpgemmSymbolicTilingData tiling_{};
-};
-
-template<typename ValT, bool UseGmAccum>
-class KernelSpgemmNumeric {
-public:
-    __aicore__ inline KernelSpgemmNumeric() {}
-
-    __aicore__ inline void Init(
-        GM_ADDR aRowPtrGM, GM_ADDR aColIndGM, GM_ADDR aValuesGM,
-        GM_ADDR bRowPtrGM, GM_ADDR bColIndGM, GM_ADDR bValuesGM,
-        GM_ADDR rowPtrCGM, GM_ADDR colIndCGM, GM_ADDR valuesCGM,
-        GM_ADDR nnzPerRowGM, GM_ADDR workspaceGM,
-        const SpgemmNumericTilingData &tiling)
-    {
-        tiling_ = tiling;
-        aRowPtr_  = reinterpret_cast<__gm__ const int32_t *>(aRowPtrGM);
-        aColInd_  = reinterpret_cast<__gm__ const int32_t *>(aColIndGM);
-        aValues_  = reinterpret_cast<__gm__ const ValT *>(aValuesGM);
-        bRowPtr_  = reinterpret_cast<__gm__ const int32_t *>(bRowPtrGM);
-        bColInd_  = reinterpret_cast<__gm__ const int32_t *>(bColIndGM);
-        bValues_  = reinterpret_cast<__gm__ const ValT *>(bValuesGM);
-        rowPtrC_  = reinterpret_cast<__gm__ const int32_t *>(rowPtrCGM);
-        colIndC_  = reinterpret_cast<__gm__ int32_t *>(colIndCGM);
-        valuesC_  = reinterpret_cast<__gm__ ValT *>(valuesCGM);
-        nnzPerRow_ = reinterpret_cast<__gm__ int32_t *>(nnzPerRowGM);
-        wsBase_   = reinterpret_cast<__gm__ uint8_t *>(workspaceGM);
-        reorder_  = reinterpret_cast<__gm__ int32_t *>(wsBase_ + tiling_.reorderOffset);
-        binEdge_  = reinterpret_cast<__gm__ int32_t *>(wsBase_ + tiling_.binEdgeOffset);
-
-        SpgemmReadAlphaBeta(tiling_, alpha_, beta_);
-    }
-
-    __aicore__ inline void Process()
-    {
-        int32_t rowBinNum = tiling_.blockDim;
-        int32_t rowStart = 0, rowEnd = 0;
-        SpgemmGetRowBounds(rowBinNum, binEdge_, rowStart, rowEnd);
-
-        /* 每个核都必须到达 asc_vf_call，否则死锁。 */
-        const int32_t numRows = rowEnd - rowStart;
-        uint32_t simtThreads = SpgemmComputeSimtThreads(
-            numRows, rowBinNum, tiling_.n, /*forceSingleThread=*/UseGmAccum);
-        int32_t outerId = static_cast<int32_t>(GetBlockIdx());
-
-        asc_vf_call<SpgemmNumericSimtCompute<ValT, UseGmAccum>>(
-            dim3{simtThreads},
-            aRowPtr_, aColInd_, aValues_,
-            bRowPtr_, bColInd_, bValues_,
-            rowPtrC_, colIndC_, valuesC_,
-            reorder_, nnzPerRow_,
-            wsBase_, tiling_.numAccumOffset,
-            tiling_.n, alpha_, beta_, rowStart, rowEnd, outerId);
-    }
-
-private:
-    __gm__ const int32_t *aRowPtr_{nullptr};
-    __gm__ const int32_t *aColInd_{nullptr};
-    __gm__ const ValT *aValues_{nullptr};
-    __gm__ const int32_t *bRowPtr_{nullptr};
-    __gm__ const int32_t *bColInd_{nullptr};
-    __gm__ const ValT *bValues_{nullptr};
-    __gm__ const int32_t *rowPtrC_{nullptr};
-    __gm__ int32_t *colIndC_{nullptr};
-    __gm__ ValT *valuesC_{nullptr};
-    __gm__ int32_t *nnzPerRow_{nullptr};
-    __gm__ uint8_t *wsBase_{nullptr};
-    __gm__ int32_t *reorder_{nullptr};
-    __gm__ int32_t *binEdge_{nullptr};
-    SpgemmNumericTilingData tiling_{};
-    float alpha_{0.0f};
-    float beta_{0.0f};
-};
-
-/* Tile-based numeric kernel for n > 128.
- * Calls SpgemmNumericSimtComputeTiled which splits n into tiles of kTileN.
- * Each tile uses accBuf[128] (512B) + maskBuf[16] (16B) = 528B, no spill. */
-template<typename ValT>
-class KernelSpgemmNumericTiled {
-public:
-    __aicore__ inline KernelSpgemmNumericTiled() {}
-
-    __aicore__ inline void Init(
-        GM_ADDR aRowPtrGM, GM_ADDR aColIndGM, GM_ADDR aValuesGM,
-        GM_ADDR bRowPtrGM, GM_ADDR bColIndGM, GM_ADDR bValuesGM,
-        GM_ADDR rowPtrCGM, GM_ADDR colIndCGM, GM_ADDR valuesCGM,
-        GM_ADDR nnzPerRowGM, GM_ADDR workspaceGM,
-        const SpgemmNumericTilingData &tiling)
-    {
-        tiling_ = tiling;
-        aRowPtr_  = reinterpret_cast<__gm__ const int32_t *>(aRowPtrGM);
-        aColInd_  = reinterpret_cast<__gm__ const int32_t *>(aColIndGM);
-        aValues_  = reinterpret_cast<__gm__ const ValT *>(aValuesGM);
-        bRowPtr_  = reinterpret_cast<__gm__ const int32_t *>(bRowPtrGM);
-        bColInd_  = reinterpret_cast<__gm__ const int32_t *>(bColIndGM);
-        bValues_  = reinterpret_cast<__gm__ const ValT *>(bValuesGM);
-        rowPtrC_  = reinterpret_cast<__gm__ const int32_t *>(rowPtrCGM);
-        colIndC_  = reinterpret_cast<__gm__ int32_t *>(colIndCGM);
-        valuesC_  = reinterpret_cast<__gm__ ValT *>(valuesCGM);
-        wsBase_   = reinterpret_cast<__gm__ uint8_t *>(workspaceGM);
-        reorder_  = reinterpret_cast<__gm__ int32_t *>(wsBase_ + tiling_.reorderOffset);
-        binEdge_  = reinterpret_cast<__gm__ int32_t *>(wsBase_ + tiling_.binEdgeOffset);
-
-        SpgemmReadAlphaBeta(tiling_, alpha_, beta_);
-    }
-
-    __aicore__ inline void Process()
-    {
-        int32_t rowBinNum = tiling_.blockDim;
-        int32_t rowStart = 0, rowEnd = 0;
-        SpgemmGetRowBounds(rowBinNum, binEdge_, rowStart, rowEnd);
-
-        /* 每个核都必须到达 asc_vf_call，否则死锁。 */
-        asc_vf_call<SpgemmNumericSimtComputeTiled<ValT>>(
-            dim3{1u},
-            aRowPtr_, aColInd_, aValues_,
-            bRowPtr_, bColInd_, bValues_,
-            rowPtrC_, colIndC_, valuesC_,
-            reorder_, tiling_.n, alpha_, beta_, rowStart, rowEnd);
-    }
-
-private:
-    __gm__ const int32_t *aRowPtr_{nullptr};
-    __gm__ const int32_t *aColInd_{nullptr};
-    __gm__ const ValT *aValues_{nullptr};
-    __gm__ const int32_t *bRowPtr_{nullptr};
-    __gm__ const int32_t *bColInd_{nullptr};
-    __gm__ const ValT *bValues_{nullptr};
-    __gm__ const int32_t *rowPtrC_{nullptr};
-    __gm__ int32_t *colIndC_{nullptr};
-    __gm__ ValT *valuesC_{nullptr};
-    __gm__ uint8_t *wsBase_{nullptr};
-    __gm__ int32_t *reorder_{nullptr};
-    __gm__ int32_t *binEdge_{nullptr};
-    SpgemmNumericTilingData tiling_{};
-    float alpha_{0.0f};
-    float beta_{0.0f};
-};
-
-} // namespace
-
-/* ---- GM tiling loaders ---- */
-__aicore__ inline SpgemmSymbolicTilingData LoadSymbolicTiling(GM_ADDR tilingGM)
+template <typename T>
+__aicore__ inline void SpGemmDispatchRealCopy(
+    GM_ADDR productOffsets, GM_ADDR uniqueCounts,
+    GM_ADDR candidateCols, GM_ADDR candidateVals,
+    GM_ADDR rowPtrC, GM_ADDR colIndC, GM_ADDR valC,
+    const SpGemmCopyTilingData &tiling,
+    int32_t rowStart, int32_t rowEnd, uint32_t threads)
 {
-    __gm__ const SpgemmSymbolicTilingData *p =
-        reinterpret_cast<__gm__ const SpgemmSymbolicTilingData *>(tilingGM);
-    SpgemmSymbolicTilingData t;
-    t.m = p->m; t.n = p->n; t.blockDim = p->blockDim;
-    t.baseA = p->baseA; t.baseB = p->baseB; t.baseC = p->baseC;
-    t.reorderOffset = p->reorderOffset; t.binEdgeOffset = p->binEdgeOffset;
-    t.symBitmapOffset = p->symBitmapOffset;
-    return t;
+    if (tiling.nnzC == tiling.numProducts) {
+        asc_vf_call<SpGemmCopyFlatSimt<T>>(dim3{kSpGemmThreads},
+            (__gm__ const int32_t *)candidateCols, (__gm__ const T *)candidateVals,
+            (__gm__ int32_t *)colIndC, (__gm__ T *)valC, tiling.nnzC,
+            static_cast<int32_t>(AscendC::GetBlockIdx()), static_cast<int32_t>(tiling.numBlocks),
+            static_cast<int32_t>(kSpGemmThreads));
+        return;
+    }
+    asc_vf_call<SpGemmCopySimt<T>>(dim3{threads},
+        (__gm__ const int64_t *)productOffsets, (__gm__ const int32_t *)uniqueCounts,
+        (__gm__ const int32_t *)candidateCols, (__gm__ const T *)candidateVals,
+        (__gm__ const int32_t *)rowPtrC, (__gm__ int32_t *)colIndC, (__gm__ T *)valC,
+        tiling.m, rowStart, rowEnd, static_cast<int32_t>(threads));
 }
 
-__aicore__ inline SpgemmPrefixSumTilingData LoadPrefixSumTiling(GM_ADDR tilingGM)
+__aicore__ inline void SpGemmDispatchComplexCopy(
+    GM_ADDR productOffsets, GM_ADDR uniqueCounts,
+    GM_ADDR candidateCols, GM_ADDR candidateVals,
+    GM_ADDR rowPtrC, GM_ADDR colIndC, GM_ADDR valC,
+    const SpGemmCopyTilingData &tiling,
+    int32_t rowStart, int32_t rowEnd, uint32_t threads)
 {
-    __gm__ const SpgemmPrefixSumTilingData *p =
-        reinterpret_cast<__gm__ const SpgemmPrefixSumTilingData *>(tilingGM);
-    SpgemmPrefixSumTilingData t;
-    t.m = p->m; t.baseC = p->baseC;
-    return t;
+    if (tiling.nnzC == tiling.numProducts) {
+        asc_vf_call<SpGemmCopyComplexFlatSimt>(dim3{kSpGemmThreads},
+            (__gm__ const int32_t *)candidateCols,
+            (__gm__ const SpGemmComplex64 *)candidateVals,
+            (__gm__ int32_t *)colIndC, (__gm__ SpGemmComplex64 *)valC,
+            tiling.nnzC, static_cast<int32_t>(AscendC::GetBlockIdx()),
+            static_cast<int32_t>(tiling.numBlocks), static_cast<int32_t>(kSpGemmThreads));
+        return;
+    }
+    asc_vf_call<SpGemmCopyComplexSimt>(dim3{threads},
+        (__gm__ const int64_t *)productOffsets, (__gm__ const int32_t *)uniqueCounts,
+        (__gm__ const int32_t *)candidateCols, (__gm__ const SpGemmComplex64 *)candidateVals,
+        (__gm__ const int32_t *)rowPtrC, (__gm__ int32_t *)colIndC,
+        (__gm__ SpGemmComplex64 *)valC, tiling.m, rowStart, rowEnd,
+        static_cast<int32_t>(threads));
 }
 
-__aicore__ inline SpgemmNumericTilingData LoadNumericTiling(GM_ADDR tilingGM)
-{
-    __gm__ const SpgemmNumericTilingData *p =
-        reinterpret_cast<__gm__ const SpgemmNumericTilingData *>(tilingGM);
-    SpgemmNumericTilingData t;
-    t.m = p->m; t.n = p->n; t.blockDim = p->blockDim;
-    t.baseA = p->baseA; t.baseB = p->baseB; t.baseC = p->baseC;
-    t.reorderOffset = p->reorderOffset; t.binEdgeOffset = p->binEdgeOffset;
-    t.rowPtrCOffset = p->rowPtrCOffset; t.nnzPerRowOffset = p->nnzPerRowOffset;
-    t.accumOffset = p->accumOffset; t.numAccumOffset = p->numAccumOffset;
-    t.symBitmapOffset = p->symBitmapOffset;
-    t.alphaHost = p->alphaHost; t.betaHost = p->betaHost;
-    t.alphaPtr = p->alphaPtr; t.betaPtr = p->betaPtr;
-    return t;
-}
+}  // namespace
 
-__aicore__ inline SpgemmFillTilingData LoadFillTiling(GM_ADDR tilingGM)
-{
-    __gm__ const SpgemmFillTilingData *p =
-        reinterpret_cast<__gm__ const SpgemmFillTilingData *>(tilingGM);
-    SpgemmFillTilingData t;
-    t.count = p->count; t.value = p->value;
-    return t;
-}
-
-/* ===== Kernel entry points ===== */
-
-extern "C" __global__ __aicore__ void spgemm_symbolic_kernel(
-    GM_ADDR aRowPtrGM, GM_ADDR aColIndGM,
-    GM_ADDR bRowPtrGM, GM_ADDR bColIndGM,
-    GM_ADDR nnzPerRowGM, GM_ADDR workspaceGM,
-    GM_ADDR tilingGM)
+extern "C" __global__ __aicore__ void spgemm_validate_kernel(
+    GM_ADDR rowPtrA, GM_ADDR colIndA, GM_ADDR rowPtrB, GM_ADDR colIndB,
+    GM_ADDR regularOffsets, GM_ADDR regularTotal, GM_ADDR regular,
+    GM_ADDR error, const SpGemmValidateTilingData tiling)
 {
     KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_AIV_ONLY);
-    SpgemmSymbolicTilingData tiling = LoadSymbolicTiling(tilingGM);
-    if (tiling.n <= kTileN) {
-        /* n ≤ 128: local bitmask path, multi-threaded when n ≤ 64 */
-        KernelSpgemmSymbolic<false> op;
-        op.Init(aRowPtrGM, aColIndGM, bRowPtrGM, bColIndGM, nnzPerRowGM, workspaceGM, tiling);
-        op.Process();
+    int32_t rows = tiling.m > tiling.k ? tiling.m : tiling.k;
+    int32_t rowStart = 0;
+    int32_t rowEnd = 0;
+    uint32_t threads = 0;
+    SpGemmRowRange(rows, tiling.rowsPerBlock, rowStart, rowEnd, threads);
+    asc_vf_call<SpGemmValidateSimt>(dim3{threads},
+        (__gm__ const int32_t *)rowPtrA, (__gm__ const int32_t *)colIndA,
+        (__gm__ const int32_t *)rowPtrB, (__gm__ const int32_t *)colIndB,
+        (__gm__ int64_t *)regularOffsets, (__gm__ int64_t *)regularTotal,
+        (__gm__ int32_t *)regular, (__gm__ int32_t *)error,
+        tiling.m, tiling.k, tiling.n,
+        tiling.nnzA, tiling.nnzB, rowStart, rowEnd,
+        static_cast<int32_t>(threads), tiling.regularDegree);
+}
+
+extern "C" __global__ __aicore__ void spgemm_work_kernel(
+    GM_ADDR rowPtrA, GM_ADDR colIndA, GM_ADDR rowPtrB,
+    GM_ADDR productCounts, GM_ADDR regular, GM_ADDR error,
+    const SpGemmWorkTilingData tiling)
+{
+    KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_AIV_ONLY);
+    if (*(__gm__ int32_t *)regular != 0) { return; }
+    int32_t rowStart = 0;
+    int32_t rowEnd = 0;
+    uint32_t threads = 0;
+    SpGemmRowRange(tiling.m, tiling.rowsPerBlock, rowStart, rowEnd, threads);
+    asc_vf_call<SpGemmWorkSimt>(dim3{threads},
+        (__gm__ const int32_t *)rowPtrA, (__gm__ const int32_t *)colIndA,
+        (__gm__ const int32_t *)rowPtrB, (__gm__ int64_t *)productCounts,
+        (__gm__ int32_t *)error, tiling.m, tiling.k, tiling.nnzA,
+        tiling.nnzB, rowStart, rowEnd, static_cast<int32_t>(threads));
+}
+
+template <typename CountT, typename OffsetT>
+__aicore__ inline void SpGemmScanLocalDispatch(
+    GM_ADDR counts, GM_ADDR offsets, GM_ADDR blockSums, GM_ADDR error,
+    const SpGemmScanTilingData &tiling)
+{
+    asc_vf_call<SpGemmScanLocalSimt<CountT, OffsetT>>(dim3{kSpGemmThreads},
+        (__gm__ const CountT *)counts, (__gm__ OffsetT *)offsets,
+        (__gm__ int64_t *)blockSums, (__gm__ int32_t *)error,
+        tiling.count, tiling.numChunks, tiling.chunkSize,
+        static_cast<int32_t>(AscendC::GetBlockIdx()),
+        static_cast<int32_t>(tiling.outerBlocks), static_cast<int32_t>(kSpGemmThreads));
+}
+
+extern "C" __global__ __aicore__ void spgemm_scan_i64_local_kernel(
+    GM_ADDR counts, GM_ADDR offsets, GM_ADDR blockSums, GM_ADDR regular, GM_ADDR error,
+    const SpGemmScanTilingData tiling)
+{
+    KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_AIV_ONLY);
+    if (*(__gm__ int32_t *)regular != 0) { return; }
+    SpGemmScanLocalDispatch<int64_t, int64_t>(counts, offsets, blockSums, error, tiling);
+}
+
+extern "C" __global__ __aicore__ void spgemm_scan_i32_local_kernel(
+    GM_ADDR counts, GM_ADDR offsets, GM_ADDR blockSums, GM_ADDR error,
+    const SpGemmScanTilingData tiling)
+{
+    KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_AIV_ONLY);
+    SpGemmScanLocalDispatch<int32_t, int32_t>(counts, offsets, blockSums, error, tiling);
+}
+
+template <typename OffsetT>
+__aicore__ inline void SpGemmScanBlocksDispatch(
+    GM_ADDR offsets, GM_ADDR blockSums, GM_ADDR blockOffsets,
+    GM_ADDR total, GM_ADDR error, const SpGemmScanTilingData &tiling)
+{
+    asc_vf_call<SpGemmScanBlocksSimt<OffsetT>>(dim3{kSpGemmWarpSize},
+        (__gm__ OffsetT *)offsets, (__gm__ const int64_t *)blockSums,
+        (__gm__ int64_t *)blockOffsets, (__gm__ int64_t *)total,
+        (__gm__ int32_t *)error, tiling.count, tiling.numChunks);
+}
+
+extern "C" __global__ __aicore__ void spgemm_scan_i64_blocks_kernel(
+    GM_ADDR offsets, GM_ADDR blockSums, GM_ADDR blockOffsets,
+    GM_ADDR total, GM_ADDR regular, GM_ADDR error, const SpGemmScanTilingData tiling)
+{
+    KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_AIV_ONLY);
+    if (*(__gm__ int32_t *)regular != 0) { return; }
+    SpGemmScanBlocksDispatch<int64_t>(offsets, blockSums, blockOffsets, total, error, tiling);
+}
+
+extern "C" __global__ __aicore__ void spgemm_scan_i32_blocks_kernel(
+    GM_ADDR offsets, GM_ADDR blockSums, GM_ADDR blockOffsets,
+    GM_ADDR total, GM_ADDR error, const SpGemmScanTilingData tiling)
+{
+    KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_AIV_ONLY);
+    SpGemmScanBlocksDispatch<int32_t>(offsets, blockSums, blockOffsets, total, error, tiling);
+}
+
+template <typename OffsetT>
+__aicore__ inline void SpGemmScanAddDispatch(
+    GM_ADDR offsets, GM_ADDR blockOffsets, GM_ADDR error,
+    const SpGemmScanTilingData &tiling)
+{
+    int32_t rowStart = 0;
+    int32_t rowEnd = 0;
+    uint32_t threads = 0;
+    uint32_t rowsPerBlock = static_cast<uint32_t>((tiling.count + static_cast<int32_t>(tiling.outerBlocks) - 1) /
+                                                   static_cast<int32_t>(tiling.outerBlocks));
+    SpGemmRowRange(tiling.count, rowsPerBlock, rowStart, rowEnd, threads);
+    asc_vf_call<SpGemmScanAddSimt<OffsetT>>(dim3{threads},
+        (__gm__ OffsetT *)offsets, (__gm__ const int64_t *)blockOffsets,
+        (__gm__ int32_t *)error, tiling.count, tiling.chunkSize,
+        rowStart, rowEnd, static_cast<int32_t>(threads));
+}
+
+extern "C" __global__ __aicore__ void spgemm_scan_i64_add_kernel(
+    GM_ADDR offsets, GM_ADDR blockOffsets, GM_ADDR regular, GM_ADDR error,
+    const SpGemmScanTilingData tiling)
+{
+    KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_AIV_ONLY);
+    if (*(__gm__ int32_t *)regular != 0) { return; }
+    SpGemmScanAddDispatch<int64_t>(offsets, blockOffsets, error, tiling);
+}
+
+extern "C" __global__ __aicore__ void spgemm_scan_i32_add_kernel(
+    GM_ADDR offsets, GM_ADDR blockOffsets, GM_ADDR error,
+    const SpGemmScanTilingData tiling)
+{
+    KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_AIV_ONLY);
+    SpGemmScanAddDispatch<int32_t>(offsets, blockOffsets, error, tiling);
+}
+
+extern "C" __global__ __aicore__ void spgemm_compute_kernel(
+    GM_ADDR rowPtrA, GM_ADDR colIndA, GM_ADDR valA,
+    GM_ADDR rowPtrB, GM_ADDR colIndB, GM_ADDR valB,
+    GM_ADDR oldRowPtrC, GM_ADDR oldColIndC, GM_ADDR oldValC,
+    GM_ADDR productOffsets, GM_ADDR cursors, GM_ADDR candidateCols,
+    GM_ADDR candidateVals, GM_ADDR uniqueCounts, GM_ADDR error,
+    const SpGemmComputeTilingData tiling)
+{
+    KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_AIV_ONLY);
+    int32_t rowStart = 0;
+    int32_t rowEnd = 0;
+    uint32_t threads = 0;
+    SpGemmRowRange(tiling.m, tiling.rowsPerBlock, rowStart, rowEnd, threads);
+    if (tiling.valType == SPGEMM_VAL_FP16) {
+        SpGemmDispatchRealCompute<half>(
+            rowPtrA, colIndA, valA, rowPtrB, colIndB, valB,
+            oldRowPtrC, oldColIndC, oldValC, productOffsets, cursors,
+            candidateCols, candidateVals, uniqueCounts, error,
+            tiling, rowStart, rowEnd, threads);
+    } else if (tiling.valType == SPGEMM_VAL_BF16) {
+        SpGemmDispatchRealCompute<bfloat16_t>(
+            rowPtrA, colIndA, valA, rowPtrB, colIndB, valB,
+            oldRowPtrC, oldColIndC, oldValC, productOffsets, cursors,
+            candidateCols, candidateVals, uniqueCounts, error,
+            tiling, rowStart, rowEnd, threads);
+    } else if (tiling.valType == SPGEMM_VAL_FP32) {
+        SpGemmDispatchRealCompute<float>(
+            rowPtrA, colIndA, valA, rowPtrB, colIndB, valB,
+            oldRowPtrC, oldColIndC, oldValC, productOffsets, cursors,
+            candidateCols, candidateVals, uniqueCounts, error,
+            tiling, rowStart, rowEnd, threads);
     } else {
-        /* n > 128: tile-based path, split n into ≤128 tiles.
-         * Each tile uses maskBuf[16] (16B), no register spill.
-         * Replaces previous GM-backed path that had cache coherence issues. */
-        KernelSpgemmSymbolicTiled op;
-        op.Init(aRowPtrGM, aColIndGM, bRowPtrGM, bColIndGM, nnzPerRowGM, workspaceGM, tiling);
-        op.Process();
+        SpGemmDispatchComplexCompute(
+            rowPtrA, colIndA, valA, rowPtrB, colIndB, valB,
+            oldRowPtrC, oldColIndC, oldValC, productOffsets, cursors,
+            candidateCols, candidateVals, uniqueCounts, error,
+            tiling, rowStart, rowEnd, threads);
     }
 }
 
-extern "C" __global__ __aicore__ void spgemm_prefixsum_kernel(
-    GM_ADDR nnzPerRowGM, GM_ADDR rowPtrCGM, GM_ADDR nnzCGM,
-    GM_ADDR tilingGM)
+extern "C" __global__ __aicore__ void spgemm_copy_kernel(
+    GM_ADDR productOffsets, GM_ADDR uniqueCounts,
+    GM_ADDR candidateCols, GM_ADDR candidateVals,
+    GM_ADDR rowPtrC, GM_ADDR colIndC, GM_ADDR valC,
+    const SpGemmCopyTilingData tiling)
 {
     KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_AIV_ONLY);
-    if (GetBlockIdx() != 0) return;
-
-    SpgemmPrefixSumTilingData tiling = LoadPrefixSumTiling(tilingGM);
-    __gm__ const int32_t *nnzPerRow = reinterpret_cast<__gm__ const int32_t *>(nnzPerRowGM);
-    __gm__ int32_t *rowPtrC = reinterpret_cast<__gm__ int32_t *>(rowPtrCGM);
-    __gm__ int32_t *nnzCOut = reinterpret_cast<__gm__ int32_t *>(nnzCGM);
-
-    int32_t prefix = tiling.baseC;
-    rowPtrC[0] = prefix;
-    for (int32_t i = 0; i < tiling.m; ++i) {
-        prefix += nnzPerRow[i];
-        rowPtrC[i + 1] = prefix;
-    }
-    nnzCOut[0] = prefix - tiling.baseC;
-}
-
-extern "C" __global__ __aicore__ void spgemm_numeric_kernel_fp32(
-    GM_ADDR aRowPtr, GM_ADDR aColInd, GM_ADDR aValues,
-    GM_ADDR bRowPtr, GM_ADDR bColInd, GM_ADDR bValues,
-    GM_ADDR rowPtrC, GM_ADDR colIndC, GM_ADDR valuesC,
-    GM_ADDR nnzPerRow, GM_ADDR workspaceGM,
-    GM_ADDR tilingGM)
-{
-    KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_AIV_ONLY);
-    SpgemmNumericTilingData tiling = LoadNumericTiling(tilingGM);
-    if (tiling.n <= kTileN) {
-        /* n ≤ 128: local dense accumulator path */
-        KernelSpgemmNumeric<float, false> op;
-        op.Init(aRowPtr, aColInd, aValues, bRowPtr, bColInd, bValues,
-                rowPtrC, colIndC, valuesC, nnzPerRow, workspaceGM, tiling);
-        op.Process();
+    int32_t rowStart = 0;
+    int32_t rowEnd = 0;
+    uint32_t threads = 0;
+    SpGemmRowRange(tiling.m, tiling.rowsPerBlock, rowStart, rowEnd, threads);
+    if (tiling.valType == SPGEMM_VAL_FP16) {
+        SpGemmDispatchRealCopy<half>(
+            productOffsets, uniqueCounts, candidateCols, candidateVals,
+            rowPtrC, colIndC, valC, tiling, rowStart, rowEnd, threads);
+    } else if (tiling.valType == SPGEMM_VAL_BF16) {
+        SpGemmDispatchRealCopy<bfloat16_t>(
+            productOffsets, uniqueCounts, candidateCols, candidateVals,
+            rowPtrC, colIndC, valC, tiling, rowStart, rowEnd, threads);
+    } else if (tiling.valType == SPGEMM_VAL_FP32) {
+        SpGemmDispatchRealCopy<float>(
+            productOffsets, uniqueCounts, candidateCols, candidateVals,
+            rowPtrC, colIndC, valC, tiling, rowStart, rowEnd, threads);
     } else {
-        /* n > 128: tile-based path, each tile uses accBuf[128]+maskBuf[16]=528B */
-        KernelSpgemmNumericTiled<float> op;
-        op.Init(aRowPtr, aColInd, aValues, bRowPtr, bColInd, bValues,
-                rowPtrC, colIndC, valuesC, nnzPerRow, workspaceGM, tiling);
-        op.Process();
+        SpGemmDispatchComplexCopy(
+            productOffsets, uniqueCounts, candidateCols, candidateVals,
+            rowPtrC, colIndC, valC, tiling, rowStart, rowEnd, threads);
     }
 }
 
-extern "C" __global__ __aicore__ void spgemm_numeric_kernel_fp16(
-    GM_ADDR aRowPtr, GM_ADDR aColInd, GM_ADDR aValues,
-    GM_ADDR bRowPtr, GM_ADDR bColInd, GM_ADDR bValues,
-    GM_ADDR rowPtrC, GM_ADDR colIndC, GM_ADDR valuesC,
-    GM_ADDR nnzPerRow, GM_ADDR workspaceGM,
-    GM_ADDR tilingGM)
-{
-    KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_AIV_ONLY);
-    SpgemmNumericTilingData tiling = LoadNumericTiling(tilingGM);
-    if (tiling.n <= kTileN) {
-        KernelSpgemmNumeric<half, false> op;
-        op.Init(aRowPtr, aColInd, aValues, bRowPtr, bColInd, bValues,
-                rowPtrC, colIndC, valuesC, nnzPerRow, workspaceGM, tiling);
-        op.Process();
-    } else {
-        KernelSpgemmNumericTiled<half> op;
-        op.Init(aRowPtr, aColInd, aValues, bRowPtr, bColInd, bValues,
-                rowPtrC, colIndC, valuesC, nnzPerRow, workspaceGM, tiling);
-        op.Process();
-    }
-}
-
-extern "C" __global__ __aicore__ void spgemm_numeric_kernel_bf16(
-    GM_ADDR aRowPtr, GM_ADDR aColInd, GM_ADDR aValues,
-    GM_ADDR bRowPtr, GM_ADDR bColInd, GM_ADDR bValues,
-    GM_ADDR rowPtrC, GM_ADDR colIndC, GM_ADDR valuesC,
-    GM_ADDR nnzPerRow, GM_ADDR workspaceGM,
-    GM_ADDR tilingGM)
-{
-    KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_AIV_ONLY);
-    SpgemmNumericTilingData tiling = LoadNumericTiling(tilingGM);
-    if (tiling.n <= kTileN) {
-        KernelSpgemmNumeric<bfloat16_t, false> op;
-        op.Init(aRowPtr, aColInd, aValues, bRowPtr, bColInd, bValues,
-                rowPtrC, colIndC, valuesC, nnzPerRow, workspaceGM, tiling);
-        op.Process();
-    } else {
-        KernelSpgemmNumericTiled<bfloat16_t> op;
-        op.Init(aRowPtr, aColInd, aValues, bRowPtr, bColInd, bValues,
-                rowPtrC, colIndC, valuesC, nnzPerRow, workspaceGM, tiling);
-        op.Process();
-    }
-}
-
-extern "C" __global__ __aicore__ void spgemm_fill_kernel(
-    GM_ADDR dstGM, GM_ADDR tilingGM)
-{
-    KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_AIV_ONLY);
-    if (GetBlockIdx() != 0) return;
-    SpgemmFillTilingData tiling = LoadFillTiling(tilingGM);
-    __gm__ int32_t *dst = reinterpret_cast<__gm__ int32_t *>(dstGM);
-    for (int32_t i = 0; i < tiling.count; ++i) {
-        dst[i] = tiling.value;
-    }
-}
-
-/* ===== Host-side launch dispatchers ===== */
-
-void spgemm_symbolic_kernel_do(
-    GM_ADDR aRowPtr, GM_ADDR aColInd,
-    GM_ADDR bRowPtr, GM_ADDR bColInd,
-    GM_ADDR nnzPerRow, GM_ADDR workspaceGM,
-    GM_ADDR tilingGM,
+extern "C" void spgemm_validate_kernel_do(
+    GM_ADDR rowPtrA, GM_ADDR colIndA, GM_ADDR rowPtrB, GM_ADDR colIndB,
+    GM_ADDR regularOffsets, GM_ADDR regularTotal, GM_ADDR regular,
+    GM_ADDR error, const SpGemmValidateTilingData &tiling,
     uint32_t numBlocks, void *stream)
 {
-    spgemm_symbolic_kernel<<<numBlocks, nullptr, stream>>>(
-        aRowPtr, aColInd, bRowPtr, bColInd, nnzPerRow, workspaceGM, tilingGM);
+    spgemm_validate_kernel<<<numBlocks, nullptr, stream>>>(
+        rowPtrA, colIndA, rowPtrB, colIndB, regularOffsets,
+        regularTotal, regular, error, tiling);
 }
 
-void spgemm_prefixsum_kernel_do(
-    GM_ADDR nnzPerRow, GM_ADDR rowPtrC, GM_ADDR nnzCDev,
-    GM_ADDR tilingGM, void *stream)
+extern "C" void spgemm_work_kernel_do(
+    GM_ADDR rowPtrA, GM_ADDR colIndA, GM_ADDR rowPtrB,
+    GM_ADDR productCounts, GM_ADDR regular, GM_ADDR error,
+    const SpGemmWorkTilingData &tiling, uint32_t numBlocks, void *stream)
 {
-    spgemm_prefixsum_kernel<<<1, nullptr, stream>>>(
-        nnzPerRow, rowPtrC, nnzCDev, tilingGM);
+    spgemm_work_kernel<<<numBlocks, nullptr, stream>>>(
+        rowPtrA, colIndA, rowPtrB, productCounts, regular, error, tiling);
 }
 
-void spgemm_numeric_kernel_do(
-    GM_ADDR aRowPtr, GM_ADDR aColInd, GM_ADDR aValues,
-    GM_ADDR bRowPtr, GM_ADDR bColInd, GM_ADDR bValues,
-    GM_ADDR rowPtrC, GM_ADDR colIndC, GM_ADDR valuesC,
-    GM_ADDR nnzPerRow, GM_ADDR workspaceGM,
-    GM_ADDR tilingGM,
-    int32_t dataType, uint32_t numBlocks, void *stream)
+extern "C" void spgemm_scan_i64_kernel_do(
+    GM_ADDR counts, GM_ADDR offsets, GM_ADDR blockSums,
+    GM_ADDR blockOffsets, GM_ADDR total, GM_ADDR regular, GM_ADDR error,
+    const SpGemmScanTilingData &tiling, uint32_t numBlocks, void *stream)
 {
-    if (dataType == SPGEMM_DTYPE_FP32) {
-        spgemm_numeric_kernel_fp32<<<numBlocks, nullptr, stream>>>(
-            aRowPtr, aColInd, aValues, bRowPtr, bColInd, bValues,
-            rowPtrC, colIndC, valuesC, nnzPerRow, workspaceGM, tilingGM);
-    } else if (dataType == SPGEMM_DTYPE_FP16) {
-        spgemm_numeric_kernel_fp16<<<numBlocks, nullptr, stream>>>(
-            aRowPtr, aColInd, aValues, bRowPtr, bColInd, bValues,
-            rowPtrC, colIndC, valuesC, nnzPerRow, workspaceGM, tilingGM);
-    } else if (dataType == SPGEMM_DTYPE_BF16) {
-        spgemm_numeric_kernel_bf16<<<numBlocks, nullptr, stream>>>(
-            aRowPtr, aColInd, aValues, bRowPtr, bColInd, bValues,
-            rowPtrC, colIndC, valuesC, nnzPerRow, workspaceGM, tilingGM);
-    }
+    spgemm_scan_i64_local_kernel<<<numBlocks, nullptr, stream>>>(
+        counts, offsets, blockSums, regular, error, tiling);
+    spgemm_scan_i64_blocks_kernel<<<1, nullptr, stream>>>(
+        offsets, blockSums, blockOffsets, total, regular, error, tiling);
+    spgemm_scan_i64_add_kernel<<<numBlocks, nullptr, stream>>>(
+        offsets, blockOffsets, regular, error, tiling);
 }
 
-void spgemm_fill_kernel_do(
-    GM_ADDR dst, GM_ADDR tilingGM, void *stream)
+extern "C" void spgemm_compute_kernel_do(
+    GM_ADDR rowPtrA, GM_ADDR colIndA, GM_ADDR valA,
+    GM_ADDR rowPtrB, GM_ADDR colIndB, GM_ADDR valB,
+    GM_ADDR oldRowPtrC, GM_ADDR oldColIndC, GM_ADDR oldValC,
+    GM_ADDR productOffsets, GM_ADDR cursors,
+    GM_ADDR candidateCols, GM_ADDR candidateVals, GM_ADDR uniqueCounts,
+    GM_ADDR error, const SpGemmComputeTilingData &tiling,
+    uint32_t numBlocks, void *stream)
 {
-    spgemm_fill_kernel<<<1, nullptr, stream>>>(dst, tilingGM);
+    spgemm_compute_kernel<<<numBlocks, nullptr, stream>>>(
+        rowPtrA, colIndA, valA, rowPtrB, colIndB, valB,
+        oldRowPtrC, oldColIndC, oldValC, productOffsets, cursors,
+        candidateCols, candidateVals, uniqueCounts, error, tiling);
+}
+
+extern "C" void spgemm_scan_i32_kernel_do(
+    GM_ADDR counts, GM_ADDR offsets, GM_ADDR blockSums,
+    GM_ADDR blockOffsets, GM_ADDR total, GM_ADDR error,
+    const SpGemmScanTilingData &tiling, uint32_t numBlocks, void *stream)
+{
+    spgemm_scan_i32_local_kernel<<<numBlocks, nullptr, stream>>>(counts, offsets, blockSums, error, tiling);
+    spgemm_scan_i32_blocks_kernel<<<1, nullptr, stream>>>(
+        offsets, blockSums, blockOffsets, total, error, tiling);
+    spgemm_scan_i32_add_kernel<<<numBlocks, nullptr, stream>>>(offsets, blockOffsets, error, tiling);
+}
+
+extern "C" void spgemm_copy_kernel_do(
+    GM_ADDR productOffsets, GM_ADDR uniqueCounts,
+    GM_ADDR candidateCols, GM_ADDR candidateVals,
+    GM_ADDR rowPtrC, GM_ADDR colIndC, GM_ADDR valC,
+    const SpGemmCopyTilingData &tiling, uint32_t numBlocks, void *stream)
+{
+    spgemm_copy_kernel<<<numBlocks, nullptr, stream>>>(
+        productOffsets, uniqueCounts, candidateCols, candidateVals,
+        rowPtrC, colIndC, valC, tiling);
 }
