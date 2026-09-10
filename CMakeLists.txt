@@ -139,10 +139,10 @@ add_subdirectory(sparse)
 
 project(${OPS_SPARSE} LANGUAGES ASC CXX)
 
-# Default Debug when unspecified; FORCE only here so an empty cache entry is corrected,
-# while -DCMAKE_BUILD_TYPE=Release from the command line is still honored (#26).
+# Default Release when unspecified; FORCE only here so an empty cache entry is corrected,
+# while -DCMAKE_BUILD_TYPE=Debug from the command line is still honored.
 if(NOT CMAKE_BUILD_TYPE)
-    set(CMAKE_BUILD_TYPE "Debug" CACHE STRING "Build type Release/Debug" FORCE)
+    set(CMAKE_BUILD_TYPE "Release" CACHE STRING "Build type Release/Debug" FORCE)
 endif()
 
 add_library(${OPS_SPARSE} SHARED ${ALL_SPARSE_SRC_FILES})
