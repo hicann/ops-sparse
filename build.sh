@@ -15,6 +15,7 @@ BUILD_DIR=build
 BUILD_OPS=""
 RUN_TEST=OFF
 ENABLE_PACKAGE=FALSE
+ENABLE_TORCH_EXTENSION=FALSE
 
 export BASE_PATH=$(
   cd "$(dirname $0)"
@@ -80,6 +81,9 @@ for arg in "$@"; do
         --pkg)
             ENABLE_PACKAGE=TRUE
             ;;
+        --torch_extension)
+            ENABLE_TORCH_EXTENSION=TRUE
+            ;;
         *)
             echo "Unknown option: $arg"
             echo "Usage:"
@@ -90,14 +94,21 @@ for arg in "$@"; do
             echo "  bash build.sh --ops=spmv --run                 # 编译并运行指定算子测试"
             echo "  bash build.sh --pkg                            # 编译并打包 run 包"
             echo "  bash build.sh --pkg --soc=ascend950            # 打包指定 SOC 的 run 包"
+            echo "  bash build.sh --torch_extension                 # 构建全部 Torch Extension wheel"
+            echo "  bash build.sh --torch_extension --ops=spmm      # 构建指定算子的 Torch Extension wheel"
             exit 1
             ;;
     esac
 done
 
 # 校验 --run 和 --pkg 不能同时使用
-if [ "${RUN_TEST}" == "ON" ] && [ "${ENABLE_PACKAGE}" == "TRUE" ]; then
-  print_error "--run cannot be used with --pkg"
+if [ "${RUN_TEST}" == "ON" ] && { [ "${ENABLE_PACKAGE}" == "TRUE" ] || [ "${ENABLE_TORCH_EXTENSION}" == "TRUE" ]; }; then
+  print_error "--run cannot be used with --pkg or --torch_extension"
+  exit 1
+fi
+
+if [ "${ENABLE_PACKAGE}" == "TRUE" ] && [ "${ENABLE_TORCH_EXTENSION}" == "TRUE" ]; then
+  print_error "--pkg cannot be used with --torch_extension"
   exit 1
 fi
 
@@ -160,6 +171,27 @@ if [ -n "${BUILD_OPS}" ]; then
     done
     shopt -u nullglob
     BUILD_OPS="${_expanded}"
+fi
+
+if [ "${ENABLE_TORCH_EXTENSION}" == "TRUE" ]; then
+    echo "Building Torch Extension wheel (ops: ${BUILD_OPS:-all})"
+    if ! python3 -c 'import build; assert getattr(build, "__file__", None)' 2>/dev/null; then
+        print_error "Python package 'build' is required; run: python3 -m pip install -r torch_extension/requirements.txt"
+        exit 1
+    fi
+    if [ -n "${BUILD_OPS}" ]; then
+        export TORCH_EXTENSION_OPS="${BUILD_OPS}"
+    else
+        unset TORCH_EXTENSION_OPS
+    fi
+
+    (
+        cd "${BASE_PATH}/torch_extension"
+        python3 -m build --wheel -n
+    )
+    mkdir -p "${BUILD_OUT_PATH}"
+    cp "${BASE_PATH}/torch_extension/dist/"*.whl "${BUILD_OUT_PATH}/"
+    exit 0
 fi
 
 echo "BUILD_OPS=${BUILD_OPS}, RUN_TEST=${RUN_TEST}, ENABLE_PACKAGE=${ENABLE_PACKAGE}"

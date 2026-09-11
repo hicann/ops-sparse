@@ -49,6 +49,17 @@ foreach(arch_dir ${ARCH_SPECIFIC_DIRS})
   endif()
 endforeach()
 
+# torch_extension/csrc 由 PyTorch JIT 单独编译，不能进入 libops_sparse。
+set(torch_extension_srcs "")
+foreach(src ${BASE_SRC_FILES})
+  if(src MATCHES "/torch_extension/")
+    list(APPEND torch_extension_srcs ${src})
+  endif()
+endforeach()
+foreach(torch_extension_src ${torch_extension_srcs})
+  list(REMOVE_ITEM BASE_SRC_FILES ${torch_extension_src})
+endforeach()
+
 # -------------------------------------------------------------------------------------------------
 # 步骤2：收集当前 SOC 对应的架构特定源文件
 #   - SOC_ARCH_DIRS 根据 SOC_VERSION 在根 CMakeLists.txt 中通过 get_soc_arch_dirs() 确定
