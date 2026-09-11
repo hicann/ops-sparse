@@ -16,6 +16,13 @@
     bash build.sh --pkg --soc=ascend950
     ```
     - `--soc` 参数须与运行设备的芯片型号一致，支持的 SOC 值：`ascend910b`、`ascend910_93`、`ascend950`、`ascend310p`。
+    - 未指定时默认 **Release**。调试 kernel 时可通过环境变量切换为 Debug：
+
+      ```bash
+      CMAKE_BUILD_TYPE=Debug bash build.sh --pkg --soc=ascend950
+      ```
+
+      直接调用 CMake 时传 `-DCMAKE_BUILD_TYPE=Debug` 同样生效。
 
     编译成功后，安装包生成在 `build_out/` 目录下，文件名类似 `cann-950-ops-sparse_<cann_version>_linux-<arch>.run`。
 
