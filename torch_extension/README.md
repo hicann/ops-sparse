@@ -5,7 +5,7 @@ Just-In-Time（JIT）编译，将 PyTorch 接口接入 `ops-sparse` 的 ACLSpars
 扩展不修改 `torch_npu` 包本身，而是在导入时为 wheel 中收集到的算子注册标准 ATen
 稀疏算子的后端实现。
 
-框架不依赖任何指定算子的注册实现。下文以 `spmm` 算子为例说明构建、调用和开发流程；
+框架不依赖任何指定算子的注册实现。下文以 `spgemm` 算子为例说明构建、调用和开发流程；
 其他算子遵循相同目录约定后，可以独立打包、安装和注册。
 
 ## 构建与安装
@@ -30,11 +30,11 @@ Just-In-Time（JIT）编译，将 PyTorch 接口接入 `ops-sparse` 的 ACLSpars
     ```
 
 2. 构建 wheel。可在仓根使用构建脚本；`--ops` 仅将指定算子的 Torch Extension
-   源码打入 wheel，不编译主库或 AscendC kernel。以下以 `spmm` 算子为例；替换为
-   其他算子名即可得到不依赖 `spmm` 注册的最小 wheel。
+   源码打入 wheel，不编译主库或 AscendC kernel。以下以 `spgemm` 算子为例；替换为
+   其他算子名即可得到不依赖 `spgemm` 注册的最小 wheel。
 
     ```sh
-    bash build.sh --torch_extension --ops=spmm
+    bash build.sh --torch_extension --ops=spgemm
     ```
 
 3. 安装 wheel。
@@ -45,8 +45,9 @@ Just-In-Time（JIT）编译，将 PyTorch 接口接入 `ops-sparse` 的 ACLSpars
 
 ## 快速开始
 
-以 `spmm` 算子为例，其注册的标准 ATen 算子为 `aten::_sparse_addmm`。用户使用
-`torch.sparse.addmm`，而不是调用 `cann_ops_sparse.spmm`；`torch_npu.sparse`
+以 `spgemm` 算子为例，其注册的标准 ATen 算子为 `aten::_sparse_sparse_matmul`，并适配
+PyTorch CSR 路径内部使用的 `aten::_sparse_addmm`。用户使用 `torch.sparse.mm`，而不是
+调用 `cann_ops_sparse.spgemm`；`torch_npu.sparse`
 是由本包在导入时创建的 Python façade。创建前会检查该 namespace 未被其他模块占用；
 若已被占用，导入将失败而不会覆盖已有实现。
 
@@ -55,53 +56,65 @@ import torch
 import torch_npu
 import cann_ops_sparse
 
-out = torch.sparse.addmm(input, csr_mat, dense_mat, beta=1.0, alpha=1.0)
+device = "npu:0"
+torch.npu.set_device(device)
+matrix = torch.sparse_csr_tensor(
+    torch.tensor([0, 2, 3], dtype=torch.int32, device=device),
+    torch.tensor([0, 1, 1], dtype=torch.int32, device=device),
+    torch.tensor([1.0, 2.0, 3.0], dtype=torch.float32, device=device),
+    size=(2, 2),
+    device=device,
+)
+
+out = torch.sparse.mm(matrix, matrix)
 # 等价的 torch_npu façade：
-out = torch_npu.sparse.addmm(input, csr_mat, dense_mat, beta=1.0, alpha=1.0)
+out = torch_npu.sparse.mm(matrix, matrix)
 ```
 
-导入 `cann_ops_sparse` 时会为 `aten::_sparse_addmm` 注册 `PrivateUse1` 与
-`SparseCsrPrivateUse1` 实现，并注册 `torch_npu.sparse` façade。首次以 NPU CSR
-Tensor 调用 `torch.sparse.addmm` 时才会 JIT 编译相应的 C++ wrapper。
+导入 `cann_ops_sparse` 时会为 `aten::_sparse_sparse_matmul` 注册
+`SparseCsrPrivateUse1` 与 `SparsePrivateUse1` 实现，并为 CSR 内部路径注册
+`aten::_sparse_addmm` 的 `SparseCsrPrivateUse1` 实现，同时安装 `torch_npu.sparse`
+façade。首次以 NPU 稀疏 Tensor 调用 `torch.sparse.mm` 时才会 JIT 编译相应的 C++ wrapper。
 
-以 `spmm` 算子构建的 wheel 包含其 Torch Extension 源码。首次 NPU 调用
-`torch.sparse.addmm` 时会触发 JIT 编译并加载 NPU 实现。运行前须先构建包含 `spmm`
+以 `spgemm` 算子构建的 wheel 包含其 Torch Extension 源码。首次 NPU 调用
+`torch.sparse.mm` 时会触发 JIT 编译并加载 NPU 实现。运行前须先构建包含 `spgemm`
 的 `libops_sparse.so`。若已通过 run 包安装到 `${ASCEND_HOME_PATH}/lib64`，无需额外
 配置；源码构建或安装到其他目录时，以 `OPS_SPARSE_LIB_DIR` 指向其所在目录。
 
 具体接口语义、支持范围、约束和调用示例请参阅
-[SpMM 接口说明](cann_ops_sparse/docs/zh/spmm.md)。
+[SpGEMM 接口说明](cann_ops_sparse/docs/zh/spgemm.md)。
 
 ## 可复现构建与调用
 
-以下命令以 `spmm` 算子为例，在仓根执行；将 CANN 路径替换为本机实际安装路径。
-其他算子只需将两处 `spmm` 替换为目标算子名，并使用其自身的测试文件。
+以下命令以 `spgemm` 算子为例，在仓根执行；将 CANN 路径替换为本机实际安装路径。
+其他算子只需将 `spgemm` 替换为目标算子名，并使用其自身的测试文件。
 
 ```sh
 source /path/to/ascend-toolkit/set_env.sh
 # 编译 ACLSparse 主库；Torch Extension wheel 的构建不编译该主库或 kernel。
-CMAKE_BUILD_TYPE=Release bash build.sh --ops=spmm --soc=<你的SOC型号>
+CMAKE_BUILD_TYPE=Release bash build.sh --ops=spgemm --soc=ascend950
 
 python3 -m pip install -r torch_extension/requirements.txt
-bash build.sh --torch_extension --ops=spmm
+bash build.sh --torch_extension --ops=spgemm
 python3 -m pip install --force-reinstall --no-deps build_out/cann_ops_sparse-*.whl
 
 # 源码构建的 libops_sparse.so 位于 build/，因此显式指定其路径。
 # 若已安装 run 包到 ${ASCEND_HOME_PATH}/lib64，则无需设置该变量。
 export OPS_SPARSE_LIB_DIR="$PWD/build"
 export TORCH_EXTENSIONS_DIR="$PWD/.torch_extensions"
-python3 -m pytest -q test/spmm/test_torch_extension.py
+python3 -m pytest -q test/spgemm/test_torch_extension.py
 ```
 
-以 `spmm` 算子为例，测试用例调用 `torch.sparse.addmm`，并以 CPU 结果作为精度基准；
+以 `spgemm` 算子为例，测试用例调用 `torch.sparse.mm`，覆盖 CSR/COO、支持的数据类型、
+int64 索引转换、空输出及非默认 stream；
 首次运行会在
-`TORCH_EXTENSIONS_DIR` 中生成 `cann_ops_sparse_spmm`。
+`TORCH_EXTENSIONS_DIR` 中生成 `cann_ops_sparse_spgemm`。
 
 ## 开发者指南：新增算子
 
-一个算子的 Torch Extension 源码归属到 `<category>/<op>/torch_extension/`。以 `spmm`
-算子为例，其文件位于 `sparse/spmm/torch_extension/`；新增其他算子时使用自身目录，
-不修改或依赖 `spmm` 的注册文件。
+一个算子的 Torch Extension 源码归属到 `<category>/<op>/torch_extension/`。以 `spgemm`
+算子为例，其文件位于 `sparse/spgemm/torch_extension/`；新增其他算子时使用自身目录，
+不修改或依赖 `spgemm` 的注册文件。
 `ops-sparse` 当前统一使用 `sparse` category；根目录 `torch_extension` 只负责
 通用 builder 与 wheel 打包，并在构建时自动提取各算子的注册源码。
 
@@ -139,5 +152,5 @@ ops-sparse/
 | 组件 | 职责 |
 | --- | --- |
 | `OpBuilder` | 使用 JIT/ninja 编译和加载 C++ wrapper。 |
-| ATen Dispatch | 将 `torch.sparse.addmm` 路由到 NPU 的 `aten::_sparse_addmm` 实现。 |
+| ATen Dispatch | 将 `torch.sparse.mm` 路由到 NPU 的 `aten::_sparse_sparse_matmul` 实现。 |
 | PrivateUse1 | PyTorch 将 NPU Tensor 分发到自定义后端的 dispatch key。 |

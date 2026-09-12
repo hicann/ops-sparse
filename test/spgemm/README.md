@@ -19,8 +19,7 @@ test/spgemm/
 │   ├── spgemm_test.cpp       # C++功能与接口测试
 │   ├── spgemm_test.csv       # 仓库原有参数化回归用例
 │   └── spgemm_perf.cpp       # 独立性能测试程序
-└── python/
-    └── test_spgemm_torch.py  # PyTorch公开接口端到端测试
+└── test_torch_extension.py   # PyTorch公开接口端到端测试
 ```
 
 ## C++测试
@@ -52,21 +51,18 @@ cmake --build build --target spgemm_test spgemm_perf --parallel
 
 ## PyTorch端到端测试
 
-使用相互匹配的PyTorch和torch_npu环境，并在配置时开启适配层：
+使用相互匹配的 PyTorch 和 torch_npu 环境。先构建 `spgemm` 主库，再将该算子的
+Torch Extension 源码打包、安装：
 
 ```bash
-cmake -S . -B build \
-  -DSOC_VERSION=ascend950 \
-  -DCMAKE_BUILD_TYPE=Release \
-  -DBUILD_TEST=ON \
-  -DOP_LIST=spgemm \
-  -DBUILD_TORCH_ADAPTER=ON \
-  -DPython3_EXECUTABLE=/path/to/python
-cmake --build build --target ops_sparse_torch --parallel
+CMAKE_BUILD_TYPE=Release bash build.sh --ops=spgemm --soc=ascend950
+python3 -m pip install -r torch_extension/requirements.txt
+bash build.sh --torch_extension --ops=spgemm
+python3 -m pip install --force-reinstall --no-deps build_out/cann_ops_sparse-*.whl
 
-PYTHONPATH=$PWD/python \
-/path/to/python test/spgemm/python/test_spgemm_torch.py \
-  --library build/python/ops_sparse_torch/libops_sparse_torch.so
+# 源码构建时 libops_sparse.so 位于 build/；安装 run 包后可省略该变量。
+export OPS_SPARSE_LIB_DIR="$PWD/build"
+python3 -m pytest -q test/spgemm/test_torch_extension.py
 ```
 
 该测试覆盖CSR/COO公开路径、int32/int64索引转换以及FP16、BF16、FP32、Complex64。

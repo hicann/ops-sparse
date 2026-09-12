@@ -323,19 +323,23 @@ cmake --build build --target spgemm_test spgemm_perf --parallel
 ./build/test/spgemm/spgemm_test --gtest_color=no
 ```
 
-PyTorch 适配的构建和加载方式见
-[`../../python/ops_sparse_torch/README.md`](../../python/ops_sparse_torch/README.md)。
+PyTorch 适配的构建、安装和加载方式见
+[`../../torch_extension/README.md`](../../torch_extension/README.md)。
 
 ## 目录结构
 
 ```text
 sparse/spgemm/
 ├── README.md
-└── arch35/
+├── arch35/
     ├── spgemm_host.cpp
     ├── spgemm_kernel.cpp
     ├── spgemm_kernel.h
     └── spgemm_tiling_data.h
+└── torch_extension/
+    ├── spgemm.py
+    └── csrc/spgemm.cpp
 ```
 
-测试代码位于 `test/spgemm/`，PyTorch NPU 适配代码位于 `python/ops_sparse_torch/`。
+测试代码位于 `test/spgemm/`，PyTorch NPU 注册与 C++ wrapper 位于
+`sparse/spgemm/torch_extension/`。

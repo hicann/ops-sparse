@@ -10,56 +10,25 @@
  * ----------------------------------------------------------------------------------------------------------
  */
 
-#include <ATen/ATen.h>
+#include "aclsparse_common.h"
+
 #include <ATen/ops/_sparse_coo_tensor_unsafe.h>
 #include <c10/core/Scalar.h>
 #include <c10/util/BFloat16.h>
 #include <c10/util/Half.h>
-#include <torch/library.h>
-#include <torch_npu/csrc/core/npu/NPUStream.h>
+#include <pybind11/complex.h>
+#include <torch/extension.h>
 
 #include <array>
+#include <complex>
 #include <cstdint>
 #include <limits>
 #include <string>
 #include <utility>
 
-#include "cann_ops_sparse.h"
 #include "securec.h"
 
 namespace {
-
-class HandleGuard {
-public:
-    HandleGuard()
-    {
-        Check(aclsparseCreate(&value_), "aclsparseCreate");
-    }
-
-    ~HandleGuard()
-    {
-        if (value_ != nullptr) {
-            (void)aclsparseDestroy(value_);
-        }
-    }
-
-    HandleGuard(const HandleGuard &) = delete;
-    HandleGuard &operator=(const HandleGuard &) = delete;
-
-    aclsparseHandle_t Get() const
-    {
-        return value_;
-    }
-
-    static void Check(aclsparseStatus_t status, const char *stage)
-    {
-        TORCH_CHECK(status == ACL_SPARSE_STATUS_SUCCESS, stage,
-            " failed with aclsparse status ", static_cast<int>(status));
-    }
-
-private:
-    aclsparseHandle_t value_ = nullptr;
-};
 
 class ConstSpMatGuard {
 public:
@@ -111,8 +80,7 @@ class SpGemmDescrGuard {
 public:
     SpGemmDescrGuard()
     {
-        HandleGuard::Check(aclsparseSpGEMMCreateDescr(&value_),
-            "aclsparseSpGEMMCreateDescr");
+        ACLSPARSE_CHECK(aclsparseSpGEMMCreateDescr(&value_));
     }
 
     ~SpGemmDescrGuard()
@@ -303,93 +271,83 @@ void CreateSpGemmDescriptors(
     PreparedSpGemm &prepared, ConstSpMatGuard &matA,
     ConstSpMatGuard &matB, SpMatGuard &matC)
 {
-    HandleGuard::Check(aclsparseCreateConstCsr(
+    ACLSPARSE_CHECK(aclsparseCreateConstCsr(
         matA.Out(), prepared.m, prepared.k, prepared.aValues.numel(),
         prepared.aCrow.const_data_ptr(), prepared.aCol.const_data_ptr(),
         prepared.aValues.const_data_ptr(),
         ACL_SPARSE_INDEX_32I, ACL_SPARSE_INDEX_32I,
-        ACL_SPARSE_INDEX_BASE_ZERO, prepared.aclType), "aclsparseCreateConstCsr(matA)");
-    HandleGuard::Check(aclsparseCreateConstCsr(
+        ACL_SPARSE_INDEX_BASE_ZERO, prepared.aclType));
+    ACLSPARSE_CHECK(aclsparseCreateConstCsr(
         matB.Out(), prepared.k, prepared.n, prepared.bValues.numel(),
         prepared.bCrow.const_data_ptr(), prepared.bCol.const_data_ptr(),
         prepared.bValues.const_data_ptr(),
         ACL_SPARSE_INDEX_32I, ACL_SPARSE_INDEX_32I,
-        ACL_SPARSE_INDEX_BASE_ZERO, prepared.aclType), "aclsparseCreateConstCsr(matB)");
-    HandleGuard::Check(aclsparseCreateCsr(
+        ACL_SPARSE_INDEX_BASE_ZERO, prepared.aclType));
+    ACLSPARSE_CHECK(aclsparseCreateCsr(
         matC.Out(), prepared.m, prepared.n, 0,
         prepared.cCrow.mutable_data_ptr(), nullptr, nullptr,
         ACL_SPARSE_INDEX_32I, ACL_SPARSE_INDEX_32I,
-        ACL_SPARSE_INDEX_BASE_ZERO, prepared.aclType), "aclsparseCreateCsr(matC)");
+        ACL_SPARSE_INDEX_BASE_ZERO, prepared.aclType));
 }
 
 struct SpGemmOutput {
     at::Tensor columns;
     at::Tensor values;
-    at::Tensor workBuffer;
-    at::Tensor computeBuffer;
 };
 
 SpGemmOutput CopySpGemmOutput(
-    HandleGuard &handle, PreparedSpGemm &prepared,
+    aclsparseHandle_t handle, PreparedSpGemm &prepared,
     ConstSpMatGuard &matA, ConstSpMatGuard &matB, SpMatGuard &matC,
     SpGemmDescrGuard &descr, aclsparseOperation_t op, aclsparseSpGEMMAlg_t alg)
 {
     int64_t rowsC = 0;
     int64_t colsC = 0;
     int64_t nnzC = 0;
-    HandleGuard::Check(aclsparseSpMatGetSize(matC.Get(), &rowsC, &colsC, &nnzC),
-        "aclsparseSpMatGetSize(matC)");
+    ACLSPARSE_CHECK(aclsparseSpMatGetSize(matC.Get(), &rowsC, &colsC, &nnzC));
     TORCH_CHECK(rowsC == prepared.m && colsC == prepared.n && nnzC >= 0 &&
         nnzC <= std::numeric_limits<int32_t>::max(), "invalid SpGEMM output metadata");
     SpGemmOutput output{
         at::empty({nnzC}, prepared.aValues.options().dtype(at::kInt)),
-        at::empty({nnzC}, prepared.aValues.options()), {}, {}};
-    HandleGuard::Check(aclsparseCsrSetPointers(matC.Get(), prepared.cCrow.mutable_data_ptr(),
-        output.columns.mutable_data_ptr(), output.values.mutable_data_ptr()),
-        "aclsparseCsrSetPointers(matC)");
-    HandleGuard::Check(aclsparseSpGEMMCopy(handle.Get(), op, op,
+        at::empty({nnzC}, prepared.aValues.options())};
+    ACLSPARSE_CHECK(aclsparseCsrSetPointers(
+        matC.Get(), prepared.cCrow.mutable_data_ptr(), output.columns.mutable_data_ptr(),
+        output.values.mutable_data_ptr()));
+    ACLSPARSE_CHECK(aclsparseSpGEMMCopy(handle, op, op,
         prepared.alpha.Data(), matA.Get(), matB.Get(), prepared.beta.Data(), matC.Get(), prepared.aclType,
-        alg, descr.Get()), "SpGEMM Copy");
+        alg, descr.Get()));
     return output;
 }
 
 SpGemmOutput ExecuteSpGemm(
-    HandleGuard &handle, PreparedSpGemm &prepared,
+    cann_ops_sparse::AclSparseContext &context, PreparedSpGemm &prepared,
     ConstSpMatGuard &matA, ConstSpMatGuard &matB, SpMatGuard &matC)
 {
     SpGemmDescrGuard descr;
     constexpr aclsparseOperation_t op = ACL_SPARSE_OP_NON_TRANSPOSE;
     constexpr aclsparseSpGEMMAlg_t alg = ACL_SPARSE_SPGEMM_DEFAULT;
     size_t bufferSize1 = 0;
-    HandleGuard::Check(aclsparseSpGEMMWorkEstimation(handle.Get(), op, op,
+    const aclsparseHandle_t handle = context.handle();
+    ACLSPARSE_CHECK(aclsparseSpGEMMWorkEstimation(handle, op, op,
         prepared.alpha.Data(), matA.Get(), matB.Get(), prepared.beta.Data(), matC.Get(), prepared.aclType,
-        alg, descr.Get(), &bufferSize1, nullptr), "SpGEMM WorkEstimation query");
+        alg, descr.Get(), &bufferSize1, nullptr));
     TORCH_CHECK(bufferSize1 <= static_cast<size_t>(std::numeric_limits<int64_t>::max()),
         "SpGEMM work buffer exceeds PyTorch tensor limits");
-    at::Tensor buffer1 = at::empty({static_cast<int64_t>(bufferSize1)},
-        prepared.aValues.options().dtype(at::kByte));
-    HandleGuard::Check(aclsparseSpGEMMWorkEstimation(handle.Get(), op, op,
+    cann_ops_sparse::AclSparseWorkspace buffer1(context, prepared.aValues, bufferSize1);
+    ACLSPARSE_CHECK(aclsparseSpGEMMWorkEstimation(handle, op, op,
         prepared.alpha.Data(), matA.Get(), matB.Get(), prepared.beta.Data(), matC.Get(), prepared.aclType,
-        alg, descr.Get(), &bufferSize1, buffer1.mutable_data_ptr()),
-        "SpGEMM WorkEstimation execute");
+        alg, descr.Get(), &bufferSize1, buffer1.data()));
     size_t bufferSize2 = 0;
     size_t bufferSize3 = 0;
-    HandleGuard::Check(aclsparseSpGEMMEstimateMemory(handle.Get(), op, op,
+    ACLSPARSE_CHECK(aclsparseSpGEMMEstimateMemory(handle, op, op,
         prepared.alpha.Data(), matA.Get(), matB.Get(), prepared.beta.Data(), matC.Get(), prepared.aclType,
-        alg, descr.Get(), 1.0F, &bufferSize3, nullptr, &bufferSize2),
-        "SpGEMM EstimateMemory");
+        alg, descr.Get(), 1.0F, &bufferSize3, nullptr, &bufferSize2));
     TORCH_CHECK(bufferSize2 <= static_cast<size_t>(std::numeric_limits<int64_t>::max()),
         "SpGEMM compute buffer exceeds PyTorch tensor limits");
-    at::Tensor buffer2 = at::empty({static_cast<int64_t>(bufferSize2)},
-        prepared.aValues.options().dtype(at::kByte));
-    HandleGuard::Check(aclsparseSpGEMMCompute(handle.Get(), op, op,
+    cann_ops_sparse::AclSparseWorkspace buffer2(context, prepared.aValues, bufferSize2);
+    ACLSPARSE_CHECK(aclsparseSpGEMMCompute(handle, op, op,
         prepared.alpha.Data(), matA.Get(), matB.Get(), prepared.beta.Data(), matC.Get(), prepared.aclType,
-        alg, descr.Get(), &bufferSize2, buffer2.mutable_data_ptr()),
-        "SpGEMM Compute");
-    SpGemmOutput output = CopySpGemmOutput(handle, prepared, matA, matB, matC, descr, op, alg);
-    output.workBuffer = std::move(buffer1);
-    output.computeBuffer = std::move(buffer2);
-    return output;
+        alg, descr.Get(), &bufferSize2, buffer2.data()));
+    return CopySpGemmOutput(handle, prepared, matA, matB, matC, descr, op, alg);
 }
 
 at::Tensor SpGemmCsr(
@@ -398,20 +356,25 @@ at::Tensor SpGemmCsr(
 {
     ValidateSpGemmInputs(mat1Input, mat2Input);
     PreparedSpGemm prepared = PrepareSpGemm(mat1Input, mat2Input, alphaScalar);
-    // stream(true) drains torch_npu's task queue before the direct aclsparse
-    // launches and preserves ordering with the tensor conversions above.
-    aclrtStream stream = c10_npu::getCurrentNPUStream(mat1Input.device().index()).stream(true);
-    HandleGuard handle;
-    HandleGuard::Check(aclsparseSetStream(handle.Get(), stream), "aclsparseSetStream");
-    HandleGuard::Check(aclsparseSetPointerMode(handle.Get(), ACL_SPARSE_POINTER_MODE_HOST),
-        "aclsparseSetPointerMode");
-    ConstSpMatGuard matA;
-    ConstSpMatGuard matB;
-    SpMatGuard matC;
-    CreateSpGemmDescriptors(prepared, matA, matB, matC);
-    SpGemmOutput output = ExecuteSpGemm(handle, prepared, matA, matB, matC);
-    return at::sparse_csr_tensor(prepared.cCrow, output.columns, output.values,
-        {prepared.m, prepared.n}, output.values.options().layout(at::kSparseCsr));
+    // PrepareSpGemm may enqueue index conversions in torch_npu's task queue.
+    // Drain it before launching ACLSparse directly on the underlying stream.
+    (void)c10_npu::getCurrentNPUStream(mat1Input.device().index()).stream(true);
+    return cann_ops_sparse::RunAclSparse(mat1Input, [&](cann_ops_sparse::AclSparseContext &context) {
+        ConstSpMatGuard matA;
+        ConstSpMatGuard matB;
+        SpMatGuard matC;
+        CreateSpGemmDescriptors(prepared, matA, matB, matC);
+        SpGemmOutput output = ExecuteSpGemm(context, prepared, matA, matB, matC);
+        at::Tensor result = at::sparse_csr_tensor(prepared.cCrow, output.columns, output.values,
+            {prepared.m, prepared.n}, output.values.options().layout(at::kSparseCsr));
+        context.RecordTensors(prepared.aCrow, prepared.aCol, prepared.aValues,
+            prepared.bCrow, prepared.bCol, prepared.bValues, prepared.cCrow,
+            // A SparseCsrTensorImpl has no standalone storage.  Its three
+            // component tensors above own all device allocations used by
+            // result, so recording them is both sufficient and required.
+            output.columns, output.values);
+        return result;
+    });
 }
 
 at::Tensor SparseSparseMatmulCsr(const at::Tensor &mat1, const at::Tensor &mat2)
@@ -438,17 +401,20 @@ at::Tensor SparseAddmmCsr(
     return SpGemmCsr(mat1, mat2, alpha);
 }
 
-TORCH_LIBRARY_IMPL(aten, SparseCsrPrivateUse1, m)
-{
-    m.impl("_sparse_sparse_matmul", TORCH_FN(SparseSparseMatmulCsr));
-    // torch.sparse.mm(CSR, CSR) in PyTorch 2.7 lowers through
-    // _sparse_addmm with an empty CSR addend and beta=0.
-    m.impl("_sparse_addmm", TORCH_FN(SparseAddmmCsr));
-}
-
-TORCH_LIBRARY_IMPL(aten, SparsePrivateUse1, m)
-{
-    m.impl("_sparse_sparse_matmul", TORCH_FN(SparseSparseMatmulCoo));
-}
-
 }  // namespace
+
+at::Tensor SparseAddmmCsrPy(
+    const at::Tensor &self, const at::Tensor &mat1, const at::Tensor &mat2,
+    const std::complex<double> &beta, const std::complex<double> &alpha)
+{
+    return SparseAddmmCsr(self, mat1, mat2,
+        c10::Scalar(c10::complex<double>(beta.real(), beta.imag())),
+        c10::Scalar(c10::complex<double>(alpha.real(), alpha.imag())));
+}
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)
+{
+    m.def("sparse_sparse_matmul_csr", &SparseSparseMatmulCsr);
+    m.def("sparse_sparse_matmul_coo", &SparseSparseMatmulCoo);
+    m.def("sparse_addmm_csr", &SparseAddmmCsrPy);
+}
