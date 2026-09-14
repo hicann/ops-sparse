@@ -5,8 +5,8 @@
 | 产品 | 是否支持 |
 | :--- | :---: |
 | <term>Ascend 950PR</term> | √ |
-| <term>Atlas A3 训练系列产品/Atlas A3 推理系列产品</term> | × |
-| <term>Atlas A2 训练系列产品/Atlas A2 推理系列产品</term> | × |
+| <term>Atlas A3 训练系列产品/Atlas A3 推理系列产品</term> | √ |
+| <term>Atlas A2 训练系列产品/Atlas A2 推理系列产品</term> | √ |
 | <term>Atlas 200I/500 A2 推理产品</term> | × |
 | <term>Atlas 推理系列产品</term> | × |
 | <term>Atlas 训练系列产品</term> | × |
@@ -323,23 +323,43 @@ cmake --build build --target spgemm_test spgemm_perf --parallel
 ./build/test/spgemm/spgemm_test --gtest_color=no
 ```
 
-PyTorch 适配的构建、安装和加载方式见
-[`../../torch_extension/README.md`](../../torch_extension/README.md)。
+PyTorch 接口注册通过 `torch_extension` 框架提供，构建和加载方式见
+[`../../torch_extension/README.md`](../../torch_extension/README.md)，
+SpGEMM 侧的接口说明见
+[`../../torch_extension/cann_ops_sparse/docs/zh/spgemm.md`](../../torch_extension/cann_ops_sparse/docs/zh/spgemm.md)。
 
 ## 目录结构
 
 ```text
 sparse/spgemm/
 ├── README.md
-├── arch35/
-    ├── spgemm_host.cpp
-    ├── spgemm_kernel.cpp
-    ├── spgemm_kernel.h
-    └── spgemm_tiling_data.h
-└── torch_extension/
+├── common/
+│   ├── spgemm_common.h        # 跨 arch 共享的类型与规格定义
+│   └── spgemm_validate.cpp    # 公共参数校验
+├── arch22/                    # Atlas A2/A3
+│   ├── README.md
+│   ├── spgemm.h
+│   ├── spgemm_host.cpp
+│   ├── spgemm_count_kernel.cpp
+│   ├── spgemm_symbolic_kernel.cpp
+│   ├── spgemm_numeric_kernel.cpp
+│   ├── spgemm_merge.h
+│   ├── spgemm_merge_emit.h
+│   ├── spgemm_merge_row.h
+│   └── spgemm_value.h
+├── arch35/                    # Ascend 950PR
+│   ├── spgemm.h
+│   ├── spgemm_host.cpp
+│   ├── spgemm_kernel.cpp
+│   ├── spgemm_kernel.h
+│   ├── spgemm_csr_mat.cpp
+│   ├── spgemm_csr_mat.h
+│   └── spgemm_tiling_data.h
+└── torch_extension/           # PyTorch 接口注册（由 PyTorch JIT 单独编译）
+    ├── __init__.py
     ├── spgemm.py
-    └── csrc/spgemm.cpp
+    └── csrc/
+        └── spgemm.cpp
 ```
 
-测试代码位于 `test/spgemm/`，PyTorch NPU 注册与 C++ wrapper 位于
-`sparse/spgemm/torch_extension/`。
+测试代码位于 `test/spgemm/`。

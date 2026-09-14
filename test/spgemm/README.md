@@ -3,7 +3,7 @@
 ## 测试说明
 
 SpGEMM测试覆盖`aclsparseSpGEMM*`多阶段接口、支持的数据类型与算法、CSR输出结构、
-状态机和异常参数，并通过PyTorch公开接口验证NPU端到端调用。算子接口、支持规格和调用
+状态机和异常参数，并通过`torch_extension`注册的PyTorch公开接口验证NPU端到端调用。算子接口、支持规格和调用
 流程见[SpGEMM算子说明](../../sparse/spgemm/README.md)。
 
 ## 目录结构
@@ -14,12 +14,17 @@ test/spgemm/
 ├── README.md
 ├── spgemm_golden.h
 ├── spgemm_param.h
-├── arch35/
+├── arch22/                              # Atlas A2/A3
+│   ├── spgemm_harness.h
+│   ├── spgemm_ref.h
+│   └── spgemm_test.cpp                  # C++功能与接口测试
+├── arch35/                              # Ascend 950PR
 │   ├── spgemm_npu_wrapper.h
-│   ├── spgemm_test.cpp       # C++功能与接口测试
-│   ├── spgemm_test.csv       # 仓库原有参数化回归用例
-│   └── spgemm_perf.cpp       # 独立性能测试程序
-└── test_torch_extension.py   # PyTorch公开接口端到端测试
+│   ├── spgemm_test.cpp                  # C++功能与接口测试
+│   ├── spgemm_test.csv                  # 仓库原有参数化回归用例
+│   └── spgemm_perf.cpp                  # 独立性能测试程序
+└── python/
+    └── test_spgemm_torch_extension.py   # Torch Extension注册与端到端测试
 ```
 
 ## C++测试
@@ -51,18 +56,21 @@ cmake --build build --target spgemm_test spgemm_perf --parallel
 
 ## PyTorch端到端测试
 
-使用相互匹配的 PyTorch 和 torch_npu 环境。先构建 `spgemm` 主库，再将该算子的
-Torch Extension 源码打包、安装：
+使用相互匹配的PyTorch和torch_npu环境。先构建并安装`cann_ops_sparse` wheel，
+再用pytest执行：
 
 ```bash
-CMAKE_BUILD_TYPE=Release bash build.sh --ops=spgemm --soc=ascend950
-python3 -m pip install -r torch_extension/requirements.txt
 bash build.sh --torch_extension --ops=spgemm
-python3 -m pip install --force-reinstall --no-deps build_out/cann_ops_sparse-*.whl
+python3 -m pip install build_out/cann_ops_sparse-*.whl --force-reinstall --no-deps
 
-# 源码构建时 libops_sparse.so 位于 build/；安装 run 包后可省略该变量。
-export OPS_SPARSE_LIB_DIR="$PWD/build"
-python3 -m pytest -q test/spgemm/test_torch_extension.py
+OPS_SPARSE_LIB_DIR=$PWD/build_out/lib64 \
+python3 -m pytest test/spgemm/python/ -v
 ```
 
-该测试覆盖CSR/COO公开路径、int32/int64索引转换以及FP16、BF16、FP32、Complex64。
+C++侧wrapper由PyTorch在首次NPU调用时JIT编译，需要链接`libops_sparse.so`。
+`OPS_SPARSE_LIB_DIR`用于指向构建产物目录，未设置时回退到`$ASCEND_HOME_PATH/lib64`
+下已安装的run包。
+
+该测试覆盖接口注册（含“导入不触发JIT编译”）、CSR/COO公开路径、int32/int64索引转换、
+FP16/BF16/FP32/Complex64、非零beta的`torch.sparse.addmm`、结构边界与非法输入、
+多设备与非默认stream、wheel打包内容以及`torch_npu.sparse`命名空间。

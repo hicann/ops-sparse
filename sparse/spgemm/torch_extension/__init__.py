@@ -8,8 +8,12 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # ----------------------------------------------------------------------------------------------------------
 
-"""SpGEMM 的 PyTorch 注册实现。"""
+"""SpGEMM operator package.
 
-__all__ = ["TORCH_NPU_SPARSE_FACADE_APIS"]
+Importing this package triggers the SpGEMM ATen registrations only; no other
+operator is touched, and no JIT compilation happens until the first NPU call.
+"""
+
+__all__ = []
 
 from .spgemm import TORCH_NPU_SPARSE_FACADE_APIS

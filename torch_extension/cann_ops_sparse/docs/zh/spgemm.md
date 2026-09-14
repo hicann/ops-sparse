@@ -2,217 +2,190 @@
 
 ## 产品支持情况
 
-<!-- npu="950" id1 -->
-- <term>Ascend 950PR/Ascend 950DT</term>：支持
-<!-- end id1 -->
-<!-- npu="A3" id2 -->
-- <term>Atlas A3 训练系列产品/Atlas A3 推理系列产品</term>：不支持
-<!-- end id2 -->
-<!-- npu="910b" id3 -->
-- <term>Atlas A2 训练系列产品/Atlas A2 推理系列产品</term>：不支持
-<!-- end id3 -->
-<!-- npu="310b" id4 -->
-- <term>Atlas 200I/500 A2 推理产品</term>：不支持
-<!-- end id4 -->
-<!-- npu="310p" id5 -->
-- <term>Atlas 推理系列产品</term>：不支持
-<!-- end id5 -->
-<!-- npu="910" id6 -->
-- <term>Atlas 训练系列产品</term>：不支持
-<!-- end id6 -->
+| 产品 | 架构目录 | 是否支持 |
+| :--- | :---: | :---: |
+| <term>Ascend 950PR</term> | `arch35` | √ |
+| <term>Atlas A3 训练系列产品/Atlas A3 推理系列产品</term> | `arch22` | √ |
+| <term>Atlas A2 训练系列产品/Atlas A2 推理系列产品</term> | `arch22` | √ |
+| <term>Atlas 200I/500 A2 推理产品</term> | - | × |
+| <term>Atlas 推理系列产品</term> | - | × |
+| <term>Atlas 训练系列产品</term> | - | × |
+
+Torch 接口本身与架构无关：注册逻辑只调用公共 `aclsparseSpGEMM*` 接口，具体由哪个
+架构实现承接，取决于运行时加载的 `libops_sparse.so` 是为哪个 `SOC_VERSION` 构建的。
 
 ## 功能说明
 
-- **接口功能**：
+计算两个 CSR 稀疏矩阵的乘积，并可选地累加一个稀疏矩阵：
 
-  `torch.sparse.mm` 用于计算两个二维稀疏矩阵的乘积。导入 `cann_ops_sparse` 后，NPU
-  CSR 输入通过 `SparseCsrPrivateUse1`、NPU COO 输入通过 `SparsePrivateUse1` 分发到
-  `aten::_sparse_sparse_matmul` 的 SpGEMM 实现。PyTorch 的 CSR 稀疏乘稀疏路径还可能在
-  内部使用 `aten::_sparse_addmm`，扩展已为该路径注册受限实现。
+```text
+C = beta * self + alpha * (mat1 @ mat2)
+```
 
-  `torch_npu.sparse.mm` 是与 `torch.sparse.mm` 等价的 Python façade，二者进入同一个
-  ATen dispatcher。首次执行时，扩展按需 JIT 编译 C++ wrapper，并调用
-  `aclsparseSpGEMMWorkEstimation`、`aclsparseSpGEMMEstimateMemory`、
-  `aclsparseSpGEMMCompute` 和 `aclsparseSpGEMMCopy` 完成计算。
+其中 `mat1` 形状为 `M×K`、`mat2` 形状为 `K×N`、输出形状为 `M×N`。多个中间乘积落到
+同一坐标时合并；输出 CSR 每行列索引严格升序、不含重复坐标；数值抵消得到的显式零
+**保留**在输出结构中（`nnz` 计入该位置）。
 
-- **计算公式**：
+| 层次 | 名称 |
+| :--- | :--- |
+| public PyTorch API | `torch.sparse.mm` / `torch.sparse.addmm` |
+| ATen schema | `aten::_sparse_addmm(Tensor self, Tensor mat1, Tensor mat2, *, Scalar beta=1, Scalar alpha=1) -> Tensor` |
+| ATen schema | `aten::_sparse_sparse_matmul(Tensor self, Tensor other) -> Tensor` |
+| 分发键 | `SparseCsrPrivateUse1`（两个 schema）、`SparsePrivateUse1`（`_sparse_sparse_matmul`） |
+| 底层 ACLSparse 接口 | `aclsparseSpGEMMCreateDescr` / `aclsparseSpGEMMWorkEstimation` / `aclsparseSpGEMMCompute` / `aclsparseSpMatGetSize` / `aclsparseCsrSetPointers` / `aclsparseSpGEMMCopy` / `aclsparseSpGEMMDestroyDescr` |
+| `torch_npu.sparse` façade | `torch_npu.sparse.mm` / `torch_npu.sparse.addmm` |
 
-  对形状分别为 $(M, K)$ 和 $(K, N)$ 的稀疏矩阵 $A$、$B$，计算：
+façade 直接转发同名 public PyTorch API，不绕过 ATen 分发器，因此两种写法语义完全一致。
 
-  $$
-  C = A B, \qquad C_{ij} = \sum_{k=0}^{K-1} A_{ik}B_{kj}
-  $$
-
-  输出 $C$ 的形状为 $(M, N)$。多个中间乘积落到同一坐标时会合并；数值抵消得到的显式
-  零仍保留在输出稀疏结构中。
+`torch.sparse.mm(csr, csr)` 由 PyTorch 以 `beta=0, alpha=1` 路由到 `aten::_sparse_addmm`；
+`torch.sparse.mm(coo, coo)` 路由到 `aten::_sparse_sparse_matmul`。
 
 ## 函数原型
 
-标准 PyTorch 接口：
-
 ```python
-torch.sparse.mm(
-    mat1,
-    mat2,
-    reduce="sum"
-) -> Tensor
-```
+torch.sparse.mm(mat1: Tensor, mat2: Tensor) -> Tensor
 
-等价的 `torch_npu.sparse` façade：
+torch.sparse.addmm(mat: Tensor, mat1: Tensor, mat2: Tensor, *,
+                   beta: Number = 1, alpha: Number = 1) -> Tensor
 
-```python
-torch_npu.sparse.mm(
-    mat1,
-    mat2,
-    reduce="sum"
-) -> Tensor
+torch_npu.sparse.mm(mat1: Tensor, mat2: Tensor) -> Tensor
+torch_npu.sparse.addmm(mat: Tensor, mat1: Tensor, mat2: Tensor, *,
+                       beta: Number = 1, alpha: Number = 1) -> Tensor
 ```
 
 ## 参数说明
 
-> **说明：**<br>
->
->- M 表示 `mat1` 的行数，K 表示 `mat1` 的列数和 `mat2` 的行数，N 表示 `mat2` 的列数。
->- nnzA、nnzB 分别表示两个输入稀疏矩阵存储的元素数量。
+- `mat1`（IN）：左乘稀疏矩阵。
+  - shape：`(M, K)`，必须为 2 维；`M`、`K`、`nnz` 均须 `<= INT32_MAX`。
+  - dtype：`torch.float16` / `torch.bfloat16` / `torch.float32` / `torch.complex64`。
+  - layout：`torch.sparse_csr`（`_sparse_addmm` 路径）或 `torch.sparse_coo`
+    （`_sparse_sparse_matmul` 路径，内部转 CSR 计算）。
+  - device：NPU（`PrivateUse1`）。
+  - 索引 dtype：`int32` 与 `int64` 均可；`int64` 由适配层在设备上窄化为 `int32`
+    后传给 ACLSparse（ACLSparse 侧仅支持 `ACL_SPARSE_INDEX_32I`）。
+  - 连续性：`crow_indices` / `col_indices` / `values` 由适配层统一 `contiguous()`，
+    调用方无需预先保证。
+- `mat2`（IN）：右乘稀疏矩阵。shape `(K, N)`，其余约束同 `mat1`；
+  必须满足 `mat1.size(1) == mat2.size(0)`，且与 `mat1` 的 dtype、device 一致。
+- `mat` / `self`（IN）：被累加的稀疏矩阵，仅 `torch.sparse.addmm` 使用。
+  - **校验与 `beta` 取值无关**：只要传入，就必须为 CSR、shape 恰为 `(M, N)`、
+    dtype 与 device 与 `mat1` 一致，否则抛 `RuntimeError`。这与 `aten::addmm`
+    的参考语义一致（CPU 上 `beta=0` 同样校验 `self`）。
+  - `beta == 0` 时**不读取其数据**，仅参与校验（`torch.sparse.mm` 即此情形，
+    PyTorch 会合成一个 shape `(M, N)`、dtype/device 与输入一致的空 CSR）。
+  - `beta != 0` 时额外作为 C_in 绑定到 matC，从 WorkEstimation 阶段即生效。
+- `beta`（IN）：`self` 的缩放系数，默认 `1`。可为 Python `int`/`float`/`bool`/`complex`。
+- `alpha`（IN）：乘积的缩放系数，默认 `1`，取值范围同 `beta`。
 
-### torch.sparse.mm / torch_npu.sparse.mm
+`beta`、`alpha` 会按输出 dtype 转换后一次性暂存在 host，并以同一地址传给
+WorkEstimation / Compute / Copy 各阶段——ACLSparse 会逐位比较各阶段读到的 `beta`，
+不一致即返回 `ACL_SPARSE_STATUS_INVALID_VALUE`。
 
-| 参数名 | 参数类型 | 可选/必选 | 描述 | 数据类型 | 维度(shape) |
-|--------|----------|-----------|------|----------|-------------|
-| mat1 | Tensor | 必选 | 左侧二维稀疏矩阵，必须位于 NPU。支持 CSR 或已合并的 COO；不支持稠密 Tensor。CSR 的 crow_indices 和 col_indices 支持 int32、int64，COO indices 为 int64。 | float16、bfloat16、float32、complex64 | (M, K) |
-| mat2 | Tensor | 必选 | 右侧二维稀疏矩阵，必须与 mat1 位于同一 NPU，且 dtype、layout 与 mat1 一致。支持 CSR 或已合并的 COO；不支持稠密 Tensor。 | 与 mat1 相同 | (K, N) |
-| reduce | str | 可选 | 归约方式，默认值为 `"sum"`。当前 NPU SpGEMM 路径仅支持默认的 `"sum"`，不支持 `"mean"`、`"amax"` 或 `"amin"`。 | string | - |
+## 输出
 
-输入 values 无需预先保证连续；wrapper 会在当前 NPU 上生成连续视图。CSR 的 int64 索引会在
-调用 ACLSparse 前转换为 int32，因此索引值、shape 和 nnz 必须位于 int32 可表示范围内。
+单个 Tensor：
 
-## 返回值说明
-
-### torch.sparse.mm / torch_npu.sparse.mm
-
-| 参数名 | 参数类型 | 可选/必选 | 描述 | 数据类型 | 维度(shape) |
-|--------|----------|-----------|------|----------|-------------|
-| output | Tensor | 必选 | 新创建的 NPU 稀疏 Tensor，不与输入共用输出 storage。CSR 输入返回 CSR，COO 输入返回已合并的 COO。CSR 输出每行列索引严格升序且无重复坐标；COO 输出为 coalesced。 | 与 mat1、mat2 相同 | (M, N) |
-
-CSR 输出的 crow_indices 和 col_indices 为 int32；COO 输出 indices 为 int64。输出与输入位于
-同一 NPU 和当前 stream。
+- shape：`(M, N)`。
+- dtype：与输入相同。
+- layout：输入为 CSR 时返回 `torch.sparse_csr`；输入为 COO 时返回
+  `torch.sparse_coo`，且已 coalesce（`is_coalesced()` 为 `True`）。
+- device：与输入相同。
+- 索引 dtype：`torch.int32`（无论输入索引是 `int32` 还是 `int64`）。
+- 别名/原地行为：输出的 `crow_indices` / `col_indices` / `values` 均为新分配的存储，
+  **不与 `self`、`mat1`、`mat2` 共享内存**，也不修改任何输入。即使
+  `beta != 0`（此时 `self` 作为 C_in 参与计算），`self` 的数据也保持不变。
 
 ## 约束说明
 
-- 当前接口支持前向计算，不支持 Sparse × Sparse 的反向传播。
-- `mat1`、`mat2` 必须是二维 NPU 稀疏 Tensor，位于同一设备，且 value dtype 完全一致。
-- 仅支持 CSR × CSR 或 COO × COO，不支持 CSR/COO 混合输入、CSC、BSR、BSC、batch 和广播。
-- COO 输入必须已调用 `coalesce()`；未合并的 COO 输入会抛出异常。
-- `mat1.shape[1]` 必须等于 `mat2.shape[0]`。
-- M、K、N、nnzA、nnzB、输出 nnz 和中间乘积数量均不得超过 `INT32_MAX`，同时受可用
-  Device 内存限制。
-- ACLSparse 底层仅支持 int32、零基 CSR。输入 CSR 索引可以是 int64，但所有索引值必须能
-  安全转换到 int32。
-- 当前仅支持非转置矩阵乘，不支持转置或共轭转置参数。
-- 支持输入 nnz 为 0 以及乘积 nnz 为 0；显式零作为结构项保留，不会自动裁剪。
-- 实数 dtype 不接受带非零虚部的标量。complex64 路径的内部 alpha 支持复数。
-- PyTorch 内部 `aten::_sparse_addmm` 路径仅支持 `beta=0`，并要求加数是 nnz 为 0 的 CSR
-  Tensor；该限制不改变 `torch.sparse.mm` 的公开签名。
-- wrapper 使用当前 NPU stream 并异步提交计算，不在接口末尾主动同步。将输出搬到 CPU、
-  读取输出值或释放相关外部资源前，调用方应完成必要的 stream 同步。
-- 首次 NPU 调用会触发 JIT 编译。运行前必须能够找到与目标 SOC 匹配的
-  `libops_sparse.so`；源码构建时可通过 `OPS_SPARSE_LIB_DIR` 指定其目录。
+**dtype**
 
-### 特性参数组
+- 仅支持 `float16` / `bfloat16` / `float32` / `complex64`。其他 dtype（如 `float64`、
+  整型）抛 `RuntimeError`。
+- 三个输入的 dtype 必须完全一致，不做隐式提升；不一致抛 `RuntimeError`。
+- 实数 dtype 上传入虚部非零的 `beta`/`alpha` 抛 `RuntimeError`。
 
-| 特性参数组 | 参数字段名称 |
-| :---: | :---: |
-| 公共参数组 | mat1、mat2、output |
-| 稀疏格式参数组 | layout、crow_indices、col_indices、indices |
-| 数据类型参数组 | values dtype |
-| 归约参数组 | reduce |
-| 设备与执行参数组 | device、stream |
+**layout**
 
-### 基准信息说明
+- `mat1`、`mat2` 必须同为稀疏（CSR 或 COO）。稀疏 × 稠密不走本算子，
+  由 `aten::addmm.out` 承接，本算子不注册该路径。
+- 传入 strided（稠密）Tensor 会抛 `RuntimeError`。
 
-#### 公共参数组
+**transpose**
 
-- 入参为空的场景处理：
-  - nnz 为 0 的合法 CSR/COO 输入支持计算。
-  - 结果没有结构项时，返回 shape 正确、nnz 为 0 的稀疏 Tensor。
+- 仅支持 `op(A)=A`、`op(B)=B`。`ACL_SPARSE_OP_TRANSPOSE` / `CONJUGATE_TRANSPOSE`
+  未实现，适配层固定传 `ACL_SPARSE_OP_NON_TRANSPOSE`，不暴露转置入口。
 
-| 参数 | 单参数校验 | 存在性校验 | 一致性校验 | 特性交叉校验 |
-| --- | --- | --- | --- | --- |
-| mat1 | NPU；二维；CSR 或 coalesced COO；value dtype 为 float16、bfloat16、float32 或 complex64 | 必须存在 | 与 mat2 的 device、dtype、layout 一致 | mat1.shape[1] 等于 mat2.shape[0] |
-| mat2 | NPU；二维；CSR 或 coalesced COO；value dtype 为 float16、bfloat16、float32 或 complex64 | 必须存在 | 与 mat1 的 device、dtype、layout 一致 | mat2.shape[0] 等于 mat1.shape[1] |
-| reduce | 仅支持字符串 `"sum"` | 可选，默认值为 `"sum"` | 无 | 非默认归约不进入当前 SpGEMM 路径 |
-| output | CSR 或 coalesced COO；value dtype 与输入相同 | 必须输出 | device 和 layout 跟随输入 | shape 为 (mat1.shape[0], mat2.shape[1]) |
+**index 类型与规模**
 
-CSR 索引校验：
+- `rows`、`cols`、`nnz` 任一超过 `INT32_MAX` 抛 `RuntimeError`（对应 ACLSparse 的
+  `ACL_SPARSE_STATUS_INSUFFICIENT_RESOURCES`）。
+- 索引基值固定为 0（`ACL_SPARSE_INDEX_BASE_ZERO`）。
 
-| 参数 | 数据类型 | shape | 约束 |
-| --- | --- | --- | --- |
-| crow_indices | int32、int64 | mat1 为 (M+1,)，mat2 为 (K+1,) | 零基、单调非降，末元素等于对应 nnz |
-| col_indices | int32、int64 | 分别为 (nnzA,)、(nnzB,) | 每行索引位于合法列范围内 |
-| output.crow_indices | int32 | (M+1,) | 零基、单调非降，末元素等于 output nnz |
-| output.col_indices | int32 | (output nnz,) | 每行严格升序，无重复坐标 |
+**空 Tensor 与边界 shape**
 
-COO 索引校验：
+- `nnz == 0`（含全空行、无匹配乘积）：正常返回，输出 `nnz == 0`，
+  `crow_indices` 长度仍为 `M+1` 且全为 0。
+- `M == 0` 或 `N == 0`：正常返回对应形状的空稀疏 Tensor。
+- 最小 shape `(1, 1)`：正常计算。
+- 数值抵消为 0 的位置**不被剪除**，作为显式零保留。
 
-| 参数 | 数据类型 | shape | 约束 |
-| --- | --- | --- | --- |
-| mat1.indices | int64 | (2, nnzA) | 输入必须 coalesced，索引位于 (M, K) 范围内 |
-| mat2.indices | int64 | (2, nnzB) | 输入必须 coalesced，索引位于 (K, N) 范围内 |
-| output.indices | int64 | (2, output nnz) | 输出为 coalesced COO |
+**异常类型**
 
-## 确定性计算
+适配层的入参校验统一抛 `RuntimeError`（`TORCH_CHECK`），且在申请任何设备内存
+之前完成；ACLSparse 返回非 `SUCCESS` 时同样抛 `RuntimeError`，消息中带
+`ACLSparse status` 及状态码。
 
-默认支持确定性计算。当前 Torch Extension 固定使用 `ACL_SPARSE_SPGEMM_DEFAULT` 算法；相同
-有效输入、运行环境和 stream 顺序下，输出稀疏结构顺序确定。浮点结果仍受数据类型精度和
-运行环境影响。
+**stream 与同步（重要）**
+
+- 适配层绑定 PyTorch 当前 NPU stream（`c10_npu::getCurrentNPUStream`），
+  支持非默认 stream 与非默认 device；所有输出/workspace 张量都做了
+  `recordStream`，可安全参与 caching allocator 的复用。
+- 调用开始处会提交（submit）torch_npu 异步任务队列中已排队的工作
+  （`NPUStream::stream(true)`）。这**不是** device 同步，只保证适配层内部为
+  ACLSparse 做的索引窄化在库读取之前已下发。
+- **本算子的执行路径含固有的阻塞同步**：SpGEMM 是两趟算法，host 需要读回
+  中间统计量才能继续——
+  - `sparse/spgemm/arch22/spgemm_host.cpp:445`：读回 `rowProducts` 做行装箱；
+  - `sparse/spgemm/arch22/spgemm_host.cpp:571`：读回 `nnz(C)` 以确定输出规模；
+  - `aclsparseSpGEMMWorkEstimation` 执行阶段还会阻塞读回 `crow_indices` 做结构校验。
+
+  这是「输出 `nnz` 在计算前未知」这一算法本质带来的，无法在适配层消除，
+  因此本算子**不满足**"执行路径无主动同步"这一通用要求。调用方应预期
+  `torch.sparse.mm` / `torch.sparse.addmm` 在 NPU 稀疏乘法处存在同步点。
+
+**编译**
+
+- C++ wrapper 由 PyTorch 在**首次 NPU 调用时**JIT 编译（ninja），导入
+  `cann_ops_sparse` 本身不触发编译。链接需要 `libops_sparse.so`：默认从
+  `$ASCEND_HOME_PATH/lib64` 查找，可用 `OPS_SPARSE_LIB_DIR` 指向构建产物目录。
 
 ## 调用示例
 
-- 标准 PyTorch API 调用：
+```python
+import torch
+import torch_npu
+import cann_ops_sparse  # 导入即完成 ATen 注册
 
-  ```python
-  import torch
-  import torch_npu
-  import cann_ops_sparse
+device = "npu:0"
 
-  device = "npu:0"
-  torch.npu.set_device(device)
+dense_a = torch.tensor([[1.0, 2.0], [0.0, 3.0]], device=device)
+a = dense_a.to_sparse_csr()
 
-  matrix = torch.sparse_csr_tensor(
-      torch.tensor([0, 2, 3], dtype=torch.int32, device=device),
-      torch.tensor([0, 1, 1], dtype=torch.int32, device=device),
-      torch.tensor([1.0, 2.0, 3.0], dtype=torch.float32, device=device),
-      size=(2, 2),
-      device=device,
-  )
+# 1) 标准 PyTorch API：稀疏 × 稀疏
+c = torch.sparse.mm(a, a)
+print(c.layout, c.crow_indices(), c.col_indices(), c.values())
 
-  output = torch.sparse.mm(matrix, matrix)
-  torch.npu.synchronize()
+# 2) 带累加与缩放：C = 2 * b + 3 * (a @ a)
+b = torch.tensor([[1.0, 0.0], [0.0, 1.0]], device=device).to_sparse_csr()
+c = torch.sparse.addmm(b, a, a, beta=2.0, alpha=3.0)
+print(c.to_dense())
 
-  print(output.crow_indices().cpu())  # tensor([0, 2, 3], dtype=torch.int32)
-  print(output.col_indices().cpu())   # tensor([0, 1, 1], dtype=torch.int32)
-  print(output.values().cpu())        # tensor([1., 8., 9.])
-  ```
+# 3) COO 布局
+a_coo = a.to_sparse(layout=torch.sparse_coo)
+c_coo = torch.sparse.mm(a_coo, a_coo)
+print(c_coo.layout, c_coo.is_coalesced(), c_coo.indices(), c_coo.values())
 
-- `torch_npu.sparse` façade 调用：
-
-  ```python
-  import torch
-  import torch_npu
-  import cann_ops_sparse
-
-  device = "npu:0"
-  torch.npu.set_device(device)
-
-  indices = torch.tensor(
-      [[0, 0, 1], [0, 1, 1]], dtype=torch.int64, device=device
-  )
-  values = torch.tensor([1.0, 2.0, 3.0], dtype=torch.float32, device=device)
-  matrix = torch.sparse_coo_tensor(indices, values, (2, 2), device=device).coalesce()
-
-  output = torch_npu.sparse.mm(matrix, matrix)
-  torch.npu.synchronize()
-
-  print(output.indices().cpu())  # tensor([[0, 0, 1], [0, 1, 1]])
-  print(output.values().cpu())   # tensor([1., 8., 9.])
-  ```
+# 4) torch_npu.sparse façade（与 1)、2) 等价）
+c = torch_npu.sparse.mm(a, a)
+c = torch_npu.sparse.addmm(b, a, a, beta=2.0, alpha=3.0)
+```
