@@ -52,6 +52,13 @@
 | [aclsparseSpMMGetBufferSize](#aclsparsespmmgetbuffersize) | 获取SpMM缓冲区大小 |
 | [aclsparseSpMMPreprocess](#aclsparsespmmpreprocess) | SpMM预处理 |
 | [aclsparseSpMM](#aclsparsespmm) | 稀疏矩阵-稠密矩阵乘法 |
+| [aclsparseSpMMOp_bufferSize](#aclsparsespmmop_buffersize) | 获取 workspace 大小 |
+| [aclsparseSpMMOp_createDescr](#aclsparsespmmop_createdescr) | 创建描述符并执行预处理 |
+| [aclsparseSpMMOp_destroyDescr](#aclsparsespmmop_destroydescr) | 销毁描述符 |
+| [aclsparseSpMMOp_createPlan](#aclsparsespmmop_createplan) | 创建执行计划 |
+| [aclsparseSpMMOp_destroyPlan](#aclsparsespmmop_destroyplan) | 销毁执行计划 |
+| [aclsparseSpMMOp_setGlobalUserData](#aclsparsespmmop_setglobaluserdata) | 设置 epilogue 用户数据（NPU 侧为 no-op） |
+| [aclsparseSpMMOp](#aclsparsespmmop) | 稀疏矩阵-稠密矩阵乘法（descriptor/plan 生命周期模式） |
 | [aclsparseSgtsv2](#aclsparsesgtsv2) | 三对角线性方程组带选主元求解（FP32，Multiple RHS） |
 | [aclsparseSgtsv2_bufferSizeExt](#aclsparsesgtsv2_buffersizeext) | 查询 aclsparseSgtsv2 所需工作区大小 |
 | [aclsparseXcscsort_bufferSizeExt](#aclsparsexcscsort_buffersizeext) | 获取CSC排序缓冲区大小 |
@@ -1274,6 +1281,220 @@ aclsparseStatus_t aclsparseSpMM(
 
 ---
 
+### aclsparseSpMMOp_bufferSize
+
+```c
+aclsparseStatus_t aclsparseSpMMOp_bufferSize(
+    aclsparseHandle_t handle,
+    aclsparseOperation_t opA,
+    aclsparseOperation_t opB,
+    aclsparseConstSpMatDescr_t matA,
+    aclsparseConstDnMatDescr_t matB,
+    aclsparseDnMatDescr_t matC,
+    aclDataType computeType,
+    aclsparseSpMMOpAlg_t alg,
+    size_t *bufferSize);
+```
+
+**功能**：获取 SpMMOp 所需 workspace 大小（字节数）。ALG1 / DEFAULT 返回 0（无需 workspace）；ALG2 返回 reorder 表 + bin_edge 表（含对齐开销）的总大小。
+
+SpMMOp 系列 7 个接口遵循 descriptor/plan 生命周期模式，调用顺序必须为：`aclsparseSpMMOp_bufferSize` → `aclsparseSpMMOp_createDescr` → `aclsparseSpMMOp_createPlan` → [可选 `aclsparseSpMMOp_setGlobalUserData`] → `aclsparseSpMMOp`（可重复执行）→ `aclsparseSpMMOp_destroyPlan` → `aclsparseSpMMOp_destroyDescr`。
+
+**参数说明**：
+
+- `handle`（IN）：HOST，aclsparse 句柄。
+- `opA`（IN）：HOST，稀疏矩阵 A 的操作类型，仅支持 `ACL_SPARSE_OP_NON_TRANSPOSE`。
+- `opB`（IN）：HOST，稠密矩阵 B 的操作类型，支持 `ACL_SPARSE_OP_NON_TRANSPOSE` / `ACL_SPARSE_OP_TRANSPOSE`。
+- `matA`（IN）：HOST，CSR 稀疏矩阵 A 的描述符。
+- `matB`（IN）：HOST，输入稠密矩阵 B 的描述符（不可为 NULL）。
+- `matC`（IN）：HOST，稠密矩阵 C 的描述符（不可为 NULL；签名为非 const 的 `aclsparseDnMatDescr_t`，与执行阶段的 in-place 语义一致）。
+- `computeType`（IN）：HOST，计算类型，仅支持 `ACL_FLOAT`。
+- `alg`（IN）：HOST，SpMMOp 算法类型。
+- `bufferSize`（OUT）：HOST，返回所需 workspace 字节数。
+
+**返回值**：
+
+- `ACL_SPARSE_STATUS_SUCCESS`：成功
+- 其他值：失败
+
+---
+
+### aclsparseSpMMOp_createDescr
+
+```c
+aclsparseStatus_t aclsparseSpMMOp_createDescr(
+    aclsparseHandle_t handle,
+    aclsparseSpMMOpDescr_t *descr,
+    aclsparseOperation_t opA,
+    aclsparseOperation_t opB,
+    aclsparseConstSpMatDescr_t matA,
+    aclsparseConstDnMatDescr_t matB,
+    aclsparseDnMatDescr_t matC,
+    aclDataType computeType,
+    aclsparseSpMMOpAlg_t alg,
+    void *buffer);
+```
+
+**功能**：创建 SpMMOp 内部描述符并执行预处理，绑定 matA / opB / alg。matA 的 CSR 指针以弱引用存入 descr（CSR pattern 固定用于 plan 生命周期）；opB 在此阶段绑定，plan 生命周期内固定。ALG2 在此阶段**同步**执行 host 侧预处理（D2H 读取 rowOffsets → `std::stable_sort` 排序 → 计算 bin_edge 负载均衡切分 → H2D 写入 workspace）；DEFAULT 归一化为 ALG1。
+
+**参数说明**：
+
+- `handle`（IN）：HOST，aclsparse 句柄。
+- `descr`（OUT）：HOST，输出的 SpMMOp 描述符。
+- `opA`（IN）：HOST，稀疏矩阵 A 的操作类型，仅支持 `ACL_SPARSE_OP_NON_TRANSPOSE`。
+- `opB`（IN）：HOST，稠密矩阵 B 的操作类型，支持 `ACL_SPARSE_OP_NON_TRANSPOSE` / `ACL_SPARSE_OP_TRANSPOSE`。
+- `matA`（IN）：HOST，CSR 稀疏矩阵 A 的描述符。
+- `matB`（IN）：HOST，输入稠密矩阵 B 的描述符（可为 NULL）。
+- `matC`（IN）：HOST，稠密矩阵 C 的描述符（可为 NULL）。
+- `computeType`（IN）：HOST，计算类型，仅支持 `ACL_FLOAT`。
+- `alg`（IN）：HOST，SpMMOp 算法类型。
+- `buffer`（IN）：DEVICE，workspace 缓冲区，由调用者先经 `aclsparseSpMMOp_bufferSize` 查询大小并分配（ALG2 必需）。
+
+**约束说明**：
+
+- ALG2 时 `buffer` 不可为 NULL 且大小不小于 `aclsparseSpMMOp_bufferSize` 返回值；`buffer` 须在 descr 销毁前保持有效。
+- ALG1 允许在不重建 descr/plan 的情况下原地更新 csrValues 指向的数据；ALG2 下原地修改 csrValues 为不受支持的未定义行为（调用方责任，无运行时检测）；修改 CSR 结构（rowOffsets / colInd）会使 reorder / bin_edge 失效。
+- CSR 内容契约（colInd 值域 ∈ [indexBase, indexBase+k)、rowOffsets 单调不减、rowOffsets[0] 与 rowOffsets[m] 与 nnz 一致）由调用方保证，库不做运行时校验。
+
+**返回值**：
+
+- `ACL_SPARSE_STATUS_SUCCESS`：成功
+- 其他值：失败
+
+---
+
+### aclsparseSpMMOp_destroyDescr
+
+```c
+aclsparseStatus_t aclsparseSpMMOp_destroyDescr(aclsparseSpMMOpDescr_t descr);
+```
+
+**功能**：销毁 SpMMOp 描述符并释放其管理的 host 资源。幂等语义：`descr` 为 nullptr 时直接返回 SUCCESS。必须先调用 `aclsparseSpMMOp_destroyPlan` 销毁执行计划，再调用本接口销毁描述符。
+
+**参数说明**：
+
+- `descr`（IN）：HOST，要销毁的 SpMMOp 描述符。
+
+**返回值**：
+
+- `ACL_SPARSE_STATUS_SUCCESS`：成功
+- 其他值：失败
+
+---
+
+### aclsparseSpMMOp_createPlan
+
+```c
+aclsparseStatus_t aclsparseSpMMOp_createPlan(
+    aclsparseHandle_t handle,
+    aclsparseSpMMOpDescr_t descr,
+    aclsparseSpMMOpPlan_t *plan,
+    const void *epilogueLTOBuffer,
+    size_t epilogueLTOBufferSize);
+```
+
+**功能**：基于 descr 创建执行计划。NPU 侧 epilogue 固定为 identity（不附加任何 elementwise 操作），`epilogueLTOBuffer` 必须为 NULL、`epilogueLTOBufferSize` 必须为 0，否则返回 `ACL_SPARSE_STATUS_NOT_SUPPORTED`。
+
+**参数说明**：
+
+- `handle`（IN）：HOST，aclsparse 句柄。
+- `descr`（IN）：HOST，来自 `aclsparseSpMMOp_createDescr` 的描述符（非 const，对标 cuSPARSE 语义，createPlan 可修改 descr）。
+- `plan`（OUT）：HOST，输出的执行计划。
+- `epilogueLTOBuffer`（IN）：HOST，epilogue LTO-IR 缓冲区，NPU 侧必须为 NULL。
+- `epilogueLTOBufferSize`（IN）：HOST，epilogue LTO-IR 大小（字节），NPU 侧必须为 0。
+
+**返回值**：
+
+- `ACL_SPARSE_STATUS_SUCCESS`：成功
+- 其他值：失败
+
+---
+
+### aclsparseSpMMOp_destroyPlan
+
+```c
+aclsparseStatus_t aclsparseSpMMOp_destroyPlan(aclsparseSpMMOpPlan_t plan);
+```
+
+**功能**：销毁 SpMMOp 执行计划。幂等语义：`plan` 为 nullptr 时直接返回 SUCCESS。必须先于 `aclsparseSpMMOp_destroyDescr` 调用，否则 plan 内部弱引用的 descr 成为悬垂指针。
+
+**参数说明**：
+
+- `plan`（IN）：HOST，要销毁的执行计划。
+
+**返回值**：
+
+- `ACL_SPARSE_STATUS_SUCCESS`：成功
+- 其他值：失败
+
+---
+
+### aclsparseSpMMOp_setGlobalUserData
+
+```c
+aclsparseStatus_t aclsparseSpMMOp_setGlobalUserData(
+    aclsparseHandle_t handle,
+    aclsparseSpMMOpPlan_t plan,
+    const char *epilogueDataName,
+    void *epilogueData,
+    size_t epilogueDataSize);
+```
+
+**功能**：将 epilogue 模块中 `__constant__` 变量设置为指定数据（对标 cuSPARSE）。NPU 侧使用 identity epilogue，无需辅助数据，本接口为 no-op：仅校验参数一致性（`epilogueData` 与 `epilogueDataSize` 须同时有效或同时无效）后直接返回 SUCCESS。
+
+**参数说明**：
+
+- `handle`（IN）：HOST，aclsparse 句柄。
+- `plan`（IN）：HOST，执行计划。
+- `epilogueDataName`（IN）：HOST，epilogue 数据变量名。
+- `epilogueData`（IN）：HOST，epilogue 数据指针。
+- `epilogueDataSize`（IN）：HOST，数据字节数。
+
+**返回值**：
+
+- `ACL_SPARSE_STATUS_SUCCESS`：成功
+- 其他值：失败
+
+---
+
+### aclsparseSpMMOp
+
+```c
+aclsparseStatus_t aclsparseSpMMOp(
+    aclsparseHandle_t handle,
+    aclsparseSpMMOpPlan_t plan,
+    const void *alpha,
+    const void *beta,
+    aclsparseConstDnMatDescr_t matB,
+    aclsparseDnMatDescr_t matC);
+```
+
+**功能**：执行稀疏矩阵-稠密矩阵乘法：`C = alpha * op(A) * op(B) + beta * C`，其中 A 为 CSR(m×k) 稀疏矩阵，B 为稠密矩阵，C 为稠密矩阵（in-place：读入 `beta * C` 并写出结果）。**异步执行**：kernel 入队到 handle 关联的 stream 后函数立即返回，同步由调用方通过 stream 负责。`matB` / `matC` 在 execute 阶段传入，可跨多次 execute 更换（n / ldb / ldc / order 可变），但 m / k / opB 必须与 descr 绑定值一致。
+
+**参数说明**：
+
+- `handle`（IN）：HOST，aclsparse 句柄。
+- `plan`（IN）：HOST，执行计划。
+- `alpha`（IN）：HOST/DEVICE，标量 alpha（FP32；指针模式由 `aclsparseSetPointerMode` 决定）。
+- `beta`（IN）：HOST/DEVICE，标量 beta（FP32；指针模式由 `aclsparseSetPointerMode` 决定）。
+- `matB`（IN）：HOST，输入稠密矩阵 B 的描述符。
+- `matC`（IN/OUT）：HOST，输入/输出稠密矩阵 C 的描述符（in-place）。
+
+**约束说明**：
+
+- `opA` 仅支持 `ACL_SPARSE_OP_NON_TRANSPOSE`；`opB` 支持 `ACL_SPARSE_OP_NON_TRANSPOSE` / `ACL_SPARSE_OP_TRANSPOSE`。
+- dtype 支持 FP32 / FP16，matA / matB / matC 的 valueType 必须一致；累加固定 FP32（FP16 输出时饱和截断到 ±65504，避免 Inf/NaN）；computeType 固定 `ACL_FLOAT`。
+- matB / matC 独立支持 `ACL_SPARSE_ORDER_ROW` / `ACL_SPARSE_ORDER_COL` 主序。
+- ALG1 / ALG2 均保证 bit-wise 可重复结果。
+- 维度与 stride 上限：m / k / n 及 matB.ld / matC.ld 超过 INT32_MAX 返回 `ACL_SPARSE_STATUS_NOT_SUPPORTED`；stride 上限按 dtype 约束——FP32 为 UINT32_MAX / 4、FP16 为 UINT32_MAX / 2（ld 以元素计），超限返回 `ACL_SPARSE_STATUS_NOT_SUPPORTED`。
+
+**返回值**：
+
+- `ACL_SPARSE_STATUS_SUCCESS`：成功
+- 其他值：失败
+
+---
+
 ### aclsparseSgtsv2
 
 ```cpp
@@ -1633,6 +1854,17 @@ SpMM算法枚举：
 | `ACL_SPARSE_SPMM_ALG_DEFAULT` | 默认算法，推荐使用；当前版本对 CSR 格式走 SIMT/AIV 实现 |
 | `ACL_SPARSE_SPMM_CSR_ALG1` | CSR 算法 1，显式指定 CSR 路径；当前版本与 DEFAULT 同一实现 |
 | `ACL_SPARSE_SPMM_CSR_FP32_HIGH_PRECISION_ALG` | fp32 高精度算法；同一 SIMT Kernel，fp32 累加使用 Kahan 补偿求和；仅对 fp32 生效 |
+
+### aclsparseSpMMOpAlg_t
+
+SpMMOp算法枚举：
+
+| 枚举值 | 说明 |
+|--------|------|
+| `ACL_SPARSE_SPMMOP_ALG_DEFAULT` | 默认算法，归一化为 ALG1，无 workspace |
+| `ACL_SPARSE_SPMMOP_ALG1` | 确定性算法；host 侧静态均匀行切分，无 workspace，支持不重建 descr/plan 原地更新 CSR 值数组 |
+| `ACL_SPARSE_SPMMOP_ALG2` | 确定性算法；host 侧 merge sort（`std::stable_sort`）+ bin_edge 按每行 nnz 负载均衡切分，需要 workspace，不支持原地更新 CSR 值 |
+| `ACL_SPARSE_SPMMOP_ALG1_HIGH_PRECISION` | FP32 Kahan 补偿求和高精度算法；仅 FP32 dtype 生效（FP16 静默忽略，退化为 ALG1 行为）；workspace 语义同 ALG1（无 workspace） |
 
 ### aclsparseOrder_t
 
