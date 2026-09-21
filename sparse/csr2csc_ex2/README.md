@@ -4,7 +4,7 @@
 
 ## 功能描述
 
-`aclsparseCsr2cscEx2` 算子用于将 CSR（Compressed Sparse Row）格式的稀疏矩阵转换为 CSC（Compressed Sparse Column）格式，等价于稀疏矩阵转置：`CSC = CSR^T`。对于 CSR 矩阵中的每个非零元素 `(i, j, v)`，在 CSC 矩阵中对应位置为 `(j, i, v)`；输出的 `cscColPtr` 为列偏移数组，`cscRowInd` 为行索引数组，`cscVal` 为非零值数组，输出列内行索引升序排列。
+`aclsparseCsr2cscEx2` 算子用于将同一个逻辑 `m x n` 稀疏矩阵从 CSR（Compressed Sparse Row）格式转换为 CSC（Compressed Sparse Column）格式；这不是数学转置。每个非零元素的逻辑坐标 `(i, j, v)` 保持不变：它在输出 CSC 的第 `j` 列中仍以行索引 `i` 保存。输出的 `cscColPtr` 为长度 `n + 1` 的列偏移数组，`cscRowInd` 为行索引数组，`cscVal` 为非零值数组，输出列内行索引升序排列。
 
 该接口为 Legacy API 中的 type-generic 接口，通过 `valType` 参数分发数据类型（不使用 MatDescr），支持 INT8 / FP16 / BF16 / FP32 四种数据类型；支持 0-based 与 1-based 两种索引基址；支持 SYMBOLIC（仅计算结构）与 NUMERIC（计算结构并拷贝值）两种操作模式。转换仅涉及索引重排与数据搬运，不涉及浮点运算，输出与参考实现逐 bit 一致（位精确）。
 
@@ -53,8 +53,8 @@ aclsparseStatus_t aclsparseCsr2cscEx2(
 | 参数 | 内存位置 | 方向 | 类型 | 说明 |
 |------|----------|------|------|------|
 | handle | Host | 输入 | aclsparseHandle_t | ops-sparse 库上下文句柄，携带 stream 等信息，不可为 nullptr |
-| m | Host | 输入 | int | CSR 矩阵行数 / CSC 矩阵列数，m >= 0 |
-| n | Host | 输入 | int | CSR 矩阵列数 / CSC 矩阵行数，n >= 0 |
+| m | Host | 输入 | int | 逻辑矩阵行数，m >= 0 |
+| n | Host | 输入 | int | 逻辑矩阵列数；`cscColPtr` 长度为 n+1，n >= 0 |
 | nnz | Host | 输入 | int | 非零元素个数，nnz >= 0 |
 | csrVal | Device | 输入 | const void* | CSR 非零元素值数组，长度为 nnz（本函数不读取，可为 nullptr） |
 | csrRowPtr | Device | 输入 | const int* | CSR 行偏移数组，长度为 m+1（本函数不读取，可为 nullptr） |
@@ -73,8 +73,8 @@ aclsparseStatus_t aclsparseCsr2cscEx2(
 | 参数 | 内存位置 | 方向 | 类型 | 说明 |
 |------|----------|------|------|------|
 | handle | Host | 输入 | aclsparseHandle_t | ops-sparse 库上下文句柄，携带 stream 等信息，不可为 nullptr |
-| m | Host | 输入 | int | CSR 矩阵行数 / CSC 矩阵列数，m >= 0 |
-| n | Host | 输入 | int | CSR 矩阵列数 / CSC 矩阵行数，n >= 0 |
+| m | Host | 输入 | int | 逻辑矩阵行数，m >= 0 |
+| n | Host | 输入 | int | 逻辑矩阵列数；`cscColPtr` 长度为 n+1，n >= 0 |
 | nnz | Host | 输入 | int | 非零元素个数，nnz >= 0 |
 | csrVal | Device | 输入 | const void* | CSR 非零元素值数组，长度为 nnz；nnz > 0 且 copyValues == NUMERIC 时不可为 nullptr |
 | csrRowPtr | Device | 输入 | const int* | CSR 行偏移数组，长度为 m+1；m > 0 时不可为 nullptr。输入数据合法性为调用方前置条件：必须非降且 csrRowPtr[m] - idxBase == nnz，算子不对输入数据内容做边界校验 |
