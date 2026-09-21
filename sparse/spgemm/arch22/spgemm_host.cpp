@@ -904,12 +904,12 @@ static aclsparseStatus_t PrepareComputeTiling(const StageContext &ctx,
     return UploadScratchBase(arch22ctx, plan.ws1, buf1, plan.N, plan.blockDim);
 }
 
-// 空结构判定：M/K/N 任一为 0，或（A/B 无非零元且 beta 为 0）→ nnz(C) 必为 0。
-static bool IsComputeDegenerate(const StageContext &ctx,
-                                aclsparseSpGEMMDescr_t spgemmDescr, const ComputePlan &plan,
+// 空结构判定：M/N 为 0，或（A/B 无非零元且 beta 为 0）→ nnz(C) 必为 0。
+// K 为 0 时，beta != 0 仍须保留并缩放 C_in，不能走清零路径。
+static bool IsComputeDegenerate(const StageContext &ctx, const ComputePlan &plan,
                                 bool betaNonZero)
 {
-    return (plan.M == 0) || (spgemmDescr->k == 0) || (plan.N == 0) ||
+    return (plan.M == 0) || (plan.N == 0) ||
            ((ctx.a->nnz == 0 || ctx.b->nnz == 0) && !betaNonZero);
 }
 
@@ -1013,8 +1013,8 @@ aclsparseStatus_t aclsparseSpGEMMCompute(
     void *cColIdxIn = betaNonZero ? ctx.c->idxs : nullptr;
     void *cValuesIn = betaNonZero ? ctx.c->values : nullptr;
 
-    // 退化场景：M/K/N 任一为 0，或（A/B 无非零元且 beta 为 0）→ nnz(C) 必为 0。
-    if (IsComputeDegenerate(ctx, spgemmDescr, plan, betaNonZero)) {
+    // 退化场景：M/N 为 0，或（A/B 无非零元且 beta 为 0）→ nnz(C) 必为 0。
+    if (IsComputeDegenerate(ctx, plan, betaNonZero)) {
         return FinishDegenerateCompute(ctx, spgemmDescr, buf2, plan);
     }
     return RunSpgemmKernels(ctx, spgemmDescr, plan, buf1, buf2, cRowPtrIn, cColIdxIn,

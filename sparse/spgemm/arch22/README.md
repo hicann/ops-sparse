@@ -96,7 +96,9 @@ complex64 的 `accBytes` 为 8，故 `chunkWidth` 自动缩小。UB 占用固定
 
 | 场景 | 处理 |
 |------|------|
-| M=0 或 N=0 或 K=0 | `rowOffsets` 全零，`nnz(C)=0`，不启动符号/数值 Kernel |
+| M=0 或 N=0 | `rowOffsets` 全零，`nnz(C)=0`，不启动符号/数值 Kernel |
+| K=0 且 beta=0 | 同上 |
+| K=0 且 beta!=0 | 保留 `C_in` 的 CSR 结构，`nnz(C)=nnz(C_in)`，数值为 `beta*C_in` |
 | nnz(A)=0 或 nnz(B)=0（且 beta=0） | 同上 |
 | A 某行为空 | `rowNnz[i]=0`，归并直接跳过 |
 | B 中被引用行为空 | 该段长度 0，归并自动忽略 |

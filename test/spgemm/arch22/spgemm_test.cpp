@@ -1022,6 +1022,33 @@ bool TestBetaStructuralUnion(aclsparseHandle_t handle, aclDataType dt)
     return true;
 }
 
+/** K=0 且 beta != 0 时，输出必须保留并缩放 C_in。 */
+bool TestKZeroWithNonzeroBetaPreservesCIn(aclsparseHandle_t handle)
+{
+    SpgemmRefCsr a, b, cIn;
+    BuildBetaTestMatrices(a, b, cIn);
+    a.cols = 0;
+    a.rowPtr = {0, 0, 0};
+    a.colIdx.clear();
+    a.valRe.clear();
+    a.valIm.clear();
+    b.rows = 0;
+    b.rowPtr = {0};
+    b.colIdx.clear();
+    b.valRe.clear();
+    b.valIm.clear();
+
+    float alpha = 1.0f;
+    float beta = 2.0f;
+    HostResult got;
+    if (!RunSpgemmStages(handle, a, b, &cIn, ACL_FLOAT, ACL_SPARSE_SPGEMM_DEFAULT,
+                         &alpha, &beta, got, nullptr)) {
+        return false;
+    }
+    const SpgemmRefCsr ref = SpgemmRefCompute(a, b, 1.0, 0.0, 2.0, 0.0, &cIn, false);
+    return CompareResult(got, ref, ACL_FLOAT, "k-zero-beta-preserves-c-in");
+}
+
 /** 长尾行分布：少数行 P_i 极大，触发列分块兜底路径。 */
 bool TestLongTail(aclsparseHandle_t handle, aclDataType dt)
 {
@@ -2456,6 +2483,10 @@ TEST_F(SpGemmArch22Test, ComplexVecEmit) {
 TEST_F(SpGemmArch22Test, BetaStructuralUnion) {
     EXPECT_TRUE(TestBetaStructuralUnion(s_handle_, ACL_FLOAT));
     EXPECT_TRUE(TestBetaStructuralUnion(s_handle_, ACL_COMPLEX64));
+}
+
+TEST_F(SpGemmArch22Test, KZeroWithNonzeroBetaPreservesCIn) {
+    EXPECT_TRUE(TestKZeroWithNonzeroBetaPreservesCIn(s_handle_));
 }
 
 // ---- Beta with chunked algorithm ----
