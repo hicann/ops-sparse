@@ -15,9 +15,34 @@
 #include "sddmm_npu_wrapper.h"
 #include "sddmm_param.h"
 
+#include <limits>
 #include <random>
 
 using namespace sparse_test;
+
+TEST(VerifierRegressionTest, RejectsNonFiniteMismatchInAbsAndRelModes)
+{
+    const std::vector<float> finite = {1.0f};
+    const std::vector<float> nan = {std::numeric_limits<float>::quiet_NaN()};
+    const std::vector<float> posInf = {std::numeric_limits<float>::infinity()};
+    const std::vector<float> negInf = {-std::numeric_limits<float>::infinity()};
+
+    for (PrecisionMode mode : {PrecisionMode::ABS, PrecisionMode::REL}) {
+        VerifyConfig cfg;
+        cfg.SetMode(mode).SetAbsTol(1.0).SetRelTol(1.0);
+        EXPECT_FALSE(Verifier::verifyVector(nan, finite, cfg, "nan-vs-finite"));
+        EXPECT_FALSE(Verifier::verifyVector(finite, nan, cfg, "finite-vs-nan"));
+        EXPECT_FALSE(Verifier::verifyVector(posInf, negInf, cfg, "inf-sign-mismatch"));
+    }
+}
+
+TEST(VerifierRegressionTest, ComparesIntegralVectorsWithoutFloatNarrowing)
+{
+    const std::vector<int32_t> output = {16777216};
+    const std::vector<int32_t> golden = {16777217};
+    VerifyConfig cfg;
+    EXPECT_FALSE(Verifier::verifyVector(output, golden, cfg, "int32-low-bit-mismatch"));
+}
 
 static std::vector<double> Fp16ToDoubles(const std::vector<uint16_t>& v) {
     std::vector<double> out(v.size());

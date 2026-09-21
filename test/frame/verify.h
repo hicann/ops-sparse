@@ -18,6 +18,7 @@
 #include <iostream>
 #include <memory>
 #include <string>
+#include <type_traits>
 #include <vector>
 
 #include "acl/acl.h"
@@ -76,6 +77,13 @@ public:
     explicit AbsStrategy(double absTol) : absTol_(absTol) {}
 protected:
     void processElement(float outVal, float goldVal) override {
+        // Equality (including equal infinities) was handled by shouldSkip().
+        // A remaining non-finite value is necessarily a mismatch; comparing it
+        // with a tolerance would otherwise yield false for NaN and hide it.
+        if (!std::isfinite(outVal) || !std::isfinite(goldVal)) {
+            failCount_++;
+            return;
+        }
         if (std::abs(outVal - goldVal) > absTol_) failCount_++;
     }
     bool reportResult(size_t count, size_t /*skippedCount*/, const std::string& caseId) override {
@@ -94,11 +102,15 @@ public:
     RelStrategy(double relTol, double eps) : relTol_(relTol), eps_(eps) {}
 protected:
     void processElement(float outVal, float goldVal) override {
+        if (!std::isfinite(outVal) || !std::isfinite(goldVal)) {
+            hasNonFiniteMismatch_ = true;
+            return;
+        }
         double relErr = std::abs(outVal - goldVal) / (std::abs(goldVal) + eps_);
         if (relErr > maxRelErr_) maxRelErr_ = relErr;
     }
     bool reportResult(size_t /*count*/, size_t /*skippedCount*/, const std::string& caseId) override {
-        bool pass = (maxRelErr_ < relTol_);
+        bool pass = !hasNonFiniteMismatch_ && (maxRelErr_ < relTol_);
         std::cout << "[" << caseId << "] " << (pass ? "PASSED" : "FAILED")
                   << " (maxRelErr=" << maxRelErr_ << ", relTol=" << relTol_ << ")" << std::endl;
         return pass;
@@ -107,6 +119,7 @@ private:
     double relTol_;
     double eps_;
     double maxRelErr_ = 0.0;
+    bool hasNonFiniteMismatch_ = false;
 };
 
 class MereMareStrategy : public VerifyStrategy {
@@ -314,6 +327,22 @@ private:
 
 class Verifier {
 public:
+    // Preserve integer values while comparing them.  Converting int32 values
+    // to float first loses the low bit at and above 2^24.
+    template <typename T, typename std::enable_if_t<std::is_integral_v<T>, int> = 0>
+    static bool verifyVector(const std::vector<T>& output, const std::vector<T>& golden,
+                             const VerifyConfig& /*cfg*/, const std::string& caseId) {
+        if (output.size() != golden.size()) {
+            std::cout << "[" << caseId << "] FAILED: size mismatch, output=" << output.size()
+                      << " golden=" << golden.size() << std::endl;
+            return false;
+        }
+        const bool pass = std::equal(output.begin(), output.end(), golden.begin());
+        std::cout << "[" << caseId << "] " << (pass ? "PASSED" : "FAILED")
+                  << " (integer exact match)" << std::endl;
+        return pass;
+    }
+
     static bool verifyVector(const std::vector<float>& output, const std::vector<float>& golden,
                              const VerifyConfig& cfg, const std::string& caseId) {
         if (output.size() != golden.size()) {
