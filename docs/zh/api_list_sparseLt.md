@@ -2,7 +2,7 @@
 
 ## 使用说明
 
-为方便调用 2:4 结构化稀疏相关算子，提供一套基于 C 的 API（以 aclsparseLt 为前缀），主要用于结构化稀疏矩阵乘法及其前置剪枝、压缩等场景。
+为方便调用结构化稀疏相关算子，提供一套基于 C 的 API（以 aclsparseLt 为前缀），主要用于结构化稀疏矩阵乘法及其前置剪枝、压缩等场景。
 
 调用 aclsparseLt 算子 API 时，需引用依赖的头文件和库文件。
 
@@ -39,8 +39,8 @@
 | [aclsparseLtMatmulSearch](#aclsparseltmatmulsearch) | 搜索最优 matmul 算法（**暂未支持**） |
 | [aclsparseLtSpMMAPrune](#aclsparseltspmmaprune) | 对稠密矩阵执行 2:4 结构化稀疏剪枝 |
 | [aclsparseLtSpMMAPruneCheck](#aclsparseltspmmaprunecheck) | 校验稠密矩阵是否已满足 2:4 结构化稀疏约束（**暂未支持**） |
-| [aclsparseLtSpMMACompressedSize](#aclsparseltspmmacompressedsize) | 查询压缩后矩阵所需存储大小（**暂未支持**） |
-| [aclsparseLtSpMMACompress](#aclsparseltspmmacompress) | 将 2:4 稀疏矩阵压缩为紧凑存储（**暂未支持**） |
+| [aclsparseLtSpMMACompressedSize](#aclsparseltspmmacompressedsize) | 查询压缩后矩阵及临时空间所需存储大小（Ascend950） |
+| [aclsparseLtSpMMACompress](#aclsparseltspmmacompress) | 将结构化稀疏矩阵压缩为紧凑存储（Ascend950） |
 
 ## 接口详情
 
@@ -822,60 +822,64 @@ aclsparseStatus_t aclsparseLtSpMMAPruneCheck(
 
 ### aclsparseLtSpMMACompressedSize
 
-> **支持状态**：暂未支持。当前版本尚未实现。
-
 ```c
 aclsparseStatus_t aclsparseLtSpMMACompressedSize(
-    aclsparseLtConstHandle_t handle,
-    aclsparseLtConstMatmulDescriptor_t* matmulDescr,
-    size_t* compressedSize);
+    const aclsparseLtHandle_t* handle,
+    const aclsparseLtMatmulPlan_t* plan,
+    size_t* compressedSize,
+    size_t* compressBufferSize);
 ```
 
-**功能**：查询 2:4 结构化稀疏矩阵压缩后所需的存储大小（字节），用于在调用 `aclsparseLtSpMMACompress` 前分配 Device 内存。
+**功能**：查询结构化稀疏矩阵压缩后及临时空间所需的存储大小（字节），用于在调用 `aclsparseLtSpMMACompress` 前分配 Device 内存。
 
 **参数说明**：
 
 - `handle`（IN）：HOST，aclsparseLt 库句柄。
-- `matmulDescr`（IN）：HOST，Matmul 操作描述符，从中读取稀疏侧矩阵的维度、数据类型等信息。
+- `plan`（IN）：HOST，已初始化的执行计划，从中读取稀疏侧矩阵的描述符和操作类型。
 - `compressedSize`（OUT）：HOST，返回压缩后矩阵所需的存储大小（字节）。
+- `compressBufferSize`（OUT）：HOST，返回压缩临时空间大小（字节），当前为 0。
 
 **返回值**：
 
 - `ACL_SPARSE_STATUS_SUCCESS`：成功
-- `ACL_SPARSE_STATUS_HANDLE_IS_NULLPTR`：handle 为空指针
-- `ACL_SPARSE_STATUS_INVALID_VALUE`：matmulDescr 为空、compressedSize 为空
+- `ACL_SPARSE_STATUS_HANDLE_IS_NULLPTR`：handle 或其内部句柄为空指针
+- `ACL_SPARSE_STATUS_INVALID_VALUE`：plan 无效、输出指针为空或矩阵参数不合法
+
+完整返回码及约束见 [SpMMACompress 算子说明](../../sparseLt/spmma_compress/README.md)。
 
 ---
 
 ### aclsparseLtSpMMACompress
 
-> **支持状态**：暂未支持。当前版本尚未实现。
-
 ```c
 aclsparseStatus_t aclsparseLtSpMMACompress(
-    aclsparseLtConstHandle_t handle,
-    aclsparseLtConstMatmulDescriptor_t* matmulDescr,
-    const void* d_in,
-    void* d_out,
+    const aclsparseLtHandle_t* handle,
+    const aclsparseLtMatmulPlan_t* plan,
+    const void* d_dense,
+    void* d_compressed,
+    void* d_compressed_buffer,
     aclrtStream stream);
 ```
 
-**功能**：将已剪枝的 2:4 稀疏矩阵压缩为紧凑存储，压缩结果用作 `aclsparseLtMatmul` / `aclsparseLtMatmulSearch` 中稀疏侧矩阵（A 或 B）的输入。输入须已通过 `aclsparseLtSpMMAPrune` 剪枝或满足 2:4 约束。算子在指定 stream 上异步执行。
+**功能**：将结构化稀疏矩阵压缩为紧凑存储。输入须满足 FP32 的 1:2 或 FP16/BF16/INT8 的 2:4 稀疏约束。算子在指定 stream 上异步执行。
 
 **参数说明**：
 
 - `handle`（IN）：HOST，aclsparseLt 库句柄。
-- `matmulDescr`（IN）：HOST，Matmul 操作描述符，从中读取稀疏侧矩阵的维度、数据类型、order 与 opA。
-- `d_in`（IN）：DEVICE，待压缩的已剪枝稀疏矩阵指针。
-- `d_out`（OUT）：DEVICE，压缩结果输出指针。
+- `plan`（IN）：HOST，已初始化的执行计划，从中读取稀疏侧矩阵的描述符和操作类型。
+- `d_dense`（IN）：DEVICE，待压缩的稀疏矩阵指针，存储布局须与描述符一致。
+- `d_compressed`（OUT）：DEVICE，压缩结果输出指针，容量至少为查询所得的 compressedSize 字节。
+- `d_compressed_buffer`（INOUT，可选）：DEVICE，压缩临时空间，当前忽略，可为 nullptr。
 - `stream`（IN）：HOST，ACL 流，可为 nullptr（表示使用默认流）。
 
 **返回值**：
 
-- `ACL_SPARSE_STATUS_SUCCESS`：成功
-- `ACL_SPARSE_STATUS_HANDLE_IS_NULLPTR`：handle 为空指针
-- `ACL_SPARSE_STATUS_INVALID_VALUE`：matmulDescr 为空、d_in 为空、d_out 为空
+- `ACL_SPARSE_STATUS_SUCCESS`：Host 校验和启动调用成功
+- `ACL_SPARSE_STATUS_HANDLE_IS_NULLPTR`：handle 或其内部句柄为空指针
+- `ACL_SPARSE_STATUS_INVALID_VALUE`：plan 无效、输入输出指针为空或矩阵及内存参数不合法
 - `ACL_SPARSE_STATUS_NOT_SUPPORTED`：不支持的数据类型
+
+完整返回码、输入约束和输出布局见 [SpMMACompress 算子说明](../../sparseLt/spmma_compress/README.md)。
 
 ---
 
@@ -986,19 +990,20 @@ Split-K 模式枚举：
 
 ## 推荐调用流程
 
-aclsparseLt 的完整工作流分为初始化、描述符构建、计划构建、执行、清理五个阶段。
+aclsparseLt 矩阵乘法的工作流分为初始化、描述符构建、计划构建、执行、清理五个阶段。
 
 1. 调用 `aclsparseLtInit` 创建库上下文。
 2. 对稀疏侧矩阵（A 或 B）调用 `aclsparseLtStructuredDescriptorInit` 创建结构化描述符，对稠密侧矩阵调用 `aclsparseLtDenseDescriptorInit` 创建稠密描述符。如需 batch 批量计算，通过 `aclsparseLtMatDescSetAttribute` 设置 `NUM_BATCHES` / `BATCH_STRIDE`（须在步骤 3 之前）。
 3. 调用 `aclsparseLtMatmulDescriptorInit` 构建 Matmul 描述符，传入 opA/opB、四个矩阵描述符（matA/matB/matC/matD）与 computeType（Init 时校验 A/B/C/D 四个矩阵 numBatches 一致性）。
 4. （可选）通过 `aclsparseLtMatmulDescSetAttribute` 设置 bias（`BIAS_POINTER` / `BIAS_STRIDE`）、activation（`ACTIVATION_RELU` / `RELU_UPPERBOUND` / `RELU_THRESHOLD` / `ACTIVATION_GELU` / `GELU_SCALING`）、向量缩放（`ALPHA_VECTOR_SCALING` / `BETA_VECTOR_SCALING`）。须在 PlanInit 之前设置。
 5. （可选）调用 `aclsparseLtSpMMAPrune` 对稠密矩阵执行 2:4 剪枝，生成稀疏侧输入。
-6. （可选）调用 `aclsparseLtSpMMACompressedSize` 查询压缩后所需存储大小，再调用 `aclsparseLtSpMMACompress` 将稀疏矩阵压缩为紧凑存储（当前版本暂未支持）。
-7. 调用 `aclsparseLtMatmulAlgSelectionInit` 构建算法选择描述符。
-8. 调用 `aclsparseLtMatmulPlanInit` 构建执行计划（读取上述全部属性计算 tiling）。
-9. 调用 `aclsparseLtMatmulGetWorkspace` 查询所需 workspace 大小并分配设备内存。
-10. 调用 `aclsparseLtMatmul` 执行结构化稀疏矩阵乘法（`aclsparseLtMatmulSearch` 暂未支持）。bias 与 activation 已通过描述符属性配置，执行接口不额外传参。
-11. 按依赖逆序销毁执行计划、算法选择描述符、Matmul 描述符、矩阵描述符，最后调用 `aclsparseLtDestroy` 释放库句柄。
+6. 调用 `aclsparseLtMatmulAlgSelectionInit` 构建算法选择描述符。
+7. 调用 `aclsparseLtMatmulPlanInit` 构建执行计划（读取上述全部属性计算 tiling）。
+8. 调用 `aclsparseLtMatmulGetWorkspace` 查询所需 workspace 大小并分配设备内存。
+9. 调用 `aclsparseLtMatmul` 执行结构化稀疏矩阵乘法（`aclsparseLtMatmulSearch` 暂未支持）。bias 与 activation 已通过描述符属性配置，执行接口不额外传参。
+10. 按依赖逆序销毁执行计划、算法选择描述符、Matmul 描述符、矩阵描述符，最后调用 `aclsparseLtDestroy` 释放库句柄。
+
+压缩需先创建 Plan，具体步骤见[压缩调用说明](../../sparseLt/spmma_compress/README.md#调用说明)。压缩结果尚不支持作为现有 Matmul 或 MatmulSearch 的输入。
 
 ---
 
@@ -1068,36 +1073,27 @@ int aclsparseLtExample()
         dA, dAPruned, ACLSPARSELT_PRUNE_SPMMA_STRIP, stream);
     aclrtSynchronizeStream(stream);  // 算子内部不同步，调用方负责同步
 
-    // --- 以下步骤 5 暂未支持 ---
-
-    // 5.（可选）压缩稀疏矩阵（暂未支持）
-    // size_t compressedSize = 0;
-    // aclsparseLtSpMMACompressedSize(&handle, &matmulDesc, &compressedSize);
-    // void *dACompressed = nullptr;
-    // aclrtMalloc(&dACompressed, compressedSize, ACL_MEM_MALLOC_HUGE_FIRST);
-    // aclsparseLtSpMMACompress(&handle, &matmulDesc, dAPruned, dACompressed, stream);
-
-    // 6. 构建算法选择描述符
+    // 5. 构建算法选择描述符
     aclsparseLtMatmulAlgSelectionInit(&handle, &algSelection, &matmulDesc,
         ACL_SPARSE_LT_MATMUL_ALG_DEFAULT);
 
-    // 7. 构建执行计划
+    // 6. 构建执行计划
     aclsparseLtMatmulPlanInit(&handle, &plan, &matmulDesc, &algSelection);
 
-    // 8. 获取 workspace 大小并分配
+    // 7. 获取 workspace 大小并分配
     size_t workspaceSize = 0;
     aclsparseLtMatmulGetWorkspace(&handle, &plan, &workspaceSize);
     void *workspace = nullptr;
     aclrtMalloc(&workspace, workspaceSize, ACL_MEM_MALLOC_HUGE_FIRST);
 
-    // 9. 执行结构化稀疏矩阵乘法
+    // 8. 执行结构化稀疏矩阵乘法
     float alpha = 1.0f, beta = 0.0f;
     aclrtStream streams[] = {stream};
     aclsparseLtMatmul(&handle, &plan, &alpha, dAPruned, dB, &beta, dC, dD,
         workspace, streams, 1);
     aclrtSynchronizeStream(stream);  // 算子内部不同步，调用方负责同步
 
-    // 10. 清理资源（按依赖逆序销毁）
+    // 9. 清理资源（按依赖逆序销毁）
     aclsparseLtMatmulPlanDestroy(&plan);
     aclsparseLtMatmulAlgSelectionDestroy(&algSelection);
     aclsparseLtMatmulDescriptorDestroy(&matmulDesc);

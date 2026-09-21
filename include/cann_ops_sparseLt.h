@@ -475,6 +475,40 @@ aclsparseStatus_t aclsparseLtSpMMAPrune(
     aclsparseLtPruneAlg_t pruneAlg,
     aclrtStream stream);
 
+/**
+ * @brief 查询结构化稀疏压缩的输出和临时区大小（Ascend950）。
+ *
+ * @param handle             IN,  HOST, 有效的库句柄，不可为 nullptr。
+ * @param plan               IN,  HOST, 有效 Plan，A/B 中恰有一个结构化稀疏矩阵。
+ * @param compressedSize     OUT, HOST, 压缩结果的精确字节数，指针不可为 nullptr。
+ * @param compressBufferSize OUT, HOST, 临时区字节数，当前为 0，指针不可为 nullptr。
+ * @return ACL_SPARSE_STATUS_SUCCESS 查询成功；失败时两个输出值保持不变。
+ * @see sparseLt/spmma_compress/README.md 中的格式、约束和完整返回码说明。
+ */
+aclsparseStatus_t aclsparseLtSpMMACompressedSize(
+    const aclsparseLtHandle_t* handle, const aclsparseLtMatmulPlan_t* plan,
+    size_t* compressedSize, size_t* compressBufferSize);
+
+/**
+ * @brief 按 Plan 描述的布局异步压缩结构化稀疏矩阵（Ascend950）。
+ *
+ * 输入须满足 FP32 的 1:2 或 FP16/BF16/INT8 的 2:4 稀疏条件，选中值的位模式保持不变。
+ * 输入输出首址须满足描述符的对齐要求（至少 16 字节）。读取结果或释放相关对象前须同步 stream。
+ *
+ * @param handle              IN,    HOST, 有效的库句柄，不可为 nullptr。
+ * @param plan                IN,    HOST, 有效 Plan，A/B 中恰有一个结构化稀疏矩阵。
+ * @param d_dense             IN,    DEVICE, 满足稀疏条件的输入矩阵，不可为 nullptr。
+ * @param d_compressed        OUT,   DEVICE, 输出缓冲区，不可为空或与输入重叠，容量至少为查询所得大小。
+ * @param d_compressed_buffer INOUT, DEVICE, 压缩临时区，当前忽略，可为 nullptr。
+ * @param stream              IN,    HOST, 执行流，可为 nullptr（默认流）。
+ * @return ACL_SPARSE_STATUS_SUCCESS Host 校验和启动调用成功。
+ * @see sparseLt/spmma_compress/README.md 中的格式、约束和完整返回码说明。
+ */
+aclsparseStatus_t aclsparseLtSpMMACompress(
+    const aclsparseLtHandle_t* handle, const aclsparseLtMatmulPlan_t* plan,
+    const void* d_dense, void* d_compressed, void* d_compressed_buffer,
+    aclrtStream stream);
+
 /* ========== PR Extension APIs (cuSPARSELt-style) ==========
  * Data pointers are NOT bound at descriptor init time — they are passed
  * explicitly to Matmul/Prune at execution time.

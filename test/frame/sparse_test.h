@@ -30,17 +30,20 @@ namespace sparse_test {
 class AclEnvScope {
 public:
     explicit AclEnvScope(int32_t deviceId = TEST_DEVICE_ID) : deviceId_(deviceId) {
-        if (aclInit(nullptr) != ACL_SUCCESS) {
-            std::cerr << "aclInit failed" << std::endl;
-            throw std::runtime_error("aclInit failed");
+        const aclError initRet = aclInit(nullptr);
+        if (initRet != ACL_SUCCESS) {
+            throw std::runtime_error("aclInit failed: " + std::to_string(initRet));
         }
-        if (aclrtSetDevice(deviceId_) != ACL_SUCCESS) {
-            std::cerr << "aclrtSetDevice failed" << std::endl;
-            throw std::runtime_error("aclrtSetDevice failed");
+        const aclError deviceRet = aclrtSetDevice(deviceId_);
+        if (deviceRet != ACL_SUCCESS) {
+            aclFinalize(); // 构造失败不会调用本对象的析构函数，需在此释放已初始化的资源。
+            throw std::runtime_error("aclrtSetDevice failed: " + std::to_string(deviceRet));
         }
-        if (aclrtCreateStream(&stream_) != ACL_SUCCESS) {
-            std::cerr << "aclrtCreateStream failed" << std::endl;
-            throw std::runtime_error("aclrtCreateStream failed");
+        const aclError streamRet = aclrtCreateStream(&stream_);
+        if (streamRet != ACL_SUCCESS) {
+            aclrtResetDevice(deviceId_);
+            aclFinalize();
+            throw std::runtime_error("aclrtCreateStream failed: " + std::to_string(streamRet));
         }
         initialized_ = true;
     }
