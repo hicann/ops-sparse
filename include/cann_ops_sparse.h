@@ -383,6 +383,20 @@ aclsparseStatus_t aclsparseConstDnVecGetValues(aclsparseConstDnVecDescr_t dnVecD
 aclsparseStatus_t aclsparseDnVecSetValues(aclsparseDnVecDescr_t dnVecDescr, void *values);
 
 /**
+ * @brief 设置稠密向量的元素步长。
+ *
+ * @param dnVecDescr IN, HOST, 稠密向量描述符。
+ * @param stride IN, HOST, 相邻逻辑元素之间的物理元素间隔，必须大于0。
+ * @return aclsparseStatus_t
+ */
+aclsparseStatus_t aclsparseDnVecSetStride(aclsparseDnVecDescr_t dnVecDescr, int64_t stride);
+
+/**
+ * @brief 获取稠密向量的元素步长。
+ */
+aclsparseStatus_t aclsparseDnVecGetStride(aclsparseConstDnVecDescr_t dnVecDescr, int64_t *stride);
+
+/**
  * @brief 创建稀疏矩阵的CSR格式。
  *
  * 该函数用于创建一个稀疏矩阵的CSR（Compressed Sparse Row）格式。
@@ -459,6 +473,15 @@ aclsparseStatus_t aclsparseCreateBlockedEll(
 
 aclsparseStatus_t aclsparseCsrSetPointers(aclsparseSpMatDescr_t descr,
     void *rowOffsets, void *colIndices, void *values);
+/**
+ * @brief 设置CSR三个一维数组的元素步长。
+ *
+ * 步长按元素计数，rowOffsetsStride、colIndStride和valuesStride均必须大于0。
+ */
+aclsparseStatus_t aclsparseCsrSetStrides(aclsparseSpMatDescr_t descr,
+    int64_t rowOffsetsStride, int64_t colIndStride, int64_t valuesStride);
+aclsparseStatus_t aclsparseCsrGetStrides(aclsparseConstSpMatDescr_t descr,
+    int64_t *rowOffsetsStride, int64_t *colIndStride, int64_t *valuesStride);
 aclsparseStatus_t aclsparseCscSetPointers(aclsparseSpMatDescr_t descr,
     void *colOffsets, void *rowIndices, void *values);
 aclsparseStatus_t aclsparseCooSetPointers(aclsparseSpMatDescr_t descr,

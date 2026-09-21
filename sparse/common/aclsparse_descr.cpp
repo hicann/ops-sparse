@@ -63,6 +63,18 @@ static bool IsValidSparseValueType(aclDataType valueType)
     }
 }
 
+static bool IsValidElementStride(uint64_t logicalSize, int64_t stride)
+{
+    if (stride <= 0) {
+        return false;
+    }
+    if (logicalSize <= 1u) {
+        return true;
+    }
+    return static_cast<uint64_t>(stride) <=
+           static_cast<uint64_t>(std::numeric_limits<int64_t>::max()) / (logicalSize - 1u);
+}
+
 static aclsparseStatus_t ValidateAttributeAccess(
     const void *spMatDescr, const void *data,
     aclsparseSpMatAttribute_t attribute, size_t dataSize)
@@ -384,6 +396,25 @@ aclsparseStatus_t aclsparseDnVecSetValues(aclsparseDnVecDescr_t dnVecDescr, void
     return ACL_SPARSE_STATUS_SUCCESS;
 }
 
+aclsparseStatus_t aclsparseDnVecSetStride(aclsparseDnVecDescr_t dnVecDescr, int64_t stride)
+{
+    if (dnVecDescr == nullptr || dnVecDescr->signature != kDnVecSignature ||
+        !IsValidElementStride(dnVecDescr->nums, stride)) {
+        return ACL_SPARSE_STATUS_INVALID_VALUE;
+    }
+    dnVecDescr->stride = stride;
+    return ACL_SPARSE_STATUS_SUCCESS;
+}
+
+aclsparseStatus_t aclsparseDnVecGetStride(aclsparseConstDnVecDescr_t dnVecDescr, int64_t *stride)
+{
+    if (dnVecDescr == nullptr || dnVecDescr->signature != kDnVecSignature || stride == nullptr) {
+        return ACL_SPARSE_STATUS_INVALID_VALUE;
+    }
+    *stride = dnVecDescr->stride;
+    return ACL_SPARSE_STATUS_SUCCESS;
+}
+
 aclsparseStatus_t aclsparseCreateCsr(aclsparseSpMatDescr_t *spMatDescr, int64_t rows, int64_t cols, int64_t nnz,
     void *csrRowOffsets, void *csrColInd, void *csrValues, aclsparseIndexType_t csrRowOffsetsType,
     aclsparseIndexType_t csrColIndType, aclsparseIndexBase_t idxBase, aclDataType valueType)
@@ -501,6 +532,8 @@ static aclsparseStatus_t SetCompressedPointers(aclsparseSpMatDescr_t descr,
     descr->ptrs = offsets;
     descr->idxs = indices;
     descr->values = values;
+    descr->activeBuffer = nullptr;
+    descr->activeSpmvBuffer = nullptr;
     return ACL_SPARSE_STATUS_SUCCESS;
 }
 
@@ -509,6 +542,36 @@ aclsparseStatus_t aclsparseCsrSetPointers(aclsparseSpMatDescr_t descr,
 {
     return SetCompressedPointers(descr, ACL_SPARSE_FORMAT_CSR, rowOffsets,
         colIndices, values);
+}
+
+aclsparseStatus_t aclsparseCsrSetStrides(aclsparseSpMatDescr_t descr,
+    int64_t rowOffsetsStride, int64_t colIndStride, int64_t valuesStride)
+{
+    if (descr == nullptr || descr->format != ACL_SPARSE_FORMAT_CSR ||
+        !IsValidElementStride(descr->rows + 1u, rowOffsetsStride) ||
+        !IsValidElementStride(descr->nnz, colIndStride) ||
+        !IsValidElementStride(descr->nnz, valuesStride)) {
+        return ACL_SPARSE_STATUS_INVALID_VALUE;
+    }
+    descr->ptrStride = rowOffsetsStride;
+    descr->idxStride = colIndStride;
+    descr->valueStride = valuesStride;
+    descr->activeBuffer = nullptr;
+    descr->activeSpmvBuffer = nullptr;
+    return ACL_SPARSE_STATUS_SUCCESS;
+}
+
+aclsparseStatus_t aclsparseCsrGetStrides(aclsparseConstSpMatDescr_t descr,
+    int64_t *rowOffsetsStride, int64_t *colIndStride, int64_t *valuesStride)
+{
+    if (descr == nullptr || descr->format != ACL_SPARSE_FORMAT_CSR || rowOffsetsStride == nullptr ||
+        colIndStride == nullptr || valuesStride == nullptr) {
+        return ACL_SPARSE_STATUS_INVALID_VALUE;
+    }
+    *rowOffsetsStride = descr->ptrStride;
+    *colIndStride = descr->idxStride;
+    *valuesStride = descr->valueStride;
+    return ACL_SPARSE_STATUS_SUCCESS;
 }
 
 aclsparseStatus_t aclsparseCscSetPointers(aclsparseSpMatDescr_t descr,

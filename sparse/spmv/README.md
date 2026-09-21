@@ -17,8 +17,10 @@ y = alpha * op(A) * x + beta * y
 | 接口名 | 功能简述 |
 |--------|---------|
 | aclsparseSpMV | 执行稀疏矩阵-稠密向量乘法 y = alpha * op(A) * x + beta * y |
-| aclsparseSpMVGetBufferSize | 查询所需 workspace 大小（暂未支持） |
-| aclsparseSpMVPreprocess | 对稀疏矩阵进行预处理（暂未支持） |
+| aclsparseSpMVGetBufferSize | 查询所需 workspace 大小 |
+| aclsparseSpMVPreprocess | 对转置路径构建可复用的确定性 CSR-to-CSC 索引 |
+| aclsparseCsrSetStrides / GetStrides | 设置/获取 CSR rowOffsets、colInd、values 的元素步长 |
+| aclsparseDnVecSetStride / GetStride | 设置/获取稠密向量的元素步长 |
 
 ## 算子执行接口
 
@@ -26,7 +28,7 @@ y = alpha * op(A) * x + beta * y
 
 #### 产品支持情况
 
-- Ascend 950PR / Ascend 950DT：不支持
+- Ascend 950PR / Ascend 950DT：支持
 - Atlas A3 训练系列产品 / Atlas A3 推理系列产品：支持
 - Atlas A2 训练系列产品 / Atlas A2 推理系列产品：支持
 
@@ -48,8 +50,8 @@ aclsparseStatus_t aclsparseSpMV(aclsparseHandle_t handle, aclsparseOperation_t o
 | beta | 输入 | const void* | 标量 beta 指针，类型须与 computeType 匹配。内存位置由 `aclsparseSetPointerMode` 控制，Host/Device 内存 |
 | vecY | 输入/输出 | aclsparseDnVecDescr_t | 输入/输出稠密向量 y 的描述符，Host 内存 |
 | computeType | 输入 | aclDataType | 计算精度类型，支持 `ACL_FLOAT` 或 `ACL_INT32`，Host 内存 |
-| alg | 输入 | aclsparseSpMVAlg_t | 算法类型，仅支持 `ACL_SPARSE_SPMV_ALG_DEFAULT`，Host 内存 |
-| externalBuffer | 输入 | void* | 工作缓冲区，当前版本忽略（传 nullptr 即可），Device 内存 |
+| alg | 输入 | aclsparseSpMVAlg_t | 算法类型，支持 DEFAULT、CSR_ALG1、CSR_ALG2，Host 内存 |
+| externalBuffer | 输入 | void* | 工作缓冲区；950 转置且 NNZ>0 时必须按 GetBufferSize 结果分配，Device 内存 |
 
 #### 约束说明
 
@@ -59,17 +61,27 @@ aclsparseStatus_t aclsparseSpMV(aclsparseHandle_t handle, aclsparseOperation_t o
 - matA 的行偏移和列索引类型必须均为 `ACL_SPARSE_INDEX_32I`，且两者类型相同
 - matA 的索引基址仅支持 `ACL_SPARSE_INDEX_BASE_ZERO`
 - opA 支持 `ACL_SPARSE_OP_NON_TRANSPOSE` 或 `ACL_SPARSE_OP_TRANSPOSE`，不支持共轭转置
-- alg 仅支持 `ACL_SPARSE_SPMV_ALG_DEFAULT`
+- alg 支持 `ACL_SPARSE_SPMV_ALG_DEFAULT`、`ACL_SPARSE_SPMV_CSR_ALG1`、`ACL_SPARSE_SPMV_CSR_ALG2`
 - computeType 仅支持 `ACL_FLOAT` 或 `ACL_INT32`
 - vecX 的值类型须与 matA 的值类型一致
 - 维度匹配：
   - 非转置模式：vecX 大小 >= A.cols，vecY 大小 >= A.rows
   - 转置模式：vecX 大小 >= A.rows，vecY 大小 >= A.cols
+- 支持 M=0、N=0 和 NNZ=0；输出长度为 0 时成功返回，NNZ=0 时结果为 `beta * y`
+- `aclsparseCreateCsr` 和 `aclsparseCreateDnVec` 创建的描述符默认元素步长为 1；通过
+  `aclsparseCsrSetStrides` 和 `aclsparseDnVecSetStride` 可原生描述正步长非连续 Tensor
+- CSR rowOffsets、colInd、values 以及 vecX、vecY 的 stride 均按元素计数且必须大于 0；vecY 按其 stride 原位读写，间隙元素不会被覆盖
+- 调用方负责保证 CSR 内容合法：rowOffsets 必须从 0 开始、以 NNZ 结束且单调非降，colInd 必须全部位于
+  `[0, cols)`。非法 CSR 内容属于未定义行为；SpMV 和 Preprocess 不同步回读 Device 数据，也不承诺返回内容校验错误
+- 相同输入、硬件和软件环境下，非转置及稳定预处理后的转置路径使用固定归约顺序，可获得逐比特确定结果
+- INT8→INT32 路径对完整的 `alpha * dot(A, x) + beta * y` 做最终 INT32 饱和，保留正负项抵消；
+  使用乘法前范围检查和平移后的饱和边界，避免中间 INT64 乘加溢出。连续、stride 和转置路径语义一致。
 - 支持的值类型组合：
   - matA=ACL_FLOAT, vecX=ACL_FLOAT, vecY=ACL_FLOAT, computeType=ACL_FLOAT
   - matA=ACL_FLOAT16, vecX=ACL_FLOAT16, vecY=ACL_FLOAT 或 ACL_FLOAT16, computeType=ACL_FLOAT
   - matA=ACL_BF16, vecX=ACL_BF16, vecY=ACL_FLOAT 或 ACL_BF16, computeType=ACL_FLOAT
-  - matA=ACL_INT32, vecX=ACL_INT32, vecY=ACL_INT32, computeType=ACL_INT32
+  - matA=ACL_INT8, vecX=ACL_INT8, vecY=ACL_INT32, computeType=ACL_INT32
+  - matA=ACL_INT8, vecX=ACL_INT8, vecY=ACL_FLOAT, computeType=ACL_FLOAT
 
 #### 支持的稀疏格式
 
@@ -81,12 +93,38 @@ aclsparseStatus_t aclsparseSpMV(aclsparseHandle_t handle, aclsparseOperation_t o
 
 #### 调用示例
 
-暂无运行示例，具体编译和执行过程请参考[编译与运行样例](../../docs/zh/develop/compile_and_run_example.md)。
+具体编译、三阶段调用和自测命令请参考 [SPMV 测试说明](../../test/spmv/README.md)；通用工程构建方式见
+[编译与运行样例](../../docs/zh/develop/compile_and_run_example.md)。
+
+非连续 Tensor 在创建普通描述符后设置元素步长，SpMV 三阶段接口保持不变：
+
+```cpp
+aclsparseCsrSetStrides(matA, rowOffsetsStride, colIndStride, valuesStride);
+aclsparseDnVecSetStride(vecX, xStride);
+aclsparseDnVecSetStride(vecY, yStride);
+```
+
+未调用 stride 设置接口时保持兼容行为，所有步长均为 1。更新 CSR 指针或 stride 后，转置路径必须重新调用
+`aclsparseSpMVPreprocess`。
 
 ### aclsparseSpMVGetBufferSize
 
-暂未支持。
+950 非转置路径返回 0；转置路径返回稳定 CSR-to-CSC 元数据所需空间，包含列偏移、
+行索引和原 CSR value 下标。调用方负责按返回字节数分配 Device 内存。
+此阶段只检查描述符元数据及参数，不读取 CSR 或 x/y 数据，允许这些数据指针尚未绑定。
 
 ### aclsparseSpMVPreprocess
 
-暂未支持。
+950 非转置路径为成功的空操作。转置路径在调用 stream 上异步构建稳定的按列索引：
+每列内严格保留原 CSR 的行序和元素序，后续每个输出元素由单一 SIMT 线程组按固定顺序
+累加，避免浮点 atomic add 引入非确定性。同一 sparsity pattern 可复用同一 workspace；
+更新 CSR rowOffsets/colInd 或其 stride 后必须重新调用 Preprocess。非转置及 NNZ=0 时无需读矩阵数据；
+转置且 NNZ>0 时只要求 rowOffsets/colInd 和 workspace 已绑定，不要求 values 或 x/y 已绑定。
+预处理与执行均将 Device 任务入队到 handle 的 stream，不同步回读 CSR；同一 stream 上的异步 H2D 可以直接排在调用前，
+调用方负责在读取结果或复用/释放相关内存前同步，并保证所有异步操作期间内存有效。
+
+## 贡献说明
+
+| 贡献者 | 贡献方 | 贡献算子 | 贡献时间 | 贡献内容 |
+|--------|--------|----------|----------|----------|
+| amelia_2026 | 社区开发者 | SpMV | 2026-08-26 | Ascend 950PR/950DT 三阶段接口、确定性转置预处理、SIMT kernel、自测代码与文档 |

@@ -79,9 +79,13 @@ struct aclsparseSpGEMMDescr {
 
 // 稀疏矩阵描述符内部结构（CSR / CSC / COO / BELL / SLICED_ELL 共用）。
 struct aclsparseSpMatDescr {
-    // 由 *Preprocess 写入：记录当前已预处理(active)的 workspace buffer。
-    // SpMM/SpMV 据此决定走快路径(复用)还是就地重算（active buffer 机制）。
+    // 由非 SpMV 的 *Preprocess 写入：记录当前已预处理(active)的 workspace buffer。
+    // 对应算子据此决定走快路径(复用)还是就地重算（active buffer 机制）。
     const void *activeBuffer = nullptr;
+    // SpMV transpose preprocessing has a different workspace layout from SpMM/Sddmm.
+    // Keep a dedicated marker so a buffer reused by another operator is never mistaken
+    // for valid CSR-to-CSC metadata.
+    const void *activeSpmvBuffer = nullptr;
     int32_t cInDataValid = 0;
     // 旧三阶段 SpGEMM 接口复用新多阶段实现时保存的内部描述符及 workspace。
     // 生命周期随 matC 结束，避免旧接口额外暴露描述符管理要求。
@@ -94,6 +98,9 @@ struct aclsparseSpMatDescr {
     void *ptrs = nullptr;
     void *idxs = nullptr;
     void *values = nullptr;
+    int64_t ptrStride = 1;
+    int64_t idxStride = 1;
+    int64_t valueStride = 1;
     aclsparseIndexBase_t baseType{};
     aclsparseIndexType_t ptrType{};
     aclsparseIndexType_t IdxType{};
@@ -157,6 +164,7 @@ struct aclsparseDnVecDescr {
     uint32_t signature = 0;
     uint64_t nums = 0;
     void *values = nullptr;
+    int64_t stride = 1;
     aclDataType valueType{};
 };
 

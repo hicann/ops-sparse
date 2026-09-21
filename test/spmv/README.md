@@ -19,8 +19,19 @@ $$
 | ------------------------------------------- | :------: |
 | Atlas A3 训练系列产品/Atlas A3 推理系列产品 |    √    |
 | Atlas A2 训练系列产品/Atlas A2 推理系列产品 |    √    |
+| Ascend 950PR / Ascend 950DT                |    √    |
 
 ## 目录结构介绍
+
+### 公共测试文件
+
+```
+test/spmv/
+├── CMakeLists.txt                    // 调用 ops_sparse_add_test(spmv ${OPS_SPARSE})
+└── README.md                         // 说明文档
+```
+
+### arch22（Atlas A2/A3）
 
 ```
 sparse/spmv/arch22/
@@ -33,11 +44,21 @@ sparse/spmv/arch22/
 ├── spmv_tiling_data.h                // Tiling 数据结构
 └── spmv.h                            // 算子内部头文件
 
-test/spmv/
-├── CMakeLists.txt                    // 调用 ops_sparse_add_test(spmv ${OPS_SPARSE})
-├── README.md                         // 说明文档
-└── arch22/
-    └── spmv_test.cpp                 // 910B 算子调用样例
+test/spmv/arch22/
+└── spmv_test.cpp                     // 910B 算子调用样例
+```
+
+### arch35（Ascend 950PR/950DT）
+
+```
+sparse/spmv/arch35/
+├── spmv.h                            // 950 workspace / tiling 数据结构
+├── spmv_host.cpp                     // 950 三阶段 Host API 与参数校验
+└── spmv_kernel.cpp                   // 950 CSR-to-CSC 预处理与 SIMT 计算内核
+
+test/spmv/arch35/
+├── spmv_test.cpp                     // Ascend 950PR/950DT 三阶段接口样例
+└── spmv_test.csv                     // Ascend 950PR/950DT 的 200 条固定测试用例
 ```
 
 ## 算子描述
@@ -59,8 +80,8 @@ $$
 | 输入 A、X 类型 | 计算类型 (computeType) | 输出 Y 类型 | 文件名中的模板参数                  |
 | :------------: | :--------------------: | :---------: | :---------------------------------- |
 |    float32    |        float32        |   float32   | `<float>`                         |
-|     int32     |         int32         |    int32    | `<int32_t>`                       |
-|     int32     |        float32        |   float32   | `<float, int32_t, float>`         |
+|      int8     |         int32         |    int32    | `<int32_t, int8_t, int32_t>`      |
+|      int8     |        float32        |   float32   | `<float, int8_t, float>`          |
 |    float16    |        float32        |   float32   | `<float, half, float>`            |
 |    float16    |        float32        |   float16   | `<float, half, half>`             |
 |    bfloat16    |        float32        |   float32   | `<float, bfloat16_t, float>`      |
@@ -78,12 +99,12 @@ $$
 
 ### 实现原理
 
-1. **类型独立编译**：模板类 `SpmvKernel` / `SpmvKernelTrans` 定义在 `kernels/spmv_kernel.h` 中，7 个 `.cpp` 文件各自通过 `DEFINE_SPMV_KERNEL_ENTRY` 宏展开一个具体的 `__global__` 核函数和 host 端启动包装，每个 TU 仅一个实例化
-2. **统一内核入口**：核函数通过 `trans` 标量参数控制非转置/转置分发，非转置使用 `SpmvKernel`，转置使用 `SpmvKernelTrans`
-3. **行并行策略**：每个 AI Core 处理若干整行，核间均分 workload；转置模式下结果通过原子累加写入，避免核间踩踏
-4. **CopyIn → Compute → CopyOut 管线**：行内计算通过三级流水完成，UB 缓冲区复用提高效率
-5. **混合精度**：当输入/输出类型与计算类型不一致时，通过 `Cast` 矢量指令在 UB 上完成类型转换，ReduceSum 固定使用 float 精度
-6. **结果验证**：在 `spmv_test.cpp` 中，通过 CPU 计算 golden 真值，验证 NPU 计算结果的正确性
+1. **架构隔离**：arch22 保留独立模板 kernel；arch35 使用 `spmv_host.cpp` 和 `spmv_kernel.cpp` 的统一三阶段接口，不改动已有 arch22 路径
+2. **950 非转置路径**：每个输出行由固定的 4-lane SIMT 小组处理，行内使用四条独立 FMA 累加链并做固定顺序的两级归约
+3. **950 转置路径**：预处理阶段稳定生成 CSR-to-CSC 索引，每个输出列仍由单一小组按固定顺序计算，不使用浮点原子加
+4. **确定性**：相同输入在相同硬件和软件环境中连续执行 20 次，输出要求逐字节一致
+5. **混合精度**：float16、bfloat16 和 int8 输入按接口约定提升至 float32 或 int32 计算，再转换到目标输出类型
+6. **结果验证**：浮点 CPU golden 使用 double 累加后转换到目标输出类型，整数 golden 使用 Host 端 `__int128` 精确乘加后按 int32 饱和规则输出，避免参考结果在饱和前发生 int64 溢出；该类型不用于 Device 内核
 
 ### 算子规格参数说明
 
@@ -91,7 +112,7 @@ $$
 | --------- | -------------- | ---------------------------------------------- | --------------------------------- | -------- |
 | csrRowPtr | 输入           | 矩阵中每一行的第一个非零元素在 csrVal 中的位置 | int32_t                           | ND       |
 | csrColInd | 输入           | csrVal 中每个非零元素的列索引                  | int32_t                           | ND       |
-| csrVal    | 输入           | 稀疏矩阵中所有非零元素的值                     | float / int32_t / half / bfloat16 | ND       |
+| csrVal    | 输入           | 稀疏矩阵中所有非零元素的值                     | float / int8_t / half / bfloat16  | ND       |
 | xVec      | 输入           | 被乘稠密向量                                   | 与 csrVal 一致                    | ND       |
 | yVec      | 输入/输出      | 结果向量（也作为 beta*y 的输入）               | float / int32_t / half / bfloat16 | ND       |
 | alpha     | 输入           | 标量系数 alpha                                 | 与 computeType 一致               | scalar   |
@@ -102,65 +123,51 @@ $$
 
 - **矩阵格式**：当前仅支持 CSR 格式；CSC / COO 等格式在 SpMV / SpMM 路径上会返回 `ACL_SPARSE_STATUS_NOT_SUPPORTED`（`aclsparseCreateCsc` 亦暂未实现）
 - **索引类型**：当前仅支持 `ACL_SPARSE_INDEX_32I`；`ACL_SPARSE_INDEX_64I` 暂未支持
-- **算法类型**：当前仅支持 `ACL_SPARSE_SPMV_ALG_DEFAULT`，传入其他算法会提示错误并返回 `ACL_SPARSE_STATUS_NOT_SUPPORTED`
+- **算法类型**：支持 `ACL_SPARSE_SPMV_ALG_DEFAULT`、`ACL_SPARSE_SPMV_CSR_ALG1`、`ACL_SPARSE_SPMV_CSR_ALG2`；当前三个枚举共享同一正确性路径
 - **转置支持**：支持非转置和转置，暂不支持共轭转置
-- **UB 容量限制**：稀疏矩阵单行最大非零元数受 UB 容量限制，计算公式如下：
-
-  $$
-  maxTileLength = \left\lfloor \frac{UB\_SIZE - kFixed}{perElem} \right\rfloor_{\text{align}}
-  $$
-
-  $$
-  perElem = \text{sizeof}(int32\_t) + 2 \cdot \text{sizeof}(CompT) + 2 \cdot \text{sizeof}(float)
-  $$
-
-  $$
-  kFixed = kYLocalBytes + kSystemReserved + kAlignSlack \approx 4KB
-  $$
+- **非连续 Tensor**：CSR rowOffsets、colInd、values 通过 `aclsparseCsrSetStrides` 设置元素步长，x/y 通过
+  `aclsparseDnVecSetStride` 设置元素步长；旧接口默认 stride=1，仅支持正步长，vecY 间隙元素保持不变
+- **空输入**：支持 M=0、N=0 和 NNZ=0；输出长度为 0 时成功返回，NNZ=0 时仅计算 `beta * y`
+- **950 workspace**：仅转置且 NNZ>0 时需要 workspace，大小必须由 `aclsparseSpMVGetBufferSize` 查询；不存在 arch22 UB 单行长度限制
 
 ### 测试实现
 
 - **测试流程** (`spmv_test.cpp`)
 
-1. **生成测试数据**：在线生成随机 CSR 矩阵（`GenerateCsr`）和稠密向量 x、y（`GenerateDenseVector`）
-2. **CPU 参考计算**：非转置使用 `SpmvCpu`，转置使用 `SpmvTransCpu`
+1. **生成测试数据**：使用固定、可复现种子生成 CSR 矩阵（`GenerateCsr`）和稠密向量 x、y（`GenerateDenseVector`）；`arch35/spmv_test.csv` 中的 200 条固定用例按 [-5, 5] 范围执行，扩展泛化回归按 [-10, 10] 执行
+2. **CPU 参考计算**：非转置使用 `SpmvCpu`，转置使用 `SpmvTransCpu`，采用高于算子计算类型的参考累加精度
 3. **初始化 ACL 环境**：初始化 ACL 环境，设置设备和创建流
 4. **创建设备内存**：使用 `CreateDeviceTensor` 拷贝矩阵和向量数据到 device，用 `unique_ptr` 托管生命周期
-5. **创建描述符**：使用 `aclsparseCreateCsr` 和 `aclsparseCreateDnVec` 创建矩阵和向量描述符
-6. **执行 SpMV**：调用 `aclsparseSpMV` 执行稀疏矩阵向量乘法（当前测试传入 `externalBuffer = nullptr`；`aclsparseSpMVGetBufferSize` / `aclsparseSpMVPreprocess` **暂未支持**，见下方接口说明）
-7. **结果验证**：将 device 结果回读到 host，与 CPU 参考结果比较。float 类型使用相对误差（MARE/MERE），int32 类型使用绝对误差（逐元素完全匹配检查）
+5. **创建描述符**：使用 `aclsparseCreateCsr` 和 `aclsparseCreateDnVec` 创建矩阵和向量描述符；非连续用例再通过 stride 设置接口写入五个数组的元素步长
+6. **执行 SpMV**：先调用 `aclsparseSpMVGetBufferSize`，按需分配 workspace，再调用可选的 `aclsparseSpMVPreprocess` 和 `aclsparseSpMV`
+7. **结果验证**：将 device 结果回读到 host，与 CPU 参考结果比较。浮点类型使用生态算子混合容差及逐元素最大绝对误差门禁，int32 类型要求逐元素完全匹配；NaN 和同符号 Infinity 按 IEEE 分类一致性验证
 8. **清理资源**：销毁描述符，unique_ptr 自动释放设备/主机内存
 
 - **测试覆盖**
 
-| 测试组                         | 用例数 | 说明                                     |
-| ------------------------------ | :----: | ---------------------------------------- |
-| Float 基础测试                 |   6   | 不同稀疏度和形状，alpha=1.0, beta=0.0    |
-| Float Alpha/Beta 测试          |   7   | alpha/beta 组合，含负值、pass-through 等 |
-| Float 随机采样                 |   30   | 随机 M/N/sparsity/alpha/beta             |
-| Int32 基础测试                 |   5   | 不同稀疏度和形状，alpha=1, beta=0        |
-| Int32 Alpha/Beta 测试          |   4   | alpha/beta 组合，含负值                  |
-| Int32 随机采样                 |   30   | 随机 M/N/sparsity/alpha/beta             |
-| Int32→Float32 Non-Transpose   |   13   | 混合精度，int32 输入 float32 计算        |
-| Int32→Float32 Transpose       |   12   | 混合精度 + 转置                          |
-| Float16→Float32 Non-Transpose |   8   | 混合精度，half 输入 float32 输出         |
-| Float16→Float32 Transpose     |   8   | 混合精度 + 转置                          |
-| BF16→Float32 Non-Transpose    |   8   | 混合精度，bfloat16 输入 float32 输出     |
-| BF16→Float32 Transpose        |   8   | 混合精度 + 转置                          |
-| Float Transpose                |   15   | 转置全场景覆盖                           |
-| Int32 Transpose                |   11   | int32 转置全场景覆盖                     |
+| 测试组 | 覆盖内容 |
+| ------ | -------- |
+| 全量回归 | 非转置/转置、稠密/稀疏/随机形状、alpha/beta 正负值和 pass-through |
+| 任务用例 | `arch35/spmv_test.csv` 中 200 个固定用例，覆盖 7 种数据类型组合 |
+| 专项验收 | 7 种类型组合、3 种算法枚举、Host/Device 标量和每种类型 20 次确定性执行 |
+| 边界验收 | M=0、N=0、NNZ=0、1x1、NaN、+Infinity、-Infinity |
+| 非连续验收 | 5 个输入/输入输出 Tensor 使用不同非单位 stride，7 种 dtype 组合分别覆盖转置/非转置，共 14 个实机用例，并校验 vecY 间隙哨兵不被覆盖 |
+| 延迟绑定与异步执行 | CSR 和 x/y 未绑定时可查询 workspace；execute 校验实际使用的指针；同 stream 异步 H2D 后直接执行，分别覆盖转置/非转置、显式/跳过 Preprocess |
+| 整数溢出回归 | 16 种乘法溢出、加法溢出、极值、抵消及边界场景，分别覆盖转置/非转置、连续/stride、Host/Device 标量，共 128 组；逐元素精确匹配并检查输出间隙哨兵 |
+| 性能门禁 | 任务书 4 个标准规模，按 95%/99%/97.5%/99.9% 稀疏率对比基准 |
 
 ### 精度验证方法
 
-- **float / half / bfloat16**：采用相对误差（Relative Error），计算公式：
+- **float / half / bfloat16**：使用混合容差 `atol + rtol * |golden|` 统计匹配率，并同时检查逐元素绝对误差上限 `max(fixed_limit, 32*ULP)`：
 
   $$
-  rError_i = \frac{|npu_i - golden_i|}{|golden_i| + 10^{-7}}
+  tolerance_i = atol + rtol \cdot |golden_i|
   $$
 
-  - MARE（Max Absolute Relative Error）：所有元素中最大的 rError
-  - MERE（Mean Relative Error）：所有元素 rError 的平均值
-  - 半精度类型 cast 到 float 后再计算
+  - float32：rtol=2^-10、atol=2^-16、固定绝对误差上限 1e-2、匹配率至少 99%
+  - float16：rtol=2^-9、atol=2^-9、固定绝对误差上限 1e-1、匹配率至少 99%
+  - bfloat16：rtol=2^-6、atol=2^-6、固定绝对误差上限 1、匹配率至少 99%
+  - NaN 与 NaN、同符号 Infinity 与 Infinity 视为分类一致；其他非有限值组合失败
 - **int32_t**：采用绝对误差（Absolute Error）和逐元素精确匹配：
 
   $$
@@ -174,7 +181,7 @@ $$
 
 ```cpp
 // 生成随机 CSR 矩阵和稠密向量
-GenerateCsr<T>(M, N, sparsity, csrRowPtr, csrColInd, csrVal);
+GenerateCsr<T>(M, N, sparsity, csrRowPtr, csrColInd, csrVal, fixedSeed);
 GenerateDenseVector<T>(xSize, xVec, rng);
 GenerateDenseVector<T>(ySize, yVec, rng);
 
@@ -223,6 +230,18 @@ sparseRet = aclsparseSpMV(spHandle, op, &alphaTyped,
 bash build.sh --ops=spmv --run
 ```
 
+Ascend 950PR 可在完成构建后分别复现专项验收、任务书 200 条用例、全量回归和性能门禁：
+
+```bash
+export LD_LIBRARY_PATH="$PWD/build:$LD_LIBRARY_PATH"
+./build/test/spmv/spmv_test --acceptance
+./build/test/spmv/spmv_test --strided
+./build/test/spmv/spmv_test --integer-overflow
+./build/test/spmv/spmv_test --task-cases test/spmv/arch35/spmv_test.csv
+./build/test/spmv/spmv_test
+./build/test/spmv/spmv_test --perf
+```
+
 执行结果如下，说明精度对比成功：
 
 ```txt
@@ -232,13 +251,13 @@ Verification...
 ...
 ====Test case pass!====
 
-======== Int32 Basic Tests (alpha=1, beta=0) ========
+======== Int8->Int32 Basic Tests (alpha=1, beta=0) ========
 ====Test case: row num = 512 col num = 1024 sparsity (zero ratio) = 0.9 alpha = 1 beta = 0====
 Verification...
-Mean Absolute Error = 0; Max Absolute Error = 0
+Matched Ratio = 1; Max Absolute Error = 0
 ====Test case pass!====
 
-======== Int32->Float32 Non-Transpose ========
+======== Int8->Float32 Non-Transpose ========
 ...
 ====Test case pass!====
 ```
@@ -247,7 +266,8 @@ Mean Absolute Error = 0; Max Absolute Error = 0
 
 ### aclsparseSpMVGetBufferSize
 
-> **支持状态**：暂未支持。当前版本仅提供头文件声明，库中尚无实现；调用会导致链接失败。
+Ascend 950 已实现。非转置返回 0；转置按矩阵列数和 NNZ 返回确定性预处理 workspace 大小。
+查询只验证描述符元数据，不要求 CSR 或 x/y 的数据指针已绑定。
 
 **函数原型**：
 
@@ -277,12 +297,15 @@ aclsparseStatus_t aclsparseSpMVGetBufferSize(
 | beta        |  IN  | 标量 beta 指针，类型必须与 computeType 一致                                   |
 | vecY        |  IN  | 输出稠密向量 y 描述符                                                         |
 | computeType |  IN  | 计算数据类型（`ACL_FLOAT` / `ACL_INT32`）                                 |
-| alg         |  IN  | 算法类型，当前仅支持`ACL_SPARSE_SPMV_ALG_DEFAULT`                           |
+| alg         |  IN  | 算法类型，支持 DEFAULT / CSR_ALG1 / CSR_ALG2                                  |
 | bufferSize  | OUT | 所需工作缓冲区大小                                                            |
 
 ### aclsparseSpMVPreprocess
 
-> **支持状态**：暂未支持。当前版本仅提供头文件声明，库中尚无实现；调用会导致链接失败。
+Ascend 950 已实现。非转置为成功的空操作；转置在调用 stream 上异步构建稳定的
+CSR-to-CSC 索引。同一 sparsity pattern 可复用，rowOffsets/colInd 更新后必须重新预处理。
+不在 Host 同步回读或校验 CSR 内容；调用方必须保证 rowOffsets 从 0 到 NNZ 单调非降，colInd 位于
+`[0, cols)`，非法内容属于未定义行为。转置预处理只读取 CSR 索引，不要求 values 或 x/y 已绑定。
 
 **函数原型**：
 
@@ -330,8 +353,8 @@ aclsparseStatus_t aclsparseSpMV(
 | beta           |   IN   | 标量 beta 指针，类型必须与 computeType 一致                                   |
 | vecY           | IN/OUT | 稠密向量 y 描述符（y 为被乘向量，结果覆盖写入 y）                             |
 | computeType    |   IN   | 计算数据类型（`ACL_FLOAT` / `ACL_INT32`）                                 |
-| alg            |   IN   | 算法类型，当前仅支持`ACL_SPARSE_SPMV_ALG_DEFAULT`                           |
-| externalBuffer |   IN   | 工作缓冲区（大小由`GetBufferSize` 获取）                                    |
+| alg            |   IN   | 算法类型，支持 DEFAULT / CSR_ALG1 / CSR_ALG2                                  |
+| externalBuffer |   IN   | 工作缓冲区（大小由`GetBufferSize` 获取；转置且 NNZ>0 时必需）                  |
 
 **返回值**：
 
@@ -339,7 +362,7 @@ aclsparseStatus_t aclsparseSpMV(
 | -------------------------------------------- | ----------------------------------------------------------------------------- |
 | `ACL_SPARSE_STATUS_SUCCESS`                | 成功                                                                          |
 | `ACL_SPARSE_STATUS_HANDLE_IS_NULLPTR`      | handle 为空                                                                   |
-| `ACL_SPARSE_STATUS_INVALID_VALUE`          | matA / vecX / vecY / externalBuffer 为空，或向量大小不满足要求                |
+| `ACL_SPARSE_STATUS_INVALID_VALUE`          | 描述符或必要标量为空、元数据非法、向量过短，或当前阶段使用的数据指针未绑定 |
 | `ACL_SPARSE_STATUS_NOT_SUPPORTED`          | 矩阵格式非 CSR、computeType 不支持、算法不支持、或 valType/outType 组合不支持 |
-| `ACL_SPARSE_STATUS_INSUFFICIENT_RESOURCES` | 单行非零元数超过 UB 容量                                                      |
-| `ACL_SPARSE_STATUS_EXECUTION_FAILED`       | stream 同步失败                                                               |
+| `ACL_SPARSE_STATUS_INSUFFICIENT_RESOURCES` | 转置且 NNZ>0 时 workspace 为空或不足                                           |
+| `ACL_SPARSE_STATUS_INTERNAL_ERROR`         | 公共 GetAivCoreCount 返回 0；不使用固定核数兜底 |
