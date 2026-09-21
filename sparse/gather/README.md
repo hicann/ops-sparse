@@ -46,8 +46,12 @@ aclsparseStatus_t aclsparseGather(
 - handle 不可为 nullptr，否则返回 `ACL_SPARSE_STATUS_HANDLE_IS_NULLPTR`
 - vecY、vecX 不可为 nullptr，否则返回 `ACL_SPARSE_STATUS_INVALID_VALUE`
 - vecX.valueType 与 vecY.valueType 必须一致
-- vecX.size（稀疏向量的稠密维度）<= vecY.size（稠密向量的大小）
-- vecX.indices 中每个索引值 `X.indices[i] - idxBase` 必须在 `[0, vecY.size)` 范围内（运行时不做边界检查，越界访问将导致未定义行为）
+- vecX.size（稀疏向量的稠密维度）必须等于 vecY.size（稠密向量长度），且 `0 <= nnz <= size`
+- `size` 和 `nnz` 的接口上限为 `INT64_MAX`；实际还受 Device 可分配内存、元素字节数以及地址范围不溢出的约束
+- vecX.indices 中每个索引值 `X.indices[i] - idxBase` 必须在 `[0, vecY.size)` 范围内；Device 索引越界遵循异步错误协议，因此合法索引是调用方前置条件
+- `nnz=0` 成功返回且不启动 Kernel；`size=0` 仅允许 `nnz=0`
+- 非空输入、索引和输出指针必须位于当前 NPU Device，且在异步执行完成前保持有效
+- vecY.values、vecX.indices 只读；vecX.values 不得与任一输入缓冲区重叠
 - 不需要 workspace，不需要预处理阶段
 - 支持索引乱序（indices 不需要排序）
 - 支持 vecX.indices 中存在重复元素
@@ -60,6 +64,9 @@ aclsparseStatus_t aclsparseGather(
 | FP16 | `ACL_FLOAT16` | ✅ |
 | BF16 | `ACL_BF16` | ✅ |
 | FP64 | `ACL_DOUBLE` | ✅ |
+| COMPLEX64 | `ACL_COMPLEX64` | ✅ |
+
+Ascend 950 任务声明的必选类型为 FP16、BF16、FP32 和 COMPLEX64。FP64 为既有低层 C++ 接口兼容能力；PyTorch/ATen 适配仅开放四种必选类型。
 
 #### 支持的索引类型
 
@@ -67,6 +74,8 @@ aclsparseStatus_t aclsparseGather(
 |---------|--------|------|
 | 32 位有符号整数 | `ACL_SPARSE_INDEX_32I` | ✅ |
 | 64 位有符号整数 | `ACL_SPARSE_INDEX_64I` | ✅ |
+
+任务公开的 PyTorch/ATen 契约仅接受 I32。I64 保留为既有低层 C++ 接口兼容能力。
 
 #### 索引基址
 
@@ -86,6 +95,28 @@ aclsparseStatus_t aclsparseGather(
 | 确定性 | ✅ |每次调用结果 bit-wise 一致 |
 | 索引乱序 | ✅ | indices 不要求排序 |
 | 异步执行 | ✅ | 调用后需 `aclrtSynchronizeStream` 等待完成 |
+
+## PyTorch/ATen 入口
+
+适配支持 PyTorch 2.7+、torch_npu 26.0.0+。加载扩展后，公开入口保持标准 Dispatcher 路径：
+
+```python
+import torch
+import torch_npu
+import cann_ops_sparse
+
+source = torch.tensor([10, 20, 30, 40, 50], dtype=torch.float32, device="npu")
+index = torch.tensor([0, 2, 4], dtype=torch.int32, device="npu")
+output = torch.index_select(source, 0, index)
+```
+
+调用链为 `torch.index_select` → `aten::index_select` → PrivateUse1 实现 → `aclsparseGather` → Ascend C Kernel，不通过 CPU 回填。该公开入口限一维连续 Strided NPU Tensor、`dim=0`（一维语义下也接受 `-1`）、I32 index 和四种任务必选 values dtype。PyTorch 公开入口采用 base 0；底层 C API 继续支持 base 0/1。适配为 forward-only，不支持 autograd，输出为独立连续 Tensor。
+
+PyTorch 入口允许索引长度超过输入长度，索引可以乱序或重复，但每个索引仍必须位于输入范围。
+长索引通过索引和输出的连续视图分段调用底层接口，全部沿用调用方 stream，不复制数据或增加
+线性临时缓冲区；公共 SpVec 描述符和 C API 的 `nnz <= size` 契约保持不变。
+
+构建和执行命令见 [`test/gather/README.md`](../../test/gather/README.md)。
 
 ## 调用示例
 

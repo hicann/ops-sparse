@@ -10,6 +10,8 @@ L0_size4_nnz3_fp32_zero_32i,4,3,FLOAT,ZERO,32I,204
 L0_size4_nnz4_fp32_zero_32i,4,4,FLOAT,ZERO,32I,43
 L0_size4_nnz4_fp32_one_32i,4,4,FLOAT,ONE,32I,205
 L0_size4_nnz2_fp16_zero_32i,4,2,FLOAT16,ZERO,32I,47
+L0_size4_nnz2_bf16_one_32i,4,2,BF16,ONE,32I,401
+L0_size4_nnz2_complex64_zero_32i,4,2,COMPLEX64,ZERO,32I,402
 L0_size4_nnz4_fp16_zero_64i,4,4,FLOAT16,ZERO,64I,206
 L0_size4_nnz2_fp64_zero_32i,4,2,DOUBLE,ZERO,32I,208
 L0_size4_nnz4_fp64_zero_64i,4,4,DOUBLE,ZERO,64I,209

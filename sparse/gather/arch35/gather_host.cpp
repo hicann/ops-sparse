@@ -18,7 +18,10 @@
  */
 
 #include <algorithm>
+#include <cstddef>
 #include <cstdint>
+#include <limits>
+#include "acl/acl_rt.h"
 #include "acl/acl_base_rt.h"
 #include "cann_ops_sparse.h"
 #include "aclsparse_handle_internal.h"
@@ -29,12 +32,82 @@
 
 namespace {
 
-bool supportedType(aclDataType t) { return t == ACL_FLOAT || t == ACL_FLOAT16 || t == ACL_BF16 || t == ACL_DOUBLE; }
+bool SupportedValueType(aclDataType type)
+{
+    return type == ACL_FLOAT16 || type == ACL_BF16 || type == ACL_FLOAT || type == ACL_COMPLEX64 ||
+           type == ACL_DOUBLE;
+}
+
+size_t ValueTypeSize(aclDataType type)
+{
+    switch (type) {
+        case ACL_FLOAT16:
+        case ACL_BF16:
+            return sizeof(uint16_t);
+        case ACL_FLOAT:
+            return sizeof(uint32_t);
+        case ACL_COMPLEX64:
+        case ACL_DOUBLE:
+            return sizeof(uint64_t);
+        default:
+            return 0;
+    }
+}
+
+size_t IndexTypeSize(aclsparseIndexType_t type)
+{
+    if (type == ACL_SPARSE_INDEX_32I) {
+        return sizeof(int32_t);
+    }
+    if (type == ACL_SPARSE_INDEX_64I) {
+        return sizeof(int64_t);
+    }
+    return 0;
+}
+
+bool SafeByteSize(uint64_t count, size_t elementSize, size_t &bytes)
+{
+    if (elementSize == 0 || count > std::numeric_limits<size_t>::max() / elementSize) {
+        return false;
+    }
+    bytes = static_cast<size_t>(count) * elementSize;
+    return true;
+}
+
+bool AddressRangeIsValid(const void *ptr, size_t bytes)
+{
+    if (bytes == 0) {
+        return true;
+    }
+    const uintptr_t begin = reinterpret_cast<uintptr_t>(ptr);
+    return ptr != nullptr && begin <= std::numeric_limits<uintptr_t>::max() - bytes;
+}
+
+bool AddressRangesOverlap(const void *lhs, size_t lhsBytes, const void *rhs, size_t rhsBytes)
+{
+    if (lhsBytes == 0 || rhsBytes == 0) {
+        return false;
+    }
+    const uintptr_t lhsBegin = reinterpret_cast<uintptr_t>(lhs);
+    const uintptr_t rhsBegin = reinterpret_cast<uintptr_t>(rhs);
+    return lhsBegin < rhsBegin + rhsBytes && rhsBegin < lhsBegin + lhsBytes;
+}
+
+bool IsPointerOnCurrentDevice(const void *ptr, int32_t currentDevice)
+{
+    aclrtPtrAttributes attributes{};
+    if (aclrtPointerGetAttributes(ptr, &attributes) != ACL_SUCCESS) {
+        return false;
+    }
+    const bool deviceAccessible = attributes.location.type == ACL_MEM_LOCATION_TYPE_DEVICE ||
+                                  attributes.location.type == ACL_MEM_LOCATION_TYPE_MANAGED;
+    return deviceAccessible && static_cast<int32_t>(attributes.location.id) == currentDevice;
+}
 
 // ===========================================================================
 // 参数校验
 // ===========================================================================
-static aclsparseStatus_t ValidateGatherParams(
+static aclsparseStatus_t ValidateDescriptorObjects(
     aclsparseHandle_t handle, aclsparseConstDnVecDescr_t vecY, aclsparseSpVecDescr_t vecX)
 {
     if (handle == nullptr) {
@@ -49,19 +122,93 @@ static aclsparseStatus_t ValidateGatherParams(
         OP_LOGE("aclsparseGather", "vecX is nullptr");
         return ACL_SPARSE_STATUS_INVALID_VALUE;
     }
+    if (vecY->signature != kDnVecSignature || vecX->signature != kSpVecSignature) {
+        OP_LOGE("aclsparseGather", "invalid DnVec/SpVec descriptor signature");
+        return ACL_SPARSE_STATUS_INVALID_VALUE;
+    }
+    return ACL_SPARSE_STATUS_SUCCESS;
+}
+
+static aclsparseStatus_t ValidateTypesAndShape(
+    aclsparseConstDnVecDescr_t vecY, aclsparseSpVecDescr_t vecX)
+{
     if (vecX->valueType != vecY->valueType) {
         OP_LOGE("aclsparseGather", "value type mismatch: X=%d, Y=%d", vecX->valueType, vecY->valueType);
         return ACL_SPARSE_STATUS_NOT_SUPPORTED;
     }
-    if (!supportedType(vecY->valueType)) {
+    if (!SupportedValueType(vecY->valueType)) {
         OP_LOGE("aclsparseGather", "unsupported value type: %d", vecY->valueType);
         return ACL_SPARSE_STATUS_NOT_SUPPORTED;
     }
-    if (vecY->nums < vecX->size) {
-        OP_LOGE("aclsparseGather", "vecY->nums(%lu) < vecX->size(%lu)", vecY->nums, vecX->size);
+    if (IndexTypeSize(vecX->idxType) == 0) {
+        OP_LOGE("aclsparseGather", "unsupported index type: %d", vecX->idxType);
+        return ACL_SPARSE_STATUS_NOT_SUPPORTED;
+    }
+    if (vecX->idxBase != ACL_SPARSE_INDEX_BASE_ZERO && vecX->idxBase != ACL_SPARSE_INDEX_BASE_ONE) {
+        OP_LOGE("aclsparseGather", "invalid index base: %d", vecX->idxBase);
+        return ACL_SPARSE_STATUS_INVALID_VALUE;
+    }
+    if (vecY->nums != vecX->size) {
+        OP_LOGE("aclsparseGather", "vector size mismatch: Y=%lu, X=%lu", vecY->nums, vecX->size);
+        return ACL_SPARSE_STATUS_INVALID_VALUE;
+    }
+    if (vecX->nnz > vecX->size) {
+        OP_LOGE("aclsparseGather", "nnz(%lu) exceeds vector size(%lu)", vecX->nnz, vecX->size);
         return ACL_SPARSE_STATUS_INVALID_VALUE;
     }
     return ACL_SPARSE_STATUS_SUCCESS;
+}
+
+static aclsparseStatus_t ValidateDataBuffers(
+    aclsparseConstDnVecDescr_t vecY, aclsparseSpVecDescr_t vecX)
+{
+    if (vecX->nnz == 0) {
+        return ACL_SPARSE_STATUS_SUCCESS;
+    }
+    if (vecY->nums == 0 || vecY->values == nullptr || vecX->indices == nullptr || vecX->values == nullptr) {
+        OP_LOGE("aclsparseGather", "non-empty input has zero size or null data pointer");
+        return ACL_SPARSE_STATUS_INVALID_VALUE;
+    }
+
+    size_t yBytes = 0;
+    size_t xBytes = 0;
+    size_t indexBytes = 0;
+    const size_t valueSize = ValueTypeSize(vecY->valueType);
+    if (!SafeByteSize(vecY->nums, valueSize, yBytes) || !SafeByteSize(vecX->nnz, valueSize, xBytes) ||
+        !SafeByteSize(vecX->nnz, IndexTypeSize(vecX->idxType), indexBytes) ||
+        !AddressRangeIsValid(vecY->values, yBytes) || !AddressRangeIsValid(vecX->values, xBytes) ||
+        !AddressRangeIsValid(vecX->indices, indexBytes)) {
+        OP_LOGE("aclsparseGather", "buffer byte-size or address range overflow");
+        return ACL_SPARSE_STATUS_INVALID_VALUE;
+    }
+    if (AddressRangesOverlap(vecY->values, yBytes, vecX->values, xBytes) ||
+        AddressRangesOverlap(vecX->indices, indexBytes, vecX->values, xBytes)) {
+        OP_LOGE("aclsparseGather", "output values overlap an input buffer");
+        return ACL_SPARSE_STATUS_INVALID_VALUE;
+    }
+
+    int32_t currentDevice = -1;
+    if (aclrtGetDevice(&currentDevice) != ACL_SUCCESS || !IsPointerOnCurrentDevice(vecY->values, currentDevice) ||
+        !IsPointerOnCurrentDevice(vecX->indices, currentDevice) ||
+        !IsPointerOnCurrentDevice(vecX->values, currentDevice)) {
+        OP_LOGE("aclsparseGather", "data pointer is not on the current NPU device");
+        return ACL_SPARSE_STATUS_INVALID_VALUE;
+    }
+    return ACL_SPARSE_STATUS_SUCCESS;
+}
+
+static aclsparseStatus_t ValidateGatherParams(
+    aclsparseHandle_t handle, aclsparseConstDnVecDescr_t vecY, aclsparseSpVecDescr_t vecX)
+{
+    aclsparseStatus_t status = ValidateDescriptorObjects(handle, vecY, vecX);
+    if (status != ACL_SPARSE_STATUS_SUCCESS) {
+        return status;
+    }
+    status = ValidateTypesAndShape(vecY, vecX);
+    if (status != ACL_SPARSE_STATUS_SUCCESS) {
+        return status;
+    }
+    return ValidateDataBuffers(vecY, vecX);
 }
 
 // ===========================================================================

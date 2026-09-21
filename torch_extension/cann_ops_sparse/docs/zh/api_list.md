@@ -8,6 +8,7 @@
 
 | public PyTorch API | ATen schema | 分发键 | 算子 | 文档 |
 | :--- | :--- | :--- | :--- | :--- |
+| `torch.index_select` | `aten::index_select` | `PrivateUse1` | gather | [gather.md](gather.md) |
 | `torch.sparse.mm` / `torch.sparse.addmm` | `aten::_sparse_addmm` | `SparseCsrPrivateUse1` | spgemm | [spgemm.md](spgemm.md) |
 | `torch.sparse.mm` | `aten::_sparse_sparse_matmul` | `SparseCsrPrivateUse1` | spgemm | [spgemm.md](spgemm.md) |
 | `torch.sparse.mm` | `aten::_sparse_sparse_matmul` | `SparsePrivateUse1` | spgemm | [spgemm.md](spgemm.md) |

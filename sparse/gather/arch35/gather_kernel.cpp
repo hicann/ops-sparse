@@ -35,12 +35,17 @@ template <typename ValT, typename IdxT, aclsparseIndexBase_t idxBase>
 __simt_vf__ __aicore__ __launch_bounds__(kGatherMaxThreadsPerBlock) inline void GatherSimtCompute(
     __gm__ const IdxT* indices, __gm__ const ValT* yValues, __gm__ ValT* xValues, int64_t nnz)
 {
-    int64_t globalTid = threadIdx.x + blockIdx.x * blockDim.x;
-    int64_t gridStride = blockDim.x * gridDim.x;
+    const int64_t globalTid = static_cast<int64_t>(threadIdx.x) +
+                              static_cast<int64_t>(blockIdx.x) * static_cast<int64_t>(blockDim.x);
+    const int64_t gridStride = static_cast<int64_t>(blockDim.x) * static_cast<int64_t>(gridDim.x);
 
-    for (int64_t i = globalTid; i < nnz; i += gridStride) {
-        int64_t pos = indices[i] - idxBase;
+    for (int64_t i = globalTid; i < nnz;) {
+        const int64_t pos = static_cast<int64_t>(indices[i]) - static_cast<int64_t>(idxBase);
         xValues[i] = yValues[pos];
+        if (gridStride >= nnz - i) {
+            break;
+        }
+        i += gridStride;
     }
 }
 
@@ -84,22 +89,26 @@ extern "C" void gather_kernel_do(
                 <<<tiling.numBlocks, nullptr, stream>>>(indices, yValues, xValues, tiling);
         }
     };
-    match_case(ACL_FLOAT, type_identity<float>{}, ACL_SPARSE_INDEX_32I, int32_t{}, base0_t{});
-    match_case(ACL_FLOAT, type_identity<float>{}, ACL_SPARSE_INDEX_32I, int32_t{}, base1_t{});
-    match_case(ACL_FLOAT, type_identity<float>{}, ACL_SPARSE_INDEX_64I, int64_t{}, base0_t{});
-    match_case(ACL_FLOAT, type_identity<float>{}, ACL_SPARSE_INDEX_64I, int64_t{}, base1_t{});
-    match_case(ACL_FLOAT16, type_identity<__fp16>{}, ACL_SPARSE_INDEX_32I, int32_t{}, base0_t{});
-    match_case(ACL_FLOAT16, type_identity<__fp16>{}, ACL_SPARSE_INDEX_32I, int32_t{}, base1_t{});
-    match_case(ACL_FLOAT16, type_identity<__fp16>{}, ACL_SPARSE_INDEX_64I, int64_t{}, base0_t{});
-    match_case(ACL_FLOAT16, type_identity<__fp16>{}, ACL_SPARSE_INDEX_64I, int64_t{}, base1_t{});
-    // 疑似编译器 bug: arm 平台 host 侧函数中无法出现 __bf16 类型，即使不实例化任何值
-    // 由于 gather 算子只进行拷贝，没有浮点数数值计算，这里用 __fp16 替代
-    match_case(ACL_BF16, type_identity<__fp16>{}, ACL_SPARSE_INDEX_32I, int32_t{}, base0_t{});
-    match_case(ACL_BF16, type_identity<__fp16>{}, ACL_SPARSE_INDEX_32I, int32_t{}, base1_t{});
-    match_case(ACL_BF16, type_identity<__fp16>{}, ACL_SPARSE_INDEX_64I, int64_t{}, base0_t{});
-    match_case(ACL_BF16, type_identity<__fp16>{}, ACL_SPARSE_INDEX_64I, int64_t{}, base1_t{});
-    match_case(ACL_DOUBLE, type_identity<double>{}, ACL_SPARSE_INDEX_32I, int32_t{}, base0_t{});
-    match_case(ACL_DOUBLE, type_identity<double>{}, ACL_SPARSE_INDEX_32I, int32_t{}, base1_t{});
-    match_case(ACL_DOUBLE, type_identity<double>{}, ACL_SPARSE_INDEX_64I, int64_t{}, base0_t{});
-    match_case(ACL_DOUBLE, type_identity<double>{}, ACL_SPARSE_INDEX_64I, int64_t{}, base1_t{});
+    // Gather only copies payload bits. Integer containers avoid Host compiler dependence on
+    // __fp16/__bf16 and preserve NaN payloads and complex real/imaginary bits exactly.
+    match_case(ACL_FLOAT, type_identity<uint32_t>{}, ACL_SPARSE_INDEX_32I, int32_t{}, base0_t{});
+    match_case(ACL_FLOAT, type_identity<uint32_t>{}, ACL_SPARSE_INDEX_32I, int32_t{}, base1_t{});
+    match_case(ACL_FLOAT, type_identity<uint32_t>{}, ACL_SPARSE_INDEX_64I, int64_t{}, base0_t{});
+    match_case(ACL_FLOAT, type_identity<uint32_t>{}, ACL_SPARSE_INDEX_64I, int64_t{}, base1_t{});
+    match_case(ACL_FLOAT16, type_identity<uint16_t>{}, ACL_SPARSE_INDEX_32I, int32_t{}, base0_t{});
+    match_case(ACL_FLOAT16, type_identity<uint16_t>{}, ACL_SPARSE_INDEX_32I, int32_t{}, base1_t{});
+    match_case(ACL_FLOAT16, type_identity<uint16_t>{}, ACL_SPARSE_INDEX_64I, int64_t{}, base0_t{});
+    match_case(ACL_FLOAT16, type_identity<uint16_t>{}, ACL_SPARSE_INDEX_64I, int64_t{}, base1_t{});
+    match_case(ACL_BF16, type_identity<uint16_t>{}, ACL_SPARSE_INDEX_32I, int32_t{}, base0_t{});
+    match_case(ACL_BF16, type_identity<uint16_t>{}, ACL_SPARSE_INDEX_32I, int32_t{}, base1_t{});
+    match_case(ACL_BF16, type_identity<uint16_t>{}, ACL_SPARSE_INDEX_64I, int64_t{}, base0_t{});
+    match_case(ACL_BF16, type_identity<uint16_t>{}, ACL_SPARSE_INDEX_64I, int64_t{}, base1_t{});
+    match_case(ACL_COMPLEX64, type_identity<uint64_t>{}, ACL_SPARSE_INDEX_32I, int32_t{}, base0_t{});
+    match_case(ACL_COMPLEX64, type_identity<uint64_t>{}, ACL_SPARSE_INDEX_32I, int32_t{}, base1_t{});
+    match_case(ACL_COMPLEX64, type_identity<uint64_t>{}, ACL_SPARSE_INDEX_64I, int64_t{}, base0_t{});
+    match_case(ACL_COMPLEX64, type_identity<uint64_t>{}, ACL_SPARSE_INDEX_64I, int64_t{}, base1_t{});
+    match_case(ACL_DOUBLE, type_identity<uint64_t>{}, ACL_SPARSE_INDEX_32I, int32_t{}, base0_t{});
+    match_case(ACL_DOUBLE, type_identity<uint64_t>{}, ACL_SPARSE_INDEX_32I, int32_t{}, base1_t{});
+    match_case(ACL_DOUBLE, type_identity<uint64_t>{}, ACL_SPARSE_INDEX_64I, int64_t{}, base0_t{});
+    match_case(ACL_DOUBLE, type_identity<uint64_t>{}, ACL_SPARSE_INDEX_64I, int64_t{}, base1_t{});
 }

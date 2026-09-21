@@ -36,6 +36,7 @@ struct GatherTestParam : public SparseTestParamBase {
             {"FLOAT", ACL_FLOAT},
             {"FLOAT16", ACL_FLOAT16},
             {"BF16", ACL_BF16},
+            {"COMPLEX64", ACL_COMPLEX64},
             {"DOUBLE", ACL_DOUBLE},
         }[parseString(row, "value_type")];
         idx_base = std::map<std::string, aclsparseIndexBase_t>{
