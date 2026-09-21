@@ -52,6 +52,7 @@ target_link_libraries(${_target} PRIVATE
     $ENV{ASCEND_HOME_PATH}/lib64/libgraph_base.so
     ${ASCEND_CANN_PACKAGE_LINUX_PATH}/lib64/libgraph.so
     $ENV{ASCEND_HOME_PATH}/lib64/libunified_dlog.so
+    ${CMAKE_DL_LIBS}
 )
 
 find_package(GTest REQUIRED)
