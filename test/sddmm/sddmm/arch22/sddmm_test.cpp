@@ -334,3 +334,32 @@ TEST_F(SddmmArch22ExceptionTest, E3_DimensionMismatch) {
         ACL_FLOAT, ACL_SPARSE_SDDMM_ALG_DEFAULT, &bufSize);
     EXPECT_EQ(ret, ACL_SPARSE_STATUS_INVALID_VALUE);
 }
+
+TEST_F(SddmmArch22ExceptionTest, E4_UnrepresentableLeadingDimension) {
+    HandleManager handle;
+    handle.setStream(env_->stream());
+    float alpha = 1.0f, beta = 0.0f;
+    constexpr int64_t m = 1, n = 1, k = 1, nnz = 1;
+    const std::vector<int32_t> rowOff = {0, 1};
+    const std::vector<int32_t> colInd = {0};
+    const std::vector<float> values = {0.0f};
+    const std::vector<float> dense = {1.0f};
+    DeviceBuffer dRowOff = DeviceBuffer::copyFrom(rowOff.data(), 2 * sizeof(int32_t));
+    DeviceBuffer dColInd = DeviceBuffer::copyFrom(colInd.data(), sizeof(int32_t));
+    DeviceBuffer dValues = DeviceBuffer::copyFrom(values.data(), sizeof(float));
+    DeviceBuffer dDense = DeviceBuffer::copyFrom(dense.data(), sizeof(float));
+    auto matX = DnMatManager::createConst(
+        m, k, static_cast<int64_t>(UINT32_MAX) + 1, dDense.raw(), ACL_FLOAT,
+        ACL_SPARSE_ORDER_ROW);
+    auto matY = DnMatManager::createConst(n, k, k, dDense.raw(), ACL_FLOAT,
+                                          ACL_SPARSE_ORDER_ROW);
+    auto matC = SpMatManager::createCsr(m, n, nnz, dRowOff.get(), dColInd.get(), dValues.get(),
+                                        ACL_SPARSE_INDEX_32I, ACL_SPARSE_INDEX_32I,
+                                        ACL_SPARSE_INDEX_BASE_ZERO, ACL_FLOAT);
+    size_t bufSize = 0;
+    const auto ret = aclsparseSDDMMBufferSize(
+        handle.get(), ACL_SPARSE_OP_NON_TRANSPOSE, ACL_SPARSE_OP_TRANSPOSE,
+        &alpha, matX.cget(), matY.cget(), &beta, matC.get(), ACL_FLOAT,
+        ACL_SPARSE_SDDMM_ALG_DEFAULT, &bufSize);
+    EXPECT_EQ(ret, ACL_SPARSE_STATUS_INVALID_VALUE);
+}

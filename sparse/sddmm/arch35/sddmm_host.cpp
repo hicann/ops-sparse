@@ -265,6 +265,14 @@ static aclsparseStatus_t ValidateSddmmDtypeAndDims(const aclsparseDnMatDescr *ma
         OP_LOGE("aclsparseSDDMM", "dimension exceeds INT32_MAX");
         return ACL_SPARSE_STATUS_NOT_SUPPORTED;
     }
+    // ldx/ldy are serialized as int32_t in SddmmTilingData.  Reject values
+    // that cannot round-trip instead of silently truncating the GM stride.
+    if (matX->ld > static_cast<int64_t>(INT32_MAX) ||
+        matY->ld > static_cast<int64_t>(INT32_MAX)) {
+        OP_LOGE("aclsparseSDDMM", "dense leading dimension exceeds INT32_MAX (X=%ld, Y=%ld)",
+                static_cast<long>(matX->ld), static_cast<long>(matY->ld));
+        return ACL_SPARSE_STATUS_INVALID_VALUE;
+    }
     return ACL_SPARSE_STATUS_SUCCESS;
 }
 

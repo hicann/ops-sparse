@@ -552,3 +552,17 @@ TEST_F(SddmmExceptionTest, NullCsrPtrs) {
         ACL_FLOAT, ACL_SPARSE_SDDMM_ALG_DEFAULT, &bs);
     EXPECT_EQ(ret, ACL_SPARSE_STATUS_INVALID_VALUE);
 }
+
+// Tiling stores dense leading dimensions as int32_t.  A public DnMat can
+// carry a larger int64_t ld, so reject it before serializing the tiling data.
+TEST_F(SddmmExceptionTest, RejectsUnrepresentableLeadingDimension) {
+    auto matXTooWide = DnMatManager::createConst(
+        4, 4, static_cast<int64_t>(INT32_MAX) + 1, dX_.raw(), ACL_FLOAT,
+        ACL_SPARSE_ORDER_ROW);
+    size_t bs = 0;
+    const auto ret = aclsparseSDDMMBufferSize(
+        handle_->get(), ACL_SPARSE_OP_NON_TRANSPOSE, ACL_SPARSE_OP_NON_TRANSPOSE,
+        &alpha_, matXTooWide.cget(), matY_.cget(), &beta_, matC_.get(),
+        ACL_FLOAT, ACL_SPARSE_SDDMM_ALG_DEFAULT, &bs);
+    EXPECT_EQ(ret, ACL_SPARSE_STATUS_INVALID_VALUE);
+}

@@ -95,9 +95,15 @@ aclsparseStatus_t SddmmValidateDescriptors(
     CHECK_RET(matX->ld >= xMinLd,
               OP_LOGE("aclsparseSDDMM", "matX ld (%ld) < minimum (%ld)", matX->ld, xMinLd);
               return ACL_SPARSE_STATUS_INVALID_VALUE);
+    CHECK_RET(matX->ld <= static_cast<int64_t>(UINT32_MAX),
+              OP_LOGE("aclsparseSDDMM", "matX ld (%ld) exceeds UINT32_MAX", matX->ld);
+              return ACL_SPARSE_STATUS_INVALID_VALUE);
     const int64_t yMinLd = (matY->order == ACL_SPARSE_ORDER_ROW) ? matY->cols : matY->rows;
     CHECK_RET(matY->ld >= yMinLd,
               OP_LOGE("aclsparseSDDMM", "matY ld (%ld) < minimum (%ld)", matY->ld, yMinLd);
+              return ACL_SPARSE_STATUS_INVALID_VALUE);
+    CHECK_RET(matY->ld <= static_cast<int64_t>(UINT32_MAX),
+              OP_LOGE("aclsparseSDDMM", "matY ld (%ld) exceeds UINT32_MAX", matY->ld);
               return ACL_SPARSE_STATUS_INVALID_VALUE);
     return ACL_SPARSE_STATUS_SUCCESS;
 }
