@@ -488,10 +488,13 @@ private:
 // DataCopyPad 跨步搬运说明 (dav-3510):
 //   - GM 侧 stride (srcStride/dstStride) 单位为字节, 表示相邻数据块间隔 (gap),
 //     pitch = stride + blockLen. GM 侧无 32B 对齐要求, 任意 ld 均可。
-//   - UB 侧 stride 单位为 32 字节; Normal 模式下 1-float 数据块在 UB 中按 32B 槽位
-//     排布 (pitch=32B). 因此跨步读后 UB 数据呈 32B 间隔散列, 连续写时以 srcStride=0
-//     (UB pitch=32B) 从散列槽位 gather 回连续 GM。
-//   - 分段处理 (kTransSegMax): 同时约束 blockCount (<=4095) 与 UB 占用 (32B/元素).
+//   - UB 侧 stride=0 时数据块紧邻排布 (pitch=blockLen), 读入与写出两侧
+//     均以 stride=0 访问 UB, 布局自洽, 无需感知槽位细节。
+//   - MTE2 (GM→UB 读) 与 MTE3 (UB→GM 写) 为不同硬件流水线, 跨流水依赖
+//     必须用 SetFlag/WaitFlag<HardEvent::MTE2_MTE3 / MTE3_MTE2> 事件同步;
+//     PipeBarrier<PIPE_MTE2/PIPE_MTE3> 只保证单 pipe 内顺序, 不保证跨 pipe
+//     可见性 (读入未落地时写出会读到陈旧/未初始化数据)。
+//   - 分段处理 (kTransSegMax): 约束 blockCount (<=4095) 与 UB 占用。
 // ============================================================================
 class SpsmTransposeAIV {
 public:
@@ -511,8 +514,8 @@ public:
         numCores_ = static_cast<int32_t>(GetBlockNum());
         if (numCores_ < 1) { numCores_ = 1; }
 
-        // UB 行缓冲: 跨步 DataCopyPad 以 1-float 块搬运, Normal 模式下每元素占 32B 槽位,
-        // 故 buffer 大小 = 32B * kTransSegMax。
+        // UB 行缓冲: 按 32B/元素上限预留 (兼容 2D 搬运 UB 侧块粒度排布),
+        // 实际紧邻排布时仅用前 segLen*4B。
         pipePtr_->InitBuffer(rowBuf_, kTransSegBytes);
     }
 
@@ -553,7 +556,7 @@ private:
     {
         LocalTensor<float> rowBuf = rowBuf_.Get<float>();
         // 跨步读: blockCount=segLen, blockLen=4B(1 float), srcStride=(ld-1)*4B (GM gap),
-        // dstStride=0 (UB 32B 槽位散列). 读 src[k*ld+i], k=kStart..kStart+segLen-1.
+        // dstStride=0 (UB 紧邻排布). 读 src[k*ld+i], k=kStart..kStart+segLen-1.
         // dav-3510 下 DataCopyExtParams.srcStride/dstStride 为 int64_t, 与此处 int64_t
         // 计算匹配, 大 ld (stride>4GB) 不会截断。
         const int64_t srcStrideBytes = static_cast<int64_t>(ld_ - 1) * static_cast<int64_t>(sizeof(float));
@@ -561,15 +564,23 @@ private:
                                srcStrideBytes, 0, 0};
         DataCopyPadExtParams<float> padIn{false, 0, 0, 0.0f};
         DataCopyPad(rowBuf, srcGm_[static_cast<uint64_t>(i) + static_cast<uint64_t>(kStart) * static_cast<uint64_t>(ld_)], cpIn, padIn);
-        // MTE2→MTE3 同步: 确保 GM→UB 加载完成后再 UB→GM 读取
-        PipeBarrier<PIPE_MTE2>();
-        // 连续写: blockCount=segLen, blockLen=4B, srcStride=0 (UB 32B 槽位 gather),
-        // dstStride=0 (GM 连续). 写 dst[i*n+kStart+k].
+        // MTE2→MTE3 跨流水同步: 确保 GM→UB 加载完成后再 UB→GM 读取。
+        // PipeBarrier<PIPE_MTE2> 只保证 MTE2 pipe 内的顺序, 不保证 MTE3 写能看到
+        // MTE2 读的数据 (跨 pipe 可见性), 必须用 HardEvent 事件同步。
+        event_t evtIn = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::MTE2_MTE3));
+        SetFlag<HardEvent::MTE2_MTE3>(evtIn);
+        WaitFlag<HardEvent::MTE2_MTE3>(evtIn);
+        GetTPipePtr()->ReleaseEventID<HardEvent::MTE2_MTE3>(evtIn);
+        // 连续写: blockCount=segLen, blockLen=4B, srcStride=0, dstStride=0 (GM 连续).
+        // 写 dst[i*n+kStart+k].
         DataCopyExtParams cpOut{static_cast<uint16_t>(segLen), static_cast<uint32_t>(sizeof(float)),
                                 0, 0, 0};
         DataCopyPad(dstGm_[static_cast<uint64_t>(i) * static_cast<uint64_t>(n_) + kStart], rowBuf, cpOut);
-        // MTE3→MTE2 同步: 确保 UB→GM 写出完成后再复用 rowBuf
-        PipeBarrier<PIPE_MTE3>();
+        // MTE3→MTE2 跨流水同步: 确保 UB→GM 写出完成后再复用 rowBuf (下一行读入)。
+        event_t evtOut = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::MTE3_MTE2));
+        SetFlag<HardEvent::MTE3_MTE2>(evtOut);
+        WaitFlag<HardEvent::MTE3_MTE2>(evtOut);
+        GetTPipePtr()->ReleaseEventID<HardEvent::MTE3_MTE2>(evtOut);
     }
 
     // direction=1 (ROW→COL): 连续读 src[i*n+k] -> 跨步写 dst[k*ld+i]
@@ -577,22 +588,28 @@ private:
     {
         LocalTensor<float> rowBuf = rowBuf_.Get<float>();
         // 连续读: blockCount=segLen, blockLen=4B, srcStride=0 (GM 连续),
-        // dstStride=0 (UB 32B 槽位散列). 读 src[i*n+kStart+k].
+        // dstStride=0 (UB 紧邻排布). 读 src[i*n+kStart+k].
         DataCopyExtParams cpIn{static_cast<uint16_t>(segLen), static_cast<uint32_t>(sizeof(float)),
                                0, 0, 0};
         DataCopyPadExtParams<float> padIn{false, 0, 0, 0.0f};
         DataCopyPad(rowBuf, srcGm_[static_cast<uint64_t>(i) * static_cast<uint64_t>(n_) + kStart], cpIn, padIn);
-        // MTE2→MTE3 同步
-        PipeBarrier<PIPE_MTE2>();
-        // 跨步写: blockCount=segLen, blockLen=4B, srcStride=0 (UB 32B 槽位 gather),
+        // MTE2→MTE3 跨流水同步: 确保 GM→UB 加载完成后再 UB→GM 读取。
+        event_t evtIn = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::MTE2_MTE3));
+        SetFlag<HardEvent::MTE2_MTE3>(evtIn);
+        WaitFlag<HardEvent::MTE2_MTE3>(evtIn);
+        GetTPipePtr()->ReleaseEventID<HardEvent::MTE2_MTE3>(evtIn);
+        // 跨步写: blockCount=segLen, blockLen=4B, srcStride=0,
         // dstStride=(ld-1)*4B (GM gap). 写 dst[(kStart+k)*ld+i].
         const int64_t dstStrideBytes = static_cast<int64_t>(ld_ - 1) * static_cast<int64_t>(sizeof(float));
         DataCopyExtParams cpOut{static_cast<uint16_t>(segLen), static_cast<uint32_t>(sizeof(float)),
                                 0, dstStrideBytes, 0};
         DataCopyPad(dstGm_[static_cast<uint64_t>(i) + static_cast<uint64_t>(kStart) * static_cast<uint64_t>(ld_)],
                     rowBuf, cpOut);
-        // MTE3→MTE2 同步
-        PipeBarrier<PIPE_MTE3>();
+        // MTE3→MTE2 跨流水同步: 确保 UB→GM 写出完成后再复用 rowBuf (下一行读入)。
+        event_t evtOut = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::MTE3_MTE2));
+        SetFlag<HardEvent::MTE3_MTE2>(evtOut);
+        WaitFlag<HardEvent::MTE3_MTE2>(evtOut);
+        GetTPipePtr()->ReleaseEventID<HardEvent::MTE3_MTE2>(evtOut);
     }
 
 private:
