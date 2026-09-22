@@ -654,53 +654,39 @@ TEST_F(SpsmExceptionTest, UnsupportedAlg) {
               ACL_SPARSE_STATUS_NOT_SUPPORTED);
 }
 
-// L2_X11: m=0 -> ACL_SPARSE_STATUS_INVALID_VALUE (or rejected at descriptor layer)
+// L2_X11: m=0 is rejected by SpSM BufferSize.
 TEST_F(SpsmExceptionTest, MZero) {
     auto emptyA = makeEmptyCsr(0, 0);
     auto dRowPtr = DeviceBuffer::copyFrom(emptyA.rowOffsets.data(), sizeof(int32_t));
     auto dColInd = DeviceBuffer::alloc(sizeof(int32_t));
     auto dCsrVals = DeviceBuffer::alloc(sizeof(float));
     SpsmDescrGuard spsmDescr;
-    try {
-        SpMatManager matA = SpMatManager::createCsr(
-            0, 0, 0, dRowPtr.get(), dColInd.get(), dCsrVals.get(),
-            ACL_SPARSE_INDEX_32I, ACL_SPARSE_INDEX_32I,
-            ACL_SPARSE_INDEX_BASE_ZERO, ACL_FLOAT);
-        SetTriangularAttributes(matA.get(), ACL_SPARSE_DIAG_TYPE_UNIT);
-        DnMatManager matB = DnMatManager::createConst(
-            0, n_, ldb_, dB_->raw(), ACL_FLOAT, ACL_SPARSE_ORDER_COL);
-        DnMatManager matC = DnMatManager::create(
-            0, n_, ldb_, dC_->get(), ACL_FLOAT, ACL_SPARSE_ORDER_COL);
-        auto ret = CallBufferSize(handle_->get(), ACL_SPARSE_OP_NON_TRANSPOSE, &alpha_,
-                                  matA.cget(), matB.cget(), matC.get(),
-                                  ACL_FLOAT, spsmDescr.get());
-        // m=0 is invalid input regardless of order (rejected as INVALID_VALUE
-        // at descriptor creation via aclsparseCreateDnMat rows<=0, or at
-        // BufferSize if the descriptor layer ever accepts it).
-        EXPECT_EQ(ret, ACL_SPARSE_STATUS_INVALID_VALUE);
-    } catch (const std::runtime_error&) {
-        SUCCEED() << "0-dimension descriptor rejected at creation layer";
-    }
+    SpMatManager matA = SpMatManager::createCsr(
+        0, 0, 0, dRowPtr.get(), dColInd.get(), dCsrVals.get(),
+        ACL_SPARSE_INDEX_32I, ACL_SPARSE_INDEX_32I,
+        ACL_SPARSE_INDEX_BASE_ZERO, ACL_FLOAT);
+    SetTriangularAttributes(matA.get(), ACL_SPARSE_DIAG_TYPE_UNIT);
+    DnMatManager matB = DnMatManager::createConst(
+        0, n_, ldb_, dB_->raw(), ACL_FLOAT, ACL_SPARSE_ORDER_COL);
+    DnMatManager matC = DnMatManager::create(
+        0, n_, ldb_, dC_->get(), ACL_FLOAT, ACL_SPARSE_ORDER_COL);
+    auto ret = CallBufferSize(handle_->get(), ACL_SPARSE_OP_NON_TRANSPOSE, &alpha_,
+                              matA.cget(), matB.cget(), matC.get(),
+                              ACL_FLOAT, spsmDescr.get());
+    EXPECT_EQ(ret, ACL_SPARSE_STATUS_INVALID_VALUE);
 }
 
-// L2_X12: n=0 -> ACL_SPARSE_STATUS_INVALID_VALUE (or rejected at descriptor layer)
+// L2_X12: n=0 is rejected by SpSM BufferSize.
 TEST_F(SpsmExceptionTest, NZero) {
     auto d = MakeValidDescrs();
-    try {
-        DnMatManager matB0 = DnMatManager::createConst(
-            m_, 0, ldb_, dB_->raw(), ACL_FLOAT, ACL_SPARSE_ORDER_COL);
-        DnMatManager matC0 = DnMatManager::create(
-            m_, 0, ldb_, dC_->get(), ACL_FLOAT, ACL_SPARSE_ORDER_COL);
-        auto ret = CallBufferSize(handle_->get(), ACL_SPARSE_OP_NON_TRANSPOSE, &alpha_,
-                                  d->matA.cget(), matB0.cget(), matC0.get(),
-                                  ACL_FLOAT, d->spsmDescr.get());
-        // n=0 is invalid input: aclsparseCreateDnMat rejects cols<=0
-        // (INVALID_VALUE at descriptor creation). Assert the single expected
-        // outcome instead of the previous dual-value (INVALID_VALUE|SUCCESS).
-        EXPECT_EQ(ret, ACL_SPARSE_STATUS_INVALID_VALUE);
-    } catch (const std::runtime_error&) {
-        SUCCEED() << "0-width dense matrix rejected at creation layer";
-    }
+    DnMatManager matB0 = DnMatManager::createConst(
+        m_, 0, ldb_, dB_->raw(), ACL_FLOAT, ACL_SPARSE_ORDER_COL);
+    DnMatManager matC0 = DnMatManager::create(
+        m_, 0, ldb_, dC_->get(), ACL_FLOAT, ACL_SPARSE_ORDER_COL);
+    auto ret = CallBufferSize(handle_->get(), ACL_SPARSE_OP_NON_TRANSPOSE, &alpha_,
+                              d->matA.cget(), matB0.cget(), matC0.get(),
+                              ACL_FLOAT, d->spsmDescr.get());
+    EXPECT_EQ(ret, ACL_SPARSE_STATUS_INVALID_VALUE);
 }
 
 // L2_X13: A non-square (rows != cols) -> ACL_SPARSE_STATUS_INVALID_VALUE

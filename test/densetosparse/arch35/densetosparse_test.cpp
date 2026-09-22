@@ -782,6 +782,62 @@ TEST_F(DenseToSparseExceptionTest, InvalidAlgAndUnsupportedDtype) {
   aclsparseDestroyDnMat(dense);
 }
 
+struct DenseDescriptorValidationCase {
+  int64_t rows, cols, ld;
+  bool nullValues;
+  aclsparseStatus_t expected;
+};
+
+TEST(DenseToSparseDescriptorTest, EmptyShapesPreserveValidation) {
+  uint32_t value = 0;
+  using Case = DenseDescriptorValidationCase;
+  const Case cases[] = {
+      {0, 4, 4, false, ACL_SPARSE_STATUS_SUCCESS},
+      {3, 0, 3, false, ACL_SPARSE_STATUS_SUCCESS},
+      {0, 0, 1, false, ACL_SPARSE_STATUS_SUCCESS},
+      {-1, 0, 1, false, ACL_SPARSE_STATUS_INVALID_VALUE},
+      {0, -1, 1, false, ACL_SPARSE_STATUS_INVALID_VALUE},
+      {0, 0, 0, false, ACL_SPARSE_STATUS_INVALID_VALUE},
+      {0, 0, -1, false, ACL_SPARSE_STATUS_INVALID_VALUE},
+      {0, 0, 1, true, ACL_SPARSE_STATUS_INVALID_VALUE},
+  };
+  for (bool isConst : {false, true}) {
+    for (auto order : {ACL_SPARSE_ORDER_ROW, ACL_SPARSE_ORDER_COL}) {
+      const auto check = [&](const Case &c) {
+        SCOPED_TRACE(testing::Message()
+                     << "const=" << isConst << " order=" << order
+                     << " shape=" << c.rows << "x" << c.cols
+                     << " ld=" << c.ld << " nullValues=" << c.nullValues);
+        aclsparseDnMatDescr_t mutableDense = nullptr;
+        aclsparseConstDnMatDescr_t constDense = nullptr;
+        auto *values = c.nullValues ? nullptr : &value;
+        const auto status = isConst
+            ? aclsparseCreateConstDnMat(&constDense, c.rows, c.cols, c.ld,
+                                        values, ACL_FLOAT, order)
+            : aclsparseCreateDnMat(&mutableDense, c.rows, c.cols, c.ld,
+                                   values, ACL_FLOAT, order);
+        EXPECT_EQ(status, c.expected);
+        const auto dense = isConst ? constDense : mutableDense;
+        if (status == ACL_SPARSE_STATUS_SUCCESS) {
+          ASSERT_NE(dense, nullptr);
+          EXPECT_EQ(dense->rows, c.rows);
+          EXPECT_EQ(dense->cols, c.cols);
+          EXPECT_EQ(dense->ld, c.ld);
+          EXPECT_EQ(aclsparseDestroyDnMat(dense), ACL_SPARSE_STATUS_SUCCESS);
+        } else {
+          EXPECT_EQ(dense, nullptr);
+        }
+      };
+      for (const auto &c : cases)
+        check(c);
+      // Even an empty matrix must satisfy the order-specific leading dimension.
+      check(order == ACL_SPARSE_ORDER_ROW
+                ? Case{0, 4, 3, false, ACL_SPARSE_STATUS_INVALID_VALUE}
+                : Case{4, 0, 3, false, ACL_SPARSE_STATUS_INVALID_VALUE});
+    }
+  }
+}
+
 TEST_F(DenseToSparseExceptionTest, Int32MaxAcceptedAndPlusOneRejectedByApi) {
   uint32_t value = 0;
   aclsparseConstDnMatDescr_t dense = nullptr;
@@ -1247,8 +1303,10 @@ TEST_P(DenseToSparseBoundaryTest, DescriptorOrBufferSizeOnly) {
                                       ACL_FLOAT, DenseToSparseOrder(p.order)),
             ACL_SPARSE_STATUS_SUCCESS);
   aclsparseSpMatDescr_t sparse = nullptr;
+  const auto createSparse = p.format == "CSC" ? aclsparseCreateCsc
+                                             : aclsparseCreateCsr;
   const auto createStatus =
-      aclsparseCreateCsr(&sparse, p.m, p.n, 0, offsets, nullptr, nullptr,
+      createSparse(&sparse, p.m, p.n, 0, offsets, nullptr, nullptr,
                          DenseToSparseIndexType(p.offset_type),
                          DenseToSparseIndexType(p.index_type),
                          DenseToSparseBase(p.base), ACL_FLOAT);

@@ -172,6 +172,11 @@ static aclsparseStatus_t ValidateSpsmShapeAndCapacity(const aclsparseSpMatDescr 
                 static_cast<long long>(matC->rows), static_cast<long long>(matC->cols));
         return ACL_SPARSE_STATUS_INVALID_VALUE;
     }
+    if (matA->rows == 0 || matC->cols == 0) {
+        OP_LOGE("aclsparseSpSM", "zero matrix dimension (rows=%llu, cols=%lld)",
+                static_cast<unsigned long long>(matA->rows), static_cast<long long>(matC->cols));
+        return ACL_SPARSE_STATUS_INVALID_VALUE;
+    }
     if (matA->rows > static_cast<uint64_t>(INT32_MAX) ||
         matC->cols > static_cast<int64_t>(INT32_MAX) ||
         matA->nnz > static_cast<uint64_t>(INT32_MAX)) {
