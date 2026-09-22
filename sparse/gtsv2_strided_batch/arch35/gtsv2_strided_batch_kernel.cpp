@@ -540,7 +540,9 @@ private:
         ComputeForwardLayer(outerTileElems_, 0);
 
         // V→MTE3：写回下一层 cur' 与本层 save
-        PipeBarrier<PIPE_V>();
+        // PIPE_V 只同步 Vector 内部，无法保证后续 MTE3（DataCopy UB→GM）读到已完成的
+        // Vector 结果；必须用 PIPE_ALL（V→MTE3 依赖）
+        PipeBarrier<PIPE_ALL>();
         uint32_t P = static_cast<uint32_t>(outerTileElems_);
         LocalTensor<float> aSave = aSaveBuf_.Get<float>();
         LocalTensor<float> bSave = bSaveBuf_.Get<float>();
@@ -610,7 +612,8 @@ private:
         BackwardCR(d);
 
         // 内层结果写回 GM xBuf_[0]（RegionA 首段）；PipeBarrier<PIPE_ALL> 保证 MTE3 完成后外层反向再读
-        PipeBarrier<PIPE_V>();
+        // 同 ComputeWriteBackForwardTile：V→MTE3 依赖需 PIPE_ALL，PIPE_V 不足以同步
+        PipeBarrier<PIPE_ALL>();
         DataCopy(xBuf_[0], d, alignedM_);
         PipeBarrier<PIPE_ALL>();
         aInQue_.FreeTensor(a);
