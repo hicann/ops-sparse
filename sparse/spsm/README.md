@@ -280,6 +280,7 @@ aclsparseStatus_t aclsparseSpMatGetAttribute(aclsparseConstSpMatDescr_t spMatDes
 - **PointerMode 限制**：alpha 仅支持 HOST 模式（`ACL_SPARSE_POINTER_MODE_HOST`），DEVICE 模式（`ACL_SPARSE_POINTER_MODE_DEVICE`）返回 `ACL_SPARSE_STATUS_NOT_SUPPORTED`。
 - **索引类型限制**：CSR 的行偏移类型（csrRowOffsetsType）与列索引类型（csrColIndType）须均为 `ACL_SPARSE_INDEX_32I`，否则返回 `ACL_SPARSE_STATUS_NOT_SUPPORTED`。
 - **矩阵须方阵**：matA 的行数须等于列数（rows==cols），且 matB/matC 的行数须等于 matA 的行数，matB/matC 的列数须相等，否则返回 `ACL_SPARSE_STATUS_INVALID_VALUE`。
+- **零维输入**：m（matA.rows）或 n（matC.cols）为 0 时返回 `ACL_SPARSE_STATUS_INVALID_VALUE`。
 - **leading dimension 约束**：matB/matC 的 leading dimension（ldb/ldc）须满足布局约束——行主序（`ACL_SPARSE_ORDER_ROW`）`ld >= cols`，列主序（`ACL_SPARSE_ORDER_COL`）`ld >= rows`，否则返回 `ACL_SPARSE_STATUS_INVALID_VALUE`。
 - **奇异矩阵检测**：diagType=NON_UNIT 时，Analysis 阶段扫描对角线，若检测到零对角元（显式零或 CSR 中缺失对角线项）则判定为奇异矩阵，返回 `ACL_SPARSE_STATUS_NOT_SUPPORTED`。diagType=UNIT 时不检测（对角线隐式为 1.0）。
 - **矩阵规模上限**：m/n/nnz 受 INT32_MAX 与 GM workspace 容量约束，超限返回 `ACL_SPARSE_STATUS_NOT_SUPPORTED`。level 数组与 tiling 元数据分别驻留 GM 与 host 描述符，无 UB 容量上限约束。

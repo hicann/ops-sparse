@@ -123,6 +123,18 @@ aclsparseStatus_t SddmmValidateShapes(
     CHECK_RET(matY->rows <= INT32_MAX && matY->cols <= INT32_MAX,
               OP_LOGE("aclsparseSDDMM", "matY dimensions exceed INT32_MAX");
               return ACL_SPARSE_STATUS_INVALID_VALUE);
+    // 零维守卫：公共层 CreateDnMat 放行 rows/cols 为 0 的稠密矩阵，维度一致性
+    // 检查对 0==0 也会放行，但 arch22 kernel 不支持零维输入，此处 fail-fast。
+    // 与 arch35 SDDMM / arch22 SpMM 的零维行为保持一致（同 API 跨架构一致）。
+    CHECK_RET(matX->rows > 0 && matX->cols > 0 && matY->rows > 0 &&
+              matY->cols > 0 && matC->rows > 0 && matC->cols > 0,
+              OP_LOGE("aclsparseSDDMM", "zero dimension not supported "
+                      "(X=%ldx%ld, Y=%ldx%ld, C=%lux%lu)",
+                      static_cast<long>(matX->rows), static_cast<long>(matX->cols),
+                      static_cast<long>(matY->rows), static_cast<long>(matY->cols),
+                      static_cast<unsigned long>(matC->rows),
+                      static_cast<unsigned long>(matC->cols));
+              return ACL_SPARSE_STATUS_INVALID_VALUE);
 
     const int64_t xEffRows = (opX == ACL_SPARSE_OP_NON_TRANSPOSE) ? matX->rows : matX->cols;
     const int64_t xEffCols = (opX == ACL_SPARSE_OP_NON_TRANSPOSE) ? matX->cols : matX->rows;

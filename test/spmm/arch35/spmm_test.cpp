@@ -977,6 +977,75 @@ static bool RunOneFp32Case(int32_t deviceId, aclrtStream stream, const SpmmFp32C
     return r.pass;
 }
 
+// ============================================================================
+// Zero-dim guard cases: m/k/n 任一为 0 时 ValidateSpmmInputs 应返回
+// INVALID_VALUE（维度匹配对 0==0 放行，由零维守卫 matA->rows/cols、
+// matC->cols 拒绝）。仅调 GetBufferSize，不执行 kernel。
+// 维度关系: A m×k CSR, B k×n DnMat (ROW), C m×n DnMat (ROW)
+//   AclsparseValidateSpmmCommon 维度匹配: A.cols==B.rows(k), A.rows==C.rows(m), B.cols==C.cols(n)
+// 描述符层约束: aclsparseCreateDnMat 放行 0 维（ld>0、ROW 序 ld>=cols、
+// values 非空）；aclsparseCreateCsr 放行 nnz=0（colInd/values 可 null，
+// rowOffsets 非空以满足校验要求）。
+// ============================================================================
+static bool RunSpmmZeroDimCase(aclrtStream stream, const char *name,
+                               int32_t m, int32_t k, int32_t n)
+{
+    std::printf("\n--- zero-dim case: %s (m=%d k=%d n=%d) ---\n", name, m, k, n);
+    SpmmTestResources res;
+
+    // CSR A: m×k, nnz=0；rowOffsets 非空（m=0 时 1 元素 [0]，否则 m+1 个 0）
+    std::vector<int32_t> hRowOff(static_cast<size_t>(m) + 1, 0);
+    aclError aclRet = aclrtMalloc(&res.dRowOff, sizeof(int32_t) * (m + 1), ACL_MEM_MALLOC_HUGE_FIRST);
+    CHECK_RET(aclRet == ACL_SUCCESS, LOG_PRINT("aclrtMalloc failed. ERROR: %d\n", aclRet); return false);
+    aclRet = aclrtMemcpy(res.dRowOff, sizeof(int32_t) * (m + 1), hRowOff.data(),
+                         sizeof(int32_t) * (m + 1), ACL_MEMCPY_HOST_TO_DEVICE);
+    CHECK_RET(aclRet == ACL_SUCCESS, LOG_PRINT("aclrtMemcpy failed. ERROR: %d\n", aclRet); return false);
+
+    // B: k×n ROW 序, C: m×n ROW 序；ld = (n>0 ? n : 1)
+    // values 必须 ≥1 元素非空（0 维时描述符创建层仍要求非空指针）
+    const int32_t ld = (n > 0) ? n : 1;
+    const size_t bElems = static_cast<size_t>(k > 0 ? k : 1) * static_cast<size_t>(ld);
+    const size_t cElems = static_cast<size_t>(m > 0 ? m : 1) * static_cast<size_t>(ld);
+    aclRet = aclrtMalloc(&res.dB, sizeof(float) * bElems, ACL_MEM_MALLOC_HUGE_FIRST);
+    CHECK_RET(aclRet == ACL_SUCCESS, LOG_PRINT("aclrtMalloc failed. ERROR: %d\n", aclRet); return false);
+    aclRet = aclrtMalloc(&res.dC, sizeof(float) * cElems, ACL_MEM_MALLOC_HUGE_FIRST);
+    CHECK_RET(aclRet == ACL_SUCCESS, LOG_PRINT("aclrtMalloc failed. ERROR: %d\n", aclRet); return false);
+
+    aclsparseStatus_t sparseRet = aclsparseCreate(&res.handle);
+    CHECK_RET(sparseRet == ACL_SPARSE_STATUS_SUCCESS,
+              LOG_PRINT("aclsparseCreate failed. ERROR: %d\n", sparseRet); return false);
+    sparseRet = aclsparseSetStream(res.handle, stream);
+    CHECK_RET(sparseRet == ACL_SPARSE_STATUS_SUCCESS,
+              LOG_PRINT("aclsparseSetStream failed. ERROR: %d\n", sparseRet); return false);
+
+    sparseRet = aclsparseCreateCsr(&res.matA, m, k, 0, res.dRowOff, nullptr, nullptr,
+                                   ACL_SPARSE_INDEX_32I, ACL_SPARSE_INDEX_32I,
+                                   ACL_SPARSE_INDEX_BASE_ZERO, ACL_FLOAT);
+    CHECK_RET(sparseRet == ACL_SPARSE_STATUS_SUCCESS,
+              LOG_PRINT("aclsparseCreateCsr failed. ERROR: %d\n", sparseRet); return false);
+    sparseRet = aclsparseCreateDnMat(&res.matB, k, n, ld, res.dB, ACL_FLOAT, ACL_SPARSE_ORDER_ROW);
+    CHECK_RET(sparseRet == ACL_SPARSE_STATUS_SUCCESS,
+              LOG_PRINT("aclsparseCreateDnMat(B) failed. ERROR: %d\n", sparseRet); return false);
+    sparseRet = aclsparseCreateDnMat(&res.matC, m, n, ld, res.dC, ACL_FLOAT, ACL_SPARSE_ORDER_ROW);
+    CHECK_RET(sparseRet == ACL_SPARSE_STATUS_SUCCESS,
+              LOG_PRINT("aclsparseCreateDnMat(C) failed. ERROR: %d\n", sparseRet); return false);
+
+    // dtype combo 全 FP32 合法、维度匹配（0==0 放行），INVALID_VALUE 只能来自零维守卫
+    const float alpha = 1.0f;
+    const float beta = 0.0f;
+    size_t bufferSize = 0;
+    sparseRet = aclsparseSpMMGetBufferSize(res.handle,
+        ACL_SPARSE_OP_NON_TRANSPOSE, ACL_SPARSE_OP_NON_TRANSPOSE,
+        &alpha, res.matA, res.matB, &beta, res.matC,
+        ACL_FLOAT, ACL_SPARSE_SPMM_CSR_ALG1, &bufferSize);
+    const bool pass = (sparseRet == ACL_SPARSE_STATUS_INVALID_VALUE);
+    std::printf("  [%s] GetBufferSize ret=%d (expect %d INVALID_VALUE): %s\n",
+                name, static_cast<int>(sparseRet),
+                static_cast<int>(ACL_SPARSE_STATUS_INVALID_VALUE),
+                pass ? "PASS" : "FAIL");
+    return pass;
+}
+
 int main()
 {
     int32_t deviceId = 0;
@@ -1002,6 +1071,13 @@ int main()
     for (const auto &cfg : kFp32Cases) {
         allFp32Pass = RunOneFp32Case(deviceId, stream, cfg) && allFp32Pass;
     }
+
+    std::printf("\n========== SPMM zero-dim guard cases ==========\n");
+    bool allZeroDimPass = true;
+    allZeroDimPass = RunSpmmZeroDimCase(stream, "zero_dim_m0", 0, 16, 8) && allZeroDimPass;
+    allZeroDimPass = RunSpmmZeroDimCase(stream, "zero_dim_k0", 8, 0, 8) && allZeroDimPass;
+    allZeroDimPass = RunSpmmZeroDimCase(stream, "zero_dim_n0", 8, 16, 0) && allZeroDimPass;
+    std::printf("  ZeroDim: %s\n", allZeroDimPass ? "PASS" : "FAIL");
 
     // One functional case per remaining dtype (FP16 / INT8), baseline layout
     constexpr int32_t kM = 256;
@@ -1031,11 +1107,12 @@ int main()
     std::printf("\n========== Results ==========\n");
     std::printf("  FP32 (%zu cases): %s\n", sizeof(kFp32Cases) / sizeof(kFp32Cases[0]),
                 allFp32Pass ? "PASS" : "FAIL");
+    std::printf("  ZeroDim (3 cases): %s\n", allZeroDimPass ? "PASS" : "FAIL");
     std::printf("  FP16: %s  INT8: %s\n",
                 rFp16.pass ? "PASS" : "FAIL",
                 rInt8.pass ? "PASS" : "FAIL");
 
-    bool allPass = allFp32Pass && rFp16.pass && rInt8.pass;
+    bool allPass = allFp32Pass && allZeroDimPass && rFp16.pass && rInt8.pass;
     std::printf("  Overall: %s\n", allPass ? "PASS" : "FAIL");
 
     Finalize(deviceId, stream);

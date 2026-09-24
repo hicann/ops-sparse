@@ -252,6 +252,16 @@ static aclsparseStatus_t ValidateSddmmDtypeAndDims(const aclsparseDnMatDescr *ma
                 static_cast<unsigned long>(matC->rows), static_cast<unsigned long>(matC->cols));
         return ACL_SPARSE_STATUS_INVALID_VALUE;
     }
+    if (matX->rows == 0 || matX->cols == 0 || matY->rows == 0 ||
+        matY->cols == 0 || matC->rows == 0 || matC->cols == 0) {
+        OP_LOGE("aclsparseSDDMM", "zero dimension not supported "
+                "(X=%ldx%ld, Y=%ldx%ld, C=%lux%lu)",
+                static_cast<long>(matX->rows), static_cast<long>(matX->cols),
+                static_cast<long>(matY->rows), static_cast<long>(matY->cols),
+                static_cast<unsigned long>(matC->rows),
+                static_cast<unsigned long>(matC->cols));
+        return ACL_SPARSE_STATUS_INVALID_VALUE;
+    }
     if (!IsSupportedSddmmAlg(alg)) {
         OP_LOGE("aclsparseSDDMM", "alg not supported: %d", static_cast<int>(alg));
         return ACL_SPARSE_STATUS_NOT_SUPPORTED;

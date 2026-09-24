@@ -284,7 +284,7 @@ aclsparseStatus_t aclsparseSpMMOp(
 | matB/matC 可变 | matB/matC 可跨多次 execute 更换，n/ldb/ldc/order 可变；但 m/k/opB 必须与 descr 一致 |
 | 异步返回 | 调用后 kernel 入队到 handle 关联的 stream，函数立即返回 |
 | 确定性 | ALG1/ALG2 均提供 bit-wise 可重复结果 |
-| 维度校验 | matC.rows == m，matC.cols == n（n=0 合法，kernel 无计算量）；opB=N 时 matB 为 (k×n)，opB=T 时 matB 为 (n×k)；matA.rows / matC.cols 不超过 INT32_MAX |
+| 维度校验 | matC.rows == m，matC.cols == n；opB=N 时 matB 为 (k×n)，opB=T 时 matB 为 (n×k)；matA.rows / matC.cols 不超过 INT32_MAX。零维支持：m=0 或 n=0 时输出为空矩阵，跳过 kernel 直接返回 SUCCESS；k=0（含 nnz=0）时积项为空，走 BetaC 路径计算 C = beta·C 后返回 SUCCESS |
 | dtype 一致性 | matA/matB/matC 的 valueType 必须一致（FP32 或 FP16） |
 | beta==0 短路 | HOST mode + beta==0 时跳过 matC.values 非空校验；DEVICE mode 跳过 matC.values 非空校验 |
 | nnz==0 快捷路径 | nnz==0 时跳过 CSR 遍历，直接做 C = beta * C |

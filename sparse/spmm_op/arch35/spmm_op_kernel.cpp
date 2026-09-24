@@ -58,9 +58,17 @@ __aicore__ inline void StridedLoadGather(
                               srcStrideBytes, 0, 0};
         DataCopyPadExtParams<ValT> pad{false, 0, 0, 0};
         DataCopyPad(stridedBuf, gm[chunkGmBase], cp, pad);
-        PipeBarrier<PIPE_MTE2>();
+        // MTE2→V 跨流水可见性：DataCopyPad 写 stridedBuf 后 Gather 消费
+        event_t evt = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::MTE2_V));
+        SetFlag<HardEvent::MTE2_V>(evt);
+        WaitFlag<HardEvent::MTE2_V>(evt);
+        GetTPipePtr()->ReleaseEventID<HardEvent::MTE2_V>(evt);
         Gather(dst[dstOffset + cBase], stridedBuf, offsetUInt, 0, cSize);
-        PipeBarrier<PIPE_V>();
+        // V→MTE2 跨流水可见性：Gather 读 stridedBuf 完成后下一 chunk DataCopyPad 才可复写
+        event_t evt2 = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::V_MTE2));
+        SetFlag<HardEvent::V_MTE2>(evt2);
+        WaitFlag<HardEvent::V_MTE2>(evt2);
+        GetTPipePtr()->ReleaseEventID<HardEvent::V_MTE2>(evt2);
     }
 }
 
@@ -95,14 +103,26 @@ __aicore__ inline void SpmmOpWriteBackContiguous(
         PipeBarrier<PIPE_V>();
         auto castOut = castOutBuf->Get<CT>();
         Cast<CT, float>(castOut, outBuf, RoundMode::CAST_ROUND, actualNTile);
-        PipeBarrier<PIPE_V>();
+        // V→MTE3 跨流水可见性：Cast 写 castOut 后 DataCopyPad 搬出
+        event_t evt = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::V_MTE3));
+        SetFlag<HardEvent::V_MTE3>(evt);
+        WaitFlag<HardEvent::V_MTE3>(evt);
+        GetTPipePtr()->ReleaseEventID<HardEvent::V_MTE3>(evt);
         DataCopyExtParams cp{1, static_cast<uint32_t>(actualNTile * sizeof(CT)), 0, 0, 0};
         DataCopyPad(matCGm[cOffset], castOut, cp);
-        PipeBarrier<PIPE_MTE3>();
+        // MTE3→V 跨流水可见性：castOut 搬出完成后下一 tile 的 Cast 才可复写
+        event_t evt2 = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::MTE3_V));
+        SetFlag<HardEvent::MTE3_V>(evt2);
+        WaitFlag<HardEvent::MTE3_V>(evt2);
+        GetTPipePtr()->ReleaseEventID<HardEvent::MTE3_V>(evt2);
     } else {
         DataCopyExtParams cp{1, static_cast<uint32_t>(actualNTile * sizeof(float)), 0, 0, 0};
         DataCopyPad(matCGm[cOffset], outBuf, cp);
-        PipeBarrier<PIPE_MTE3>();
+        // MTE3→V 跨流水可见性：outBuf 搬出完成后下一 tile 的 Muls 才可复写
+        event_t evt = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::MTE3_V));
+        SetFlag<HardEvent::MTE3_V>(evt);
+        WaitFlag<HardEvent::MTE3_V>(evt);
+        GetTPipePtr()->ReleaseEventID<HardEvent::MTE3_V>(evt);
     }
 }
 
@@ -138,11 +158,18 @@ __aicore__ inline void SpmmOpWriteBackStrided(
         } else {
             Scatter(stridedBuf, outBuf[cBaseOff], offsetUInt, 0, static_cast<uint32_t>(cSize));
         }
-        PipeBarrier<PIPE_V>();
+        // V→MTE3 跨流水可见性：Scatter 写 stridedBuf 后 DataCopyPad 搬出
+        event_t evt = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::V_MTE3));
+        SetFlag<HardEvent::V_MTE3>(evt);
+        WaitFlag<HardEvent::V_MTE3>(evt);
+        GetTPipePtr()->ReleaseEventID<HardEvent::V_MTE3>(evt);
         DataCopyExtParams cp{static_cast<uint16_t>(cSize),
                               static_cast<uint32_t>(sizeof(CT)), 0, dstStride, 0};
         DataCopyPad(matCGm[cBase + static_cast<uint64_t>(cBaseOff) * static_cast<uint64_t>(ldc)], stridedBuf, cp);
-        PipeBarrier<PIPE_MTE3>();
+        // MTE3→V/MTE2 双依赖：stridedBuf 搬出后复写方既有本循环下一 chunk 的 Scatter(V)，
+        // 也有后续 tile StridedLoadGather 的 DataCopyPad(MTE2)，单一 HardEvent 方向无法同时
+        // 覆盖，保留全流水屏障
+        PipeBarrier<PIPE_ALL>();
     }
 }
 
@@ -410,7 +437,11 @@ private:
             rowOffGm.SetGlobalBuffer(reinterpret_cast<__gm__ int64_t *>(gmRowOffsets_),
                                      static_cast<uint64_t>(offCount));
             DataCopyPad(rowOffUb, rowOffGm, cp, pad);
-            PipeBarrier<PIPE_MTE2>();
+            // MTE2→标量流跨流水可见性：rowOffBuf 写入后 ReadRowOffsets 的 GetValue 消费
+            event_t evt = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::MTE2_S));
+            SetFlag<HardEvent::MTE2_S>(evt);
+            WaitFlag<HardEvent::MTE2_S>(evt);
+            GetTPipePtr()->ReleaseEventID<HardEvent::MTE2_S>(evt);
         } else {
             auto rowOffUb = rowOffBuf_.Get<int32_t>();
             DataCopyExtParams cp{1, static_cast<uint32_t>(offCount * sizeof(int32_t)), 0, 0, 0};
@@ -419,7 +450,11 @@ private:
             rowOffGm.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t *>(gmRowOffsets_),
                                      static_cast<uint64_t>(offCount));
             DataCopyPad(rowOffUb, rowOffGm, cp, pad);
-            PipeBarrier<PIPE_MTE2>();
+            // MTE2→标量流跨流水可见性：rowOffBuf 写入后 ReadRowOffsets 的 GetValue 消费
+            event_t evt = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::MTE2_S));
+            SetFlag<HardEvent::MTE2_S>(evt);
+            WaitFlag<HardEvent::MTE2_S>(evt);
+            GetTPipePtr()->ReleaseEventID<HardEvent::MTE2_S>(evt);
         }
     }
 
@@ -435,7 +470,11 @@ private:
         DataCopyExtParams cpV{1, static_cast<uint32_t>(rowNnz * sizeof(ValT)), 0, 0, 0};
         DataCopyPadExtParams<ValT> padV{false, 0, 0, 0};
         DataCopyPad(valuesUb, valuesGm_[rStart], cpV, padV);
-        PipeBarrier<PIPE_MTE2>();
+        // MTE2→标量流跨流水可见性：colInd/values 写入后 ProcessCsrElements 的 GetValue 消费
+        event_t evt = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::MTE2_S));
+        SetFlag<HardEvent::MTE2_S>(evt);
+        WaitFlag<HardEvent::MTE2_S>(evt);
+        GetTPipePtr()->ReleaseEventID<HardEvent::MTE2_S>(evt);
         return true;
     }
 
@@ -518,8 +557,18 @@ private:
                                static_cast<uint64_t>(colFirst);
             DataCopyExtParams cp{1, static_cast<uint32_t>(actualNTile * sizeof(ValT)), 0, 0, 0};
             DataCopyPadExtParams<ValT> pad{false, 0, 0, 0};
+            // V→MTE2 跨流水复写保护：上一 tile 的 Cast/Muls 读 cOldBuf 完成后 MTE2 才可复写
+            //（常规路径由 bQue freeBufEvt 的 V_MTE2 传递保护，空行 + beta!=0 时该链断裂，需显式守卫）
+            event_t evtRewrite = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::V_MTE2));
+            SetFlag<HardEvent::V_MTE2>(evtRewrite);
+            WaitFlag<HardEvent::V_MTE2>(evtRewrite);
+            GetTPipePtr()->ReleaseEventID<HardEvent::V_MTE2>(evtRewrite);
             DataCopyPad(cOldBuf, matCGm_[cOffset], cp, pad);
-            PipeBarrier<PIPE_MTE2>();
+            // MTE2→V 跨流水可见性：DataCopyPad 写 cOldBuf 后 Cast/Muls 消费
+            event_t evt = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::MTE2_V));
+            SetFlag<HardEvent::MTE2_V>(evt);
+            WaitFlag<HardEvent::MTE2_V>(evt);
+            GetTPipePtr()->ReleaseEventID<HardEvent::MTE2_V>(evt);
         } else {
             uint64_t gmBase = static_cast<uint64_t>(colFirst) * static_cast<uint64_t>(ldc_) +
                                static_cast<uint64_t>(origRow);
@@ -539,7 +588,11 @@ private:
             PipeBarrier<PIPE_V>();
             Add<float>(outBuf, outBuf, cOldBuf, actualNTile);
         }
-        PipeBarrier<PIPE_V>();
+        // V→MTE3 跨流水可见性：Add 写 outBuf 后连续布局 FP32 路径直接 DataCopyPad 搬出
+        event_t evt = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::V_MTE3));
+        SetFlag<HardEvent::V_MTE3>(evt);
+        WaitFlag<HardEvent::V_MTE3>(evt);
+        GetTPipePtr()->ReleaseEventID<HardEvent::V_MTE3>(evt);
     }
 
     __aicore__ inline void WriteBackC(
@@ -550,7 +603,11 @@ private:
         auto outBuf = outBuf_.Get<float>();
 
         Muls<float>(outBuf, accBuf, alpha_, actualNTile);
-        PipeBarrier<PIPE_V>();
+        // V→MTE3 跨流水可见性：Muls 写 outBuf 后连续布局 FP32 路径直接 DataCopyPad 搬出
+        event_t evt = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::V_MTE3));
+        SetFlag<HardEvent::V_MTE3>(evt);
+        WaitFlag<HardEvent::V_MTE3>(evt);
+        GetTPipePtr()->ReleaseEventID<HardEvent::V_MTE3>(evt);
 
         if (!betaZero_) {
             ApplyBetaC(origRow, colFirst, actualNTile, outBuf, stridedBuf, offsetInt);
@@ -709,25 +766,26 @@ private:
         auto offsetInt = offsetBuf_.Get<int32_t>();
         auto offsetUInt = offsetInt.ReinterpretCast<uint32_t>();
 
+        ScaleBeta(row, colFirst, actualNTile, cRowMajor, outBuf, stridedBuf, offsetInt);
+        WriteBackCTile(row, colFirst, actualNTile, cRowMajor, outBuf, stridedBuf, offsetUInt);
+    }
+
+    // beta 缩放：betaZero 时置零 outBuf，否则先读入 C tile 再 Cast/Muls 缩放
+    __aicore__ inline void ScaleBeta(
+        int32_t row, int32_t colFirst, int32_t actualNTile, bool cRowMajor,
+        LocalTensor<float> &outBuf, LocalTensor<CT> &stridedBuf,
+        LocalTensor<int32_t> &offsetInt)
+    {
         if (betaZero_) {
             Duplicate<float>(outBuf, 0.0f, actualNTile);
-            PipeBarrier<PIPE_V>();
+            // V→MTE3 跨流水可见性：Duplicate 写 outBuf 后连续布局 FP32 路径直接 DataCopyPad 搬出
+            event_t evt = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::V_MTE3));
+            SetFlag<HardEvent::V_MTE3>(evt);
+            WaitFlag<HardEvent::V_MTE3>(evt);
+            GetTPipePtr()->ReleaseEventID<HardEvent::V_MTE3>(evt);
         } else {
+            LoadCTile(row, colFirst, actualNTile, cRowMajor, stridedBuf, offsetInt);
             auto cBuf = cBuf_.Get<CT>();
-            if (cRowMajor) {
-                uint64_t cOffset = static_cast<uint64_t>(row) * static_cast<uint64_t>(ldc_) +
-                                   static_cast<uint64_t>(colFirst);
-                DataCopyExtParams cp{1, static_cast<uint32_t>(actualNTile * sizeof(CT)), 0, 0, 0};
-                DataCopyPadExtParams<CT> pad{false, 0, 0, 0};
-                DataCopyPad(cBuf, matCGm_[cOffset], cp, pad);
-                PipeBarrier<PIPE_MTE2>();
-            } else {
-                uint64_t gmBase = static_cast<uint64_t>(colFirst) * static_cast<uint64_t>(ldc_) +
-                                   static_cast<uint64_t>(row);
-                StridedLoadGather<CT>(cBuf, 0, matCGm_, gmBase, ldc_, actualNTile,
-                                      stridedBuf, offsetInt);
-            }
-
             if constexpr (IS_FP16) {
                 Cast<float, half>(outBuf, cBuf, RoundMode::CAST_NONE, actualNTile);
                 PipeBarrier<PIPE_V>();
@@ -735,9 +793,50 @@ private:
             } else {
                 Muls<float>(outBuf, cBuf, beta_, actualNTile);
             }
-            PipeBarrier<PIPE_V>();
+            // V→MTE3 跨流水可见性：Muls 写 outBuf 后连续布局 FP32 路径直接 DataCopyPad 搬出
+            event_t evt = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::V_MTE3));
+            SetFlag<HardEvent::V_MTE3>(evt);
+            WaitFlag<HardEvent::V_MTE3>(evt);
+            GetTPipePtr()->ReleaseEventID<HardEvent::V_MTE3>(evt);
         }
+    }
 
+    // 读入当前 tile 的 C 到 cBuf：行主序 DataCopyPad 连续搬，列主序 StridedLoadGather
+    __aicore__ inline void LoadCTile(
+        int32_t row, int32_t colFirst, int32_t actualNTile, bool cRowMajor,
+        LocalTensor<CT> &stridedBuf, LocalTensor<int32_t> &offsetInt)
+    {
+        auto cBuf = cBuf_.Get<CT>();
+        if (cRowMajor) {
+            uint64_t cOffset = static_cast<uint64_t>(row) * static_cast<uint64_t>(ldc_) +
+                               static_cast<uint64_t>(colFirst);
+            DataCopyExtParams cp{1, static_cast<uint32_t>(actualNTile * sizeof(CT)), 0, 0, 0};
+            DataCopyPadExtParams<CT> pad{false, 0, 0, 0};
+            // V→MTE2 跨流水复写保护：上一 tile 的 Cast/Muls 读 cBuf 完成后 MTE2 才可复写
+            event_t evtRewrite = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::V_MTE2));
+            SetFlag<HardEvent::V_MTE2>(evtRewrite);
+            WaitFlag<HardEvent::V_MTE2>(evtRewrite);
+            GetTPipePtr()->ReleaseEventID<HardEvent::V_MTE2>(evtRewrite);
+            DataCopyPad(cBuf, matCGm_[cOffset], cp, pad);
+            // MTE2→V 跨流水可见性：DataCopyPad 写 cBuf 后 Cast/Muls 消费
+            event_t evt = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::MTE2_V));
+            SetFlag<HardEvent::MTE2_V>(evt);
+            WaitFlag<HardEvent::MTE2_V>(evt);
+            GetTPipePtr()->ReleaseEventID<HardEvent::MTE2_V>(evt);
+        } else {
+            uint64_t gmBase = static_cast<uint64_t>(colFirst) * static_cast<uint64_t>(ldc_) +
+                               static_cast<uint64_t>(row);
+            StridedLoadGather<CT>(cBuf, 0, matCGm_, gmBase, ldc_, actualNTile,
+                                  stridedBuf, offsetInt);
+        }
+    }
+
+    // 写回当前 tile 的 C：行主序连续 / 列主序 strided，FP16 经 castOutBuf_ 转型
+    __aicore__ inline void WriteBackCTile(
+        int32_t row, int32_t colFirst, int32_t actualNTile, bool cRowMajor,
+        LocalTensor<float> &outBuf, LocalTensor<CT> &stridedBuf,
+        const LocalTensor<uint32_t> &offsetUInt)
+    {
         if (cRowMajor) {
             if constexpr (IS_FP16) {
                 SpmmOpWriteBackContiguous<CT>(matCGm_, row, colFirst, actualNTile, ldc_,

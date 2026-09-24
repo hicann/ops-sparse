@@ -553,6 +553,85 @@ TEST_F(SddmmExceptionTest, NullCsrPtrs) {
     EXPECT_EQ(ret, ACL_SPARSE_STATUS_INVALID_VALUE);
 }
 
+// E11: m=0 (X 0×4, Y 4×4, C 0×4 CSR nnz=0) -> ACL_SPARSE_STATUS_INVALID_VALUE
+//      0 维由 ValidateSddmmDtypeAndDims 守卫拒绝（维度匹配对 0==0 放行）。
+//      dtype combo (全 FP32) / op / CSR 格式 / 索引类型 / ptrs 非空均合法，
+//      INVALID_VALUE 只能来自 0 维守卫，而非更早的检查。
+TEST_F(SddmmExceptionTest, MZero) {
+    // X: 0×4 ROW 序 (ld=4)，0 元素也需非空 values（≥1 元素 buffer）
+    std::vector<float> xDummy(4, 1.0f);
+    std::vector<float> yVals(16, 1.0f);
+    auto dX = DeviceBuffer::copyFrom(xDummy.data(), xDummy.size() * sizeof(float));
+    auto dY = DeviceBuffer::copyFrom(yVals.data(), yVals.size() * sizeof(float));
+    // C: 0×4 CSR，nnz=0，rowOffsets=[0] 非空（kernel 读 ptrs[m]）
+    std::vector<int32_t> rowOff = {0};
+    auto dRowOff = DeviceBuffer::copyFrom(rowOff.data(), rowOff.size() * sizeof(int32_t));
+
+    auto matX = DnMatManager::createConst(0, 4, 4, dX.raw(), ACL_FLOAT, ACL_SPARSE_ORDER_ROW);
+    auto matY = DnMatManager::createConst(4, 4, 4, dY.raw(), ACL_FLOAT, ACL_SPARSE_ORDER_ROW);
+    auto matC = SpMatManager::createCsr(0, 4, 0, dRowOff.get(), nullptr, nullptr,
+                                        ACL_SPARSE_INDEX_32I, ACL_SPARSE_INDEX_32I,
+                                        ACL_SPARSE_INDEX_BASE_ZERO, ACL_FLOAT);
+    size_t bs = 0;
+    auto ret = aclsparseSDDMMBufferSize(
+        handle_->get(), ACL_SPARSE_OP_NON_TRANSPOSE, ACL_SPARSE_OP_NON_TRANSPOSE,
+        &alpha_, matX.cget(), matY.cget(), &beta_, matC.get(),
+        ACL_FLOAT, ACL_SPARSE_SDDMM_ALG_DEFAULT, &bs);
+    EXPECT_EQ(ret, ACL_SPARSE_STATUS_INVALID_VALUE);
+}
+
+// E12: n=0 (X 4×4, Y 4×0, C 4×0 CSR nnz=0) -> ACL_SPARSE_STATUS_INVALID_VALUE
+//      0 维由 ValidateSddmmDtypeAndDims 守卫拒绝（维度匹配对 0==0 放行）。
+TEST_F(SddmmExceptionTest, NZero) {
+    std::vector<float> xVals(16, 1.0f);
+    // Y: 4×0 ROW 序 (ld=1)，0 元素也需非空 values
+    std::vector<float> yDummy(1, 1.0f);
+    auto dX = DeviceBuffer::copyFrom(xVals.data(), xVals.size() * sizeof(float));
+    auto dY = DeviceBuffer::copyFrom(yDummy.data(), yDummy.size() * sizeof(float));
+    // C: 4×0 CSR，nnz=0，rowOffsets 5 个 0
+    std::vector<int32_t> rowOff(5, 0);
+    auto dRowOff = DeviceBuffer::copyFrom(rowOff.data(), rowOff.size() * sizeof(int32_t));
+
+    auto matX = DnMatManager::createConst(4, 4, 4, dX.raw(), ACL_FLOAT, ACL_SPARSE_ORDER_ROW);
+    auto matY = DnMatManager::createConst(4, 0, 1, dY.raw(), ACL_FLOAT, ACL_SPARSE_ORDER_ROW);
+    auto matC = SpMatManager::createCsr(4, 0, 0, dRowOff.get(), nullptr, nullptr,
+                                        ACL_SPARSE_INDEX_32I, ACL_SPARSE_INDEX_32I,
+                                        ACL_SPARSE_INDEX_BASE_ZERO, ACL_FLOAT);
+    size_t bs = 0;
+    auto ret = aclsparseSDDMMBufferSize(
+        handle_->get(), ACL_SPARSE_OP_NON_TRANSPOSE, ACL_SPARSE_OP_NON_TRANSPOSE,
+        &alpha_, matX.cget(), matY.cget(), &beta_, matC.get(),
+        ACL_FLOAT, ACL_SPARSE_SDDMM_ALG_DEFAULT, &bs);
+    EXPECT_EQ(ret, ACL_SPARSE_STATUS_INVALID_VALUE);
+}
+
+// E13: k=0 (X 4×0, Y 0×4, C 4×4 CSR nnz=0) -> ACL_SPARSE_STATUS_INVALID_VALUE
+//      0 维由 ValidateSddmmDtypeAndDims 守卫拒绝（维度匹配对 0==0 放行）。
+//      k=0 时 C 的 nnz 必为 0。
+TEST_F(SddmmExceptionTest, KZero) {
+    // X: 4×0 ROW 序 (ld=1)，0 元素也需非空 values
+    std::vector<float> xDummy(1, 1.0f);
+    // Y: 0×4 ROW 序 (ld=4)，0 元素也需非空 values
+    std::vector<float> yDummy(4, 1.0f);
+    auto dX = DeviceBuffer::copyFrom(xDummy.data(), xDummy.size() * sizeof(float));
+    auto dY = DeviceBuffer::copyFrom(yDummy.data(), yDummy.size() * sizeof(float));
+    // C: 4×4 CSR，nnz=0，rowOffsets 5 个 0
+    std::vector<int32_t> rowOff(5, 0);
+    auto dRowOff = DeviceBuffer::copyFrom(rowOff.data(), rowOff.size() * sizeof(int32_t));
+
+    auto matX = DnMatManager::createConst(4, 0, 1, dX.raw(), ACL_FLOAT, ACL_SPARSE_ORDER_ROW);
+    auto matY = DnMatManager::createConst(0, 4, 4, dY.raw(), ACL_FLOAT, ACL_SPARSE_ORDER_ROW);
+    auto matC = SpMatManager::createCsr(4, 4, 0, dRowOff.get(), nullptr, nullptr,
+                                        ACL_SPARSE_INDEX_32I, ACL_SPARSE_INDEX_32I,
+                                        ACL_SPARSE_INDEX_BASE_ZERO, ACL_FLOAT);
+    size_t bs = 0;
+    auto ret = aclsparseSDDMMBufferSize(
+        handle_->get(), ACL_SPARSE_OP_NON_TRANSPOSE, ACL_SPARSE_OP_NON_TRANSPOSE,
+        &alpha_, matX.cget(), matY.cget(), &beta_, matC.get(),
+        ACL_FLOAT, ACL_SPARSE_SDDMM_ALG_DEFAULT, &bs);
+    EXPECT_EQ(ret, ACL_SPARSE_STATUS_INVALID_VALUE);
+}
+
 // Tiling stores dense leading dimensions as int32_t.  A public DnMat can
 // carry a larger int64_t ld, so reject it before serializing the tiling data.
 TEST_F(SddmmExceptionTest, RejectsUnrepresentableLeadingDimension) {

@@ -656,6 +656,79 @@ static int run_all_test_cases(aclrtStream stream)
     return fail;
 }
 
+// Zero-dim guard verification: when any of M/K/N is 0, ValidateSpmmInputs must
+// return INVALID_VALUE (dimension matching passes 0==0, the zero-dim guard on
+// matA->rows/cols and matC->cols rejects). Only calls GetBufferSize, never
+// executes the kernel. Dimension relations: A is M×K CSR, B is K×n DnMat (ROW),
+// C is m×N DnMat (ROW); the dimension matching in AclsparseValidateSpmmCommon
+// (sparse/common/aclsparse_descr_internal.h) requires A.cols==B.rows(K),
+// A.rows==C.rows(M), B.cols==C.cols(N).
+// Descriptor-layer constraints: aclsparseCreateDnMat accepts 0-dim (ld>0,
+// ROW order ld>=cols, non-null values >=1 element); aclsparseCreateCsr accepts
+// nnz=0 (colInd/values may be null, rowOffsets stays non-null: 1 element [0]
+// when M=0, else M+1 zeros).
+static int run_spmm_zero_dim_case(const char *name, uint64_t M, uint64_t K, uint64_t N,
+    aclrtStream stream)
+{
+    printf("--- Zero-dim guard case: %s (M=%lu K=%lu N=%lu) ---\n", name, M, K, N);
+
+    int *dA_offsets = NULL;
+    float *dB = NULL;
+    float *dC = NULL;
+    aclsparseHandle_t handle = NULL;
+    aclsparseSpMatDescr_t matA = NULL;
+    aclsparseDnMatDescr_t matB = NULL;
+    aclsparseDnMatDescr_t matC = NULL;
+
+    // CSR A: M×K, nnz=0, rowOffsets non-null
+    std::vector<int> hOffsets((size_t)M + 1, 0);
+    CHECK_ACL(aclrtMalloc((void **)&dA_offsets, hOffsets.size() * sizeof(int), ACL_MEM_MALLOC_HUGE_FIRST))
+    CHECK_ACL(aclrtMemcpy(dA_offsets, hOffsets.size() * sizeof(int),
+        hOffsets.data(), hOffsets.size() * sizeof(int), ACL_MEMCPY_HOST_TO_DEVICE))
+
+    // B: K×N ROW order, C: M×N ROW order; ld = (N>0 ? N : 1);
+    // values must be non-null (>=1 element) even for 0-dim matrices
+    const uint64_t ld = (N > 0) ? N : 1;
+    const size_t bElems = (size_t)(K > 0 ? K : 1) * (size_t)ld;
+    const size_t cElems = (size_t)(M > 0 ? M : 1) * (size_t)ld;
+    CHECK_ACL(aclrtMalloc((void **)&dB, bElems * sizeof(float), ACL_MEM_MALLOC_HUGE_FIRST))
+    CHECK_ACL(aclrtMalloc((void **)&dC, cElems * sizeof(float), ACL_MEM_MALLOC_HUGE_FIRST))
+
+    CHECK_ACL_SPARSE(aclsparseCreate(&handle))
+    CHECK_ACL_SPARSE(aclsparseSetStream(handle, stream))
+    CHECK_ACL_SPARSE(aclsparseCreateCsr(&matA, (int64_t)M, (int64_t)K, 0,
+        dA_offsets, NULL, NULL,
+        ACL_SPARSE_INDEX_32I, ACL_SPARSE_INDEX_32I,
+        ACL_SPARSE_INDEX_BASE_ZERO, ACL_FLOAT))
+    CHECK_ACL_SPARSE(aclsparseCreateDnMat(&matB, (int64_t)K, (int64_t)N, (int64_t)ld,
+        dB, ACL_FLOAT, ACL_SPARSE_ORDER_ROW))
+    CHECK_ACL_SPARSE(aclsparseCreateDnMat(&matC, (int64_t)M, (int64_t)N, (int64_t)ld,
+        dC, ACL_FLOAT, ACL_SPARSE_ORDER_ROW))
+
+    // dtype combo (all FP32) and dimension matching (0==0 passes) are valid,
+    // so INVALID_VALUE can only come from the zero-dim guard.
+    const float alpha = 1.0f;
+    const float beta = 0.0f;
+    size_t bufferSize = 0;
+    aclsparseStatus_t ret = aclsparseSpMMGetBufferSize(handle,
+        ACL_SPARSE_OP_NON_TRANSPOSE, ACL_SPARSE_OP_NON_TRANSPOSE,
+        &alpha, matA, matB, &beta, matC,
+        ACL_FLOAT, ACL_SPARSE_SPMM_ALG_DEFAULT, &bufferSize);
+    const int pass = (ret == ACL_SPARSE_STATUS_INVALID_VALUE);
+    printf("  [%s] GetBufferSize ret=%d (expect %d INVALID_VALUE): %s\n",
+        name, (int)ret, (int)ACL_SPARSE_STATUS_INVALID_VALUE,
+        pass ? "PASS" : "FAIL");
+
+    CHECK_ACL_SPARSE(aclsparseDestroyDnMat(matB))
+    CHECK_ACL_SPARSE(aclsparseDestroyDnMat(matC))
+    CHECK_ACL_SPARSE(aclsparseDestroySpMat(matA))
+    CHECK_ACL_SPARSE(aclsparseDestroy(handle))
+    CHECK_ACL(aclrtFree(dA_offsets))
+    CHECK_ACL(aclrtFree(dB))
+    CHECK_ACL(aclrtFree(dC))
+    return pass ? 0 : 1;
+}
+
 int main(void)
 {
     int32_t deviceId = 0;
@@ -665,6 +738,9 @@ int main(void)
     CHECK_ACL(aclrtCreateStream(&stream))
 
     int fail = run_all_test_cases(stream);
+    fail += run_spmm_zero_dim_case("zero_dim_m0", 0, 16, 8, stream);
+    fail += run_spmm_zero_dim_case("zero_dim_k0", 8, 0, 8, stream);
+    fail += run_spmm_zero_dim_case("zero_dim_n0", 8, 16, 0, stream);
 
     printf("========================================\n");
     printf("Total: %d failed\n", fail);

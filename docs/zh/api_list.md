@@ -1046,12 +1046,14 @@ aclsparseStatus_t aclsparseCreateDnMat(
 **参数说明**：
 
 - `dnMatDescr`（IN/OUT）：HOST，输出的稠密矩阵描述符。
-- `rows`（IN）：HOST，矩阵的行数。
-- `cols`（IN）：HOST，矩阵的列数。
-- `ld`（IN）：HOST，leading dimension。行主序时需 `>= cols`；列主序时需 `>= rows`。
-- `values`（IN）：DEVICE，矩阵数据指针。
+- `rows`（IN）：HOST，矩阵的行数，允许为 0，不允许为负数。
+- `cols`（IN）：HOST，矩阵的列数，允许为 0，不允许为负数。
+- `ld`（IN）：HOST，leading dimension。行主序时需 `>= cols`；列主序时需 `>= rows`。必须大于 0，该约束同样适用于零维矩阵。
+- `values`（IN）：DEVICE，矩阵数据指针，必须非空，包括零维矩阵。
 - `valueType`（IN）：HOST，元素数据类型。作为 B 矩阵时支持 `ACL_FLOAT` / `ACL_FLOAT16` / `ACL_INT8`；作为 C 矩阵时支持 `ACL_FLOAT` / `ACL_FLOAT16` / `ACL_INT32`（`ACL_INT32` 仅在 int8 计算路径中作为 C 矩阵类型使用）。
 - `order`（IN）：HOST，布局：`ACL_SPARSE_ORDER_ROW`（行主序）/ `ACL_SPARSE_ORDER_COL`（列主序）。
+
+**说明**：rows/cols 为 0 的零维稠密矩阵描述符可正常创建；但计算类 API 是否接受零维输入由各算子决定——aclsparseSpMM / aclsparseSDDMM / aclsparseSpSM 对零维输入返回 `ACL_SPARSE_STATUS_INVALID_VALUE`，aclsparseSpMMOp 系列支持零维（详见对应算子文档）。
 
 **返回值**：
 
@@ -1258,7 +1260,7 @@ aclsparseStatus_t aclsparseSpMM(
 );
 ```
 
-**功能**：稀疏矩阵-稠密矩阵乘法（SpMM），计算 `C = alpha * op(A) * op(B) + beta * C`。稀疏矩阵 A 须为 **CSR** 格式（CSC / COO 等格式传入 `matA` 将返回 `ACL_SPARSE_STATUS_NOT_SUPPORTED`）。
+**功能**：稀疏矩阵-稠密矩阵乘法（SpMM），计算 `C = alpha * op(A) * op(B) + beta * C`。稀疏矩阵 A 须为 **CSR** 格式（CSC / COO 等格式传入 `matA` 将返回 `ACL_SPARSE_STATUS_NOT_SUPPORTED`）。零维输入：matA.rows / matA.cols / matC.cols（即 m/k/n）任一为 0 时返回 `ACL_SPARSE_STATUS_INVALID_VALUE`（aclsparseSpMMGetBufferSize / aclsparseSpMMPreprocess / aclsparseSpMM 三个入口行为一致）。
 
 **参数说明**：
 

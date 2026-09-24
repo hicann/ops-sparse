@@ -25,6 +25,7 @@
 #define ACLSPARSE_DESCR_INTERNAL_H
 
 #include <cstdint>
+#include <cstddef>
 #include <memory>
 #include <acl/acl.h>
 #include "cann_ops_sparse.h"
@@ -190,6 +191,84 @@ struct aclsparseDnMatDescr {
     void *values = nullptr;
     aclDataType valueType{};
 };
+
+// SpMM 支持的 dtype 组合四元组（matA / matB / matC / computeType）。
+// arch22 仅支持全 FP32；arch35 支持统一 FP32 / FP16 / INT8 量化共三组合，
+// 各架构以表驱动方式传入公共校验函数。
+struct AclsparseSpmmDtypeCombo {
+    aclDataType matA;
+    aclDataType matB;
+    aclDataType matC;
+    aclDataType computeType;
+};
+
+// SpMM dtype 组合匹配（表驱动）：matA/matB/matC/computeType 四元组与 combos
+// 表中任一组合全等即命中。供 AclsparseValidateSpmmCommon 调用，独立成函数以
+// 控制单函数圈复杂度。
+inline bool AclsparseMatchSpmmDtypeCombo(
+    const aclsparseSpMatDescr *matA, const aclsparseDnMatDescr *matB,
+    const aclsparseDnMatDescr *matC, aclDataType computeType,
+    const AclsparseSpmmDtypeCombo *combos, size_t comboCount)
+{
+    for (size_t i = 0; i < comboCount; ++i) {
+        if (matA->valueType == combos[i].matA && matB->valueType == combos[i].matB &&
+            matC->valueType == combos[i].matC && computeType == combos[i].computeType) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// SpMM 入参公共校验（arch22/arch35 共用，消除跨架构重复代码）：
+// 非空 + opA/opB 操作类型 + CSR 格式 + 索引类型（严格 I32）+ base-zero +
+// dtype 组合（表驱动）+ 维度匹配 + 零维守卫。
+// allowOpBTranspose：arch35 支持 opB 转置（N/T），arch22 仅支持 N 时传 false。
+// 各架构差异化检查（alg 集合、紧凑布局、INT32_MAX 上限等）由调用方在本函数
+// 返回 SUCCESS 后自行补充。
+inline aclsparseStatus_t AclsparseValidateSpmmCommon(
+    const aclsparseSpMatDescr *matA, const aclsparseDnMatDescr *matB,
+    const aclsparseDnMatDescr *matC, aclsparseOperation_t opA,
+    aclsparseOperation_t opB, aclDataType computeType, bool allowOpBTranspose,
+    const AclsparseSpmmDtypeCombo *combos, size_t comboCount)
+{
+    if (matA == nullptr || matB == nullptr || matC == nullptr) {
+        return ACL_SPARSE_STATUS_HANDLE_IS_NULLPTR;
+    }
+    // SpMM 仅支持 opA = NON_TRANSPOSE
+    if (opA != ACL_SPARSE_OP_NON_TRANSPOSE) {
+        return ACL_SPARSE_STATUS_NOT_SUPPORTED;
+    }
+    if (opB != ACL_SPARSE_OP_NON_TRANSPOSE &&
+        (!allowOpBTranspose || opB != ACL_SPARSE_OP_TRANSPOSE)) {
+        return ACL_SPARSE_STATUS_NOT_SUPPORTED;
+    }
+    if (matA->format != ACL_SPARSE_FORMAT_CSR) {
+        return ACL_SPARSE_STATUS_MATRIX_TYPE_NOT_SUPPORTED;
+    }
+    aclsparseStatus_t idxSt = AclsparseValidateSupportedCsrIndexTypes(matA->ptrType, matA->IdxType);
+    if (idxSt != ACL_SPARSE_STATUS_SUCCESS) {
+        return idxSt;
+    }
+    if (matA->baseType != ACL_SPARSE_INDEX_BASE_ZERO) {
+        return ACL_SPARSE_STATUS_NOT_SUPPORTED;
+    }
+    // dtype 组合校验（表驱动，匹配逻辑见 AclsparseMatchSpmmDtypeCombo）
+    if (!AclsparseMatchSpmmDtypeCombo(matA, matB, matC, computeType, combos, comboCount)) {
+        return ACL_SPARSE_STATUS_NOT_SUPPORTED;
+    }
+    // 维度匹配 + 零维守卫：维度匹配对 0==0 放行，随后由零维守卫拒绝 m/k/n
+    // 任一为 0 的输入（0 维矩阵支持性由算子层声明，spmm 不支持）。
+    if (matA->cols != static_cast<uint64_t>(matB->rows)) {
+        return ACL_SPARSE_STATUS_INVALID_VALUE;
+    }
+    if (matA->rows != static_cast<uint64_t>(matC->rows) || matB->cols != matC->cols) {
+        return ACL_SPARSE_STATUS_INVALID_VALUE;
+    }
+    if (matA->rows == 0 || matA->cols == 0 || matC->cols == 0) {
+        return ACL_SPARSE_STATUS_INVALID_VALUE;
+    }
+    return ACL_SPARSE_STATUS_SUCCESS;
+}
 
 // Cube SpMM 稀疏矩阵描述符内部结构（Cube-BCSR 专用）。
 // 不保存 COO 原始输入；COO 数组在 aclsparseCubeSpmmPreprocess 调用时直接传入。

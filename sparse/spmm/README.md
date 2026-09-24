@@ -71,6 +71,7 @@ aclsparseStatus_t aclsparseSpMMGetBufferSize(aclsparseHandle_t handle, aclsparse
   - matA=ACL_FLOAT16, matB=ACL_FLOAT16, matC=ACL_FLOAT16, computeType=ACL_FLOAT
   - matA=ACL_INT8, matB=ACL_INT8, matC=ACL_INT32, computeType=ACL_INT32
 - 维度匹配：A.cols == B.rows，A.rows == C.rows，B.cols == C.cols
+- 零维输入：m / k / n（matA.rows / matA.cols / matC.cols）任一为 0 时返回 `ACL_SPARSE_STATUS_INVALID_VALUE`（arch35 与 arch22 行为一致）
 - size 不可为 nullptr
 
 #### 支持的稀疏格式

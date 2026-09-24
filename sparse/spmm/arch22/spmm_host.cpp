@@ -76,42 +76,12 @@ WsOffsets ComputeWsOffsets(uint32_t M, uint32_t blockDim)
     return off;
 }
 
-// arch22 仅支持 NON_TRANSPOSE(opA/opB)、CSR(I32 索引、base-zero)、FP32 dtype 组合、
-// DEFAULT/CSR_ALG1 算法。三个对外入口统一调用本函数做入参校验，避免非法参数静默
-// 产生错误结果或越界访问。参照 arch35 的 ValidateSpmmInputs 实现。
-static aclsparseStatus_t ValidateSpmmOperations(aclsparseOperation_t opA,
-                                                aclsparseOperation_t opB)
-{
-    if (opA != ACL_SPARSE_OP_NON_TRANSPOSE) {
-        return ACL_SPARSE_STATUS_NOT_SUPPORTED; // arch22 仅支持 N
-    }
-    if (opB != ACL_SPARSE_OP_NON_TRANSPOSE) {
-        return ACL_SPARSE_STATUS_NOT_SUPPORTED; // arch22 不支持 opB 转置
-    }
-    return ACL_SPARSE_STATUS_SUCCESS;
-}
+// arch22 入参校验：公共部分（含 dtype 表驱动）见 aclsparse_descr_internal.h，此处仅保留 arch22 差异化检查（紧凑 ROW 布局、DEFAULT/CSR_ALG1）。
 
-static bool IsSupportedSpmmDtypeCombo(const aclsparseSpMatDescr *matA,
-                                      const aclsparseDnMatDescr *matB,
-                                      const aclsparseDnMatDescr *matC,
-                                      aclDataType computeType)
-{
-    return matA->valueType == ACL_FLOAT &&
-           matB->valueType == ACL_FLOAT &&
-           matC->valueType == ACL_FLOAT &&
-           computeType == ACL_FLOAT;
-}
-
-static bool SpmmDimensionsMatch(const aclsparseSpMatDescr *matA,
-                                const aclsparseDnMatDescr *matB,
-                                const aclsparseDnMatDescr *matC)
-{
-    if (matA->cols != static_cast<uint64_t>(matB->rows)) {
-        return false;
-    }
-    return matA->rows == static_cast<uint64_t>(matC->rows) &&
-           matB->cols == matC->cols;
-}
+// arch22 仅支持全 FP32 dtype 组合
+static const AclsparseSpmmDtypeCombo kSpmmDtypeCombos[] = {
+    {ACL_FLOAT, ACL_FLOAT, ACL_FLOAT, ACL_FLOAT},
+};
 
 // arch22 kernel 仅支持紧凑 ROW-major 布局（ld == cols）：kernel.cpp 按 B[col*N+j]、
 // C[row*N+j] 硬编码寻址，未使用描述符的 order/ld。传入 COL-major 或带 padding 的
@@ -136,29 +106,15 @@ static aclsparseStatus_t ValidateSpmmInputs(const aclsparseSpMatDescr *matA,
                                             aclDataType computeType,
                                             aclsparseSpMMAlg_t alg)
 {
-    if (matA == nullptr || matB == nullptr || matC == nullptr) {
-        return ACL_SPARSE_STATUS_HANDLE_IS_NULLPTR;
-    }
-    aclsparseStatus_t st = ValidateSpmmOperations(opA, opB);
+    // 公共校验（非空/操作类型/格式/索引类型/base/dtype 组合/维度/零维）见
+    // aclsparse_descr_internal.h；arch22 不支持 opB 转置、仅全 FP32
+    aclsparseStatus_t st = AclsparseValidateSpmmCommon(
+        matA, matB, matC, opA, opB, computeType, /*allowOpBTranspose=*/false,
+        kSpmmDtypeCombos, sizeof(kSpmmDtypeCombos) / sizeof(kSpmmDtypeCombos[0]));
     if (st != ACL_SPARSE_STATUS_SUCCESS) {
         return st;
     }
-    if (matA->format != ACL_SPARSE_FORMAT_CSR) {
-        return ACL_SPARSE_STATUS_MATRIX_TYPE_NOT_SUPPORTED;
-    }
-    aclsparseStatus_t idxSt = AclsparseValidateSupportedCsrIndexTypes(matA->ptrType, matA->IdxType);
-    if (idxSt != ACL_SPARSE_STATUS_SUCCESS) {
-        return idxSt;
-    }
-    if (matA->baseType != ACL_SPARSE_INDEX_BASE_ZERO) {
-        return ACL_SPARSE_STATUS_NOT_SUPPORTED;
-    }
-    if (!IsSupportedSpmmDtypeCombo(matA, matB, matC, computeType)) {
-        return ACL_SPARSE_STATUS_NOT_SUPPORTED;
-    }
-    if (!SpmmDimensionsMatch(matA, matB, matC)) {
-        return ACL_SPARSE_STATUS_INVALID_VALUE;
-    }
+    // arch22 kernel 仅支持紧凑 ROW-major（详见 IsSupportedDnMatLayout 注释）
     if (!IsSupportedDnMatLayout(matB) || !IsSupportedDnMatLayout(matC)) {
         return ACL_SPARSE_STATUS_NOT_SUPPORTED;
     }

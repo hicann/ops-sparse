@@ -16,6 +16,8 @@ C_out = (alpha * op(X) * op(Y) + beta * C) ∘ spy(C)
 
 公共接口定义、参数说明及调用示例见上层 [../README.md](../README.md)。本文件仅补充 arch22 特有的实现约束和说明。
 
+零维输入：X / Y / C 任一维度（rows/cols）为 0 时返回 `ACL_SPARSE_STATUS_INVALID_VALUE`（host 侧 `SddmmValidateShapes` fail-fast 拒绝，arch35 与 arch22 行为一致）。
+
 ## 精度标准
 
 采用 MIXED_TOLERANCE 模式：逐元素 `|actual - golden| ≤ max(atol + rtol * |golden|, maxAbsErrLimit)`，整体 `matchedRatio ≥ 0.99`。

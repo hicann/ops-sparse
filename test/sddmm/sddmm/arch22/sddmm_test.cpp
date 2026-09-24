@@ -335,6 +335,94 @@ TEST_F(SddmmArch22ExceptionTest, E3_DimensionMismatch) {
     EXPECT_EQ(ret, ACL_SPARSE_STATUS_INVALID_VALUE);
 }
 
+// E4: m=0 -> ACL_SPARSE_STATUS_INVALID_VALUE
+//     零维由 SddmmValidateShapes 守卫拒绝（维度一致性对 0==0 放行），对齐 arch35 MZero/NZero/KZero 行为。
+TEST_F(SddmmArch22ExceptionTest, E4_MZero) {
+    HandleManager handle;
+    handle.setStream(env_->stream());
+    float alpha = 1.0f, beta = 0.0f;
+    const int64_t m = 0, n = 3, k = 2;
+    // X: 0×2 ROW 序 (ld=2)，0 元素也需非空 values（公共层要求 values 非空）
+    std::vector<float> xDummy(1, 1.0f);
+    std::vector<float> yDummy(1, 1.0f);
+    DeviceBuffer dX = DeviceBuffer::copyFrom(xDummy.data(), xDummy.size() * sizeof(float));
+    DeviceBuffer dY = DeviceBuffer::copyFrom(yDummy.data(), yDummy.size() * sizeof(float));
+    // C: 0×3 CSR，nnz=0，rowOffsets=[0] 非空（kernel 读 ptrs[m]）
+    std::vector<int32_t> rowOff = {0};
+    DeviceBuffer dRowOff = DeviceBuffer::copyFrom(rowOff.data(), rowOff.size() * sizeof(int32_t));
+
+    auto matX = DnMatManager::createConst(m, k, k, dX.raw(), ACL_FLOAT, ACL_SPARSE_ORDER_ROW);
+    auto matY = DnMatManager::createConst(n, k, k, dY.raw(), ACL_FLOAT, ACL_SPARSE_ORDER_ROW);
+    auto matC = SpMatManager::createCsr(m, n, 0, dRowOff.get(), nullptr, nullptr,
+                                        ACL_SPARSE_INDEX_32I, ACL_SPARSE_INDEX_32I,
+                                        ACL_SPARSE_INDEX_BASE_ZERO, ACL_FLOAT);
+    size_t bufSize = 0;
+    auto ret = aclsparseSDDMMBufferSize(
+        handle.get(), ACL_SPARSE_OP_NON_TRANSPOSE, ACL_SPARSE_OP_TRANSPOSE,
+        &alpha, matX.cget(), matY.cget(), &beta, matC.get(),
+        ACL_FLOAT, ACL_SPARSE_SDDMM_ALG_DEFAULT, &bufSize);
+    EXPECT_EQ(ret, ACL_SPARSE_STATUS_INVALID_VALUE);
+}
+
+// E5: n=0 -> ACL_SPARSE_STATUS_INVALID_VALUE
+//     零维由 SddmmValidateShapes 守卫拒绝（维度一致性对 0==0 放行），对齐 arch35 MZero/NZero/KZero 行为。
+TEST_F(SddmmArch22ExceptionTest, E5_NZero) {
+    HandleManager handle;
+    handle.setStream(env_->stream());
+    float alpha = 1.0f, beta = 0.0f;
+    const int64_t m = 4, n = 0, k = 2;
+    std::vector<float> hX(static_cast<size_t>(m) * static_cast<size_t>(k), 1.0f);
+    // Y: 0×2 ROW 序 (ld=2)，0 元素也需非空 values（公共层要求 values 非空）
+    std::vector<float> yDummy(1, 1.0f);
+    DeviceBuffer dX = DeviceBuffer::copyFrom(hX.data(), hX.size() * sizeof(float));
+    DeviceBuffer dY = DeviceBuffer::copyFrom(yDummy.data(), yDummy.size() * sizeof(float));
+    // C: 4×0 CSR，nnz=0，rowOffsets 5 个 0
+    std::vector<int32_t> rowOff(5, 0);
+    DeviceBuffer dRowOff = DeviceBuffer::copyFrom(rowOff.data(), rowOff.size() * sizeof(int32_t));
+
+    auto matX = DnMatManager::createConst(m, k, k, dX.raw(), ACL_FLOAT, ACL_SPARSE_ORDER_ROW);
+    auto matY = DnMatManager::createConst(n, k, k, dY.raw(), ACL_FLOAT, ACL_SPARSE_ORDER_ROW);
+    auto matC = SpMatManager::createCsr(m, n, 0, dRowOff.get(), nullptr, nullptr,
+                                        ACL_SPARSE_INDEX_32I, ACL_SPARSE_INDEX_32I,
+                                        ACL_SPARSE_INDEX_BASE_ZERO, ACL_FLOAT);
+    size_t bufSize = 0;
+    auto ret = aclsparseSDDMMBufferSize(
+        handle.get(), ACL_SPARSE_OP_NON_TRANSPOSE, ACL_SPARSE_OP_TRANSPOSE,
+        &alpha, matX.cget(), matY.cget(), &beta, matC.get(),
+        ACL_FLOAT, ACL_SPARSE_SDDMM_ALG_DEFAULT, &bufSize);
+    EXPECT_EQ(ret, ACL_SPARSE_STATUS_INVALID_VALUE);
+}
+
+// E6: k=0 -> ACL_SPARSE_STATUS_INVALID_VALUE
+//     零维由 SddmmValidateShapes 守卫拒绝（维度一致性对 0==0 放行），对齐 arch35 MZero/NZero/KZero 行为。
+TEST_F(SddmmArch22ExceptionTest, E6_KZero) {
+    HandleManager handle;
+    handle.setStream(env_->stream());
+    float alpha = 1.0f, beta = 0.0f;
+    const int64_t m = 4, n = 3, k = 0;
+    // X: 4×0 ROW 序 (ld=1)，0 元素也需非空 values（公共层要求 values 非空）
+    std::vector<float> xDummy(1, 1.0f);
+    // Y: 3×0 ROW 序 (ld=1)，0 元素也需非空 values（公共层要求 values 非空）
+    std::vector<float> yDummy(1, 1.0f);
+    DeviceBuffer dX = DeviceBuffer::copyFrom(xDummy.data(), xDummy.size() * sizeof(float));
+    DeviceBuffer dY = DeviceBuffer::copyFrom(yDummy.data(), yDummy.size() * sizeof(float));
+    // C: 4×3 CSR，nnz=0（k=0 时 nnz 必为 0），rowOffsets 5 个 0
+    std::vector<int32_t> rowOff(5, 0);
+    DeviceBuffer dRowOff = DeviceBuffer::copyFrom(rowOff.data(), rowOff.size() * sizeof(int32_t));
+
+    auto matX = DnMatManager::createConst(m, k, 1, dX.raw(), ACL_FLOAT, ACL_SPARSE_ORDER_ROW);
+    auto matY = DnMatManager::createConst(n, k, 1, dY.raw(), ACL_FLOAT, ACL_SPARSE_ORDER_ROW);
+    auto matC = SpMatManager::createCsr(m, n, 0, dRowOff.get(), nullptr, nullptr,
+                                        ACL_SPARSE_INDEX_32I, ACL_SPARSE_INDEX_32I,
+                                        ACL_SPARSE_INDEX_BASE_ZERO, ACL_FLOAT);
+    size_t bufSize = 0;
+    auto ret = aclsparseSDDMMBufferSize(
+        handle.get(), ACL_SPARSE_OP_NON_TRANSPOSE, ACL_SPARSE_OP_TRANSPOSE,
+        &alpha, matX.cget(), matY.cget(), &beta, matC.get(),
+        ACL_FLOAT, ACL_SPARSE_SDDMM_ALG_DEFAULT, &bufSize);
+    EXPECT_EQ(ret, ACL_SPARSE_STATUS_INVALID_VALUE);
+}
+
 TEST_F(SddmmArch22ExceptionTest, E4_UnrepresentableLeadingDimension) {
     HandleManager handle;
     handle.setStream(env_->stream());

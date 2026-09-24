@@ -95,60 +95,18 @@ int32_t ComputeSpmmHighPrecision(aclsparseSpMMAlg_t alg, int32_t dataType)
                0;
 }
 
-struct SpmmSupportedDtypeCombo {
-    aclDataType matA;
-    aclDataType matB;
-    aclDataType matC;
-    aclDataType computeType;
+// arch35 支持的 dtype 组合：统一 FP32 / FP16 / INT8 量化
+static const AclsparseSpmmDtypeCombo kSpmmDtypeCombos[] = {
+    {ACL_FLOAT, ACL_FLOAT, ACL_FLOAT, ACL_FLOAT},
+    {ACL_FLOAT16, ACL_FLOAT16, ACL_FLOAT16, ACL_FLOAT},
+    {ACL_INT8, ACL_INT8, ACL_INT32, ACL_INT32},
 };
-
-static bool IsSupportedSpmmDtypeCombo(const aclsparseSpMatDescr *matA,
-                                      const aclsparseDnMatDescr *matB,
-                                      const aclsparseDnMatDescr *matC,
-                                      aclDataType computeType)
-{
-    static const SpmmSupportedDtypeCombo kCombos[] = {
-        {ACL_FLOAT, ACL_FLOAT, ACL_FLOAT, ACL_FLOAT},
-        {ACL_FLOAT16, ACL_FLOAT16, ACL_FLOAT16, ACL_FLOAT},
-        {ACL_INT8, ACL_INT8, ACL_INT32, ACL_INT32},
-    };
-    for (const auto &combo : kCombos) {
-        if (matA->valueType == combo.matA && matB->valueType == combo.matB &&
-            matC->valueType == combo.matC && computeType == combo.computeType) {
-            return true;
-        }
-    }
-    return false;
-}
-
-static bool SpmmDimensionsMatch(const aclsparseSpMatDescr *matA,
-                                const aclsparseDnMatDescr *matB,
-                                const aclsparseDnMatDescr *matC)
-{
-    if (matA->cols != static_cast<uint64_t>(matB->rows)) {
-        return false;
-    }
-    return matA->rows == static_cast<uint64_t>(matC->rows) &&
-           matB->cols == matC->cols;
-}
 
 static bool IsSupportedSpmmAlg(aclsparseSpMMAlg_t alg)
 {
     return alg == ACL_SPARSE_SPMM_ALG_DEFAULT ||
            alg == ACL_SPARSE_SPMM_CSR_ALG1 ||
            alg == ACL_SPARSE_SPMM_CSR_FP32_HIGH_PRECISION_ALG;
-}
-
-static aclsparseStatus_t ValidateSpmmOperations(aclsparseOperation_t opA,
-                                                aclsparseOperation_t opB)
-{
-    if (opA != ACL_SPARSE_OP_NON_TRANSPOSE) {
-        return ACL_SPARSE_STATUS_NOT_SUPPORTED; // V1 仅 N
-    }
-    if (opB != ACL_SPARSE_OP_NON_TRANSPOSE && opB != ACL_SPARSE_OP_TRANSPOSE) {
-        return ACL_SPARSE_STATUS_NOT_SUPPORTED;
-    }
-    return ACL_SPARSE_STATUS_SUCCESS;
 }
 
 aclsparseStatus_t ValidateSpmmInputs(const aclsparseSpMatDescr *matA,
@@ -159,47 +117,17 @@ aclsparseStatus_t ValidateSpmmInputs(const aclsparseSpMatDescr *matA,
                                    aclDataType computeType,
                                    aclsparseSpMMAlg_t alg)
 {
-    if (matA == nullptr || matB == nullptr || matC == nullptr) {
-        OP_LOGE("aclsparseSpMM", "matA, matB, or matC is nullptr");
-        return ACL_SPARSE_STATUS_HANDLE_IS_NULLPTR;
-    }
-    aclsparseStatus_t st = ValidateSpmmOperations(opA, opB);
+    // 公共校验（非空/操作类型/格式/索引类型/base/dtype 组合/维度匹配/零维）见
+    // aclsparse_descr_internal.h；arch35 支持 opB 转置
+    aclsparseStatus_t st = AclsparseValidateSpmmCommon(
+        matA, matB, matC, opA, opB, computeType, /*allowOpBTranspose=*/true,
+        kSpmmDtypeCombos, sizeof(kSpmmDtypeCombos) / sizeof(kSpmmDtypeCombos[0]));
     if (st != ACL_SPARSE_STATUS_SUCCESS) {
-        OP_LOGE("aclsparseSpMM", "unsupported operation: opA=%d, opB=%d, status=%d",
-                static_cast<int>(opA), static_cast<int>(opB), static_cast<int>(st));
+        OP_LOGE("aclsparseSpMM", "ValidateSpmmInputs common check failed, status=%d",
+                static_cast<int>(st));
         return st;
     }
-    if (matA->format != ACL_SPARSE_FORMAT_CSR) {
-        OP_LOGE("aclsparseSpMM", "unsupported sparse matrix format %d (CSR required)",
-                static_cast<int>(matA->format));
-        return ACL_SPARSE_STATUS_MATRIX_TYPE_NOT_SUPPORTED;
-    }
-    aclsparseStatus_t idxSt = AclsparseValidateSupportedCsrIndexTypes(matA->ptrType, matA->IdxType);
-    if (idxSt != ACL_SPARSE_STATUS_SUCCESS) {
-        OP_LOGE("aclsparseSpMM", "unsupported CSR index types: ptrType=%d, idxType=%d, status=%d",
-                static_cast<int>(matA->ptrType), static_cast<int>(matA->IdxType), static_cast<int>(idxSt));
-        return idxSt;
-    }
-    if (matA->baseType != ACL_SPARSE_INDEX_BASE_ZERO) {
-        OP_LOGE("aclsparseSpMM", "unsupported index base %d (ZERO required)",
-                static_cast<int>(matA->baseType));
-        return ACL_SPARSE_STATUS_NOT_SUPPORTED;
-    }
-    if (!IsSupportedSpmmDtypeCombo(matA, matB, matC, computeType)) {
-        OP_LOGE("aclsparseSpMM",
-                "unsupported data type combination: matA=%d, matB=%d, matC=%d, computeType=%d",
-                static_cast<int>(matA->valueType), static_cast<int>(matB->valueType),
-                static_cast<int>(matC->valueType), static_cast<int>(computeType));
-        return ACL_SPARSE_STATUS_NOT_SUPPORTED;
-    }
-    if (!SpmmDimensionsMatch(matA, matB, matC)) {
-        OP_LOGE("aclsparseSpMM",
-                "SpMM matrix dimensions do not match: matA=(%llu, %llu), matB=(%lld, %lld), matC=(%lld, %lld)",
-                static_cast<unsigned long long>(matA->rows), static_cast<unsigned long long>(matA->cols),
-                static_cast<long long>(matB->rows), static_cast<long long>(matB->cols),
-                static_cast<long long>(matC->rows), static_cast<long long>(matC->cols));
-        return ACL_SPARSE_STATUS_INVALID_VALUE;
-    }
+    // dense ld 上限校验：ld 需存入 int32_t tiling 字段，超限静默截断风险（上游 d86aa93 语义保留）
     if (matB->ld > static_cast<int64_t>(INT32_MAX) ||
         matC->ld > static_cast<int64_t>(INT32_MAX)) {
         OP_LOGE("aclsparseSpMM",

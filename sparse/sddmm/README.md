@@ -83,6 +83,7 @@ aclsparseStatus_t aclsparseSDDMMBufferSize(
   - matX=ACL_FLOAT, matY=ACL_FLOAT, matC=ACL_FLOAT, computeType=ACL_FLOAT
   - matX=ACL_FLOAT16, matY=ACL_FLOAT16, matC=ACL_FLOAT16, computeType=ACL_FLOAT16
 - 维度匹配：X.rows == C.rows（m）、X.cols == Y.cols（k）、Y.rows == C.cols（n）
+- 零维输入：X / Y / C 任一维度（rows/cols）为 0 时返回 `ACL_SPARSE_STATUS_INVALID_VALUE`（arch35 与 arch22 行为一致）
 - 各维度值不得超过 INT32_MAX
 
 > **与 cuSPARSE opB 的语义对照（迁移注意）**
