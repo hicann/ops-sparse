@@ -123,7 +123,7 @@ $$
 
 - **矩阵格式**：当前仅支持 CSR 格式；CSC / COO 等格式在 SpMV / SpMM 路径上会返回 `ACL_SPARSE_STATUS_NOT_SUPPORTED`（`aclsparseCreateCsc` 亦暂未实现）
 - **索引类型**：当前仅支持 `ACL_SPARSE_INDEX_32I`；`ACL_SPARSE_INDEX_64I` 暂未支持
-- **算法类型**：支持 `ACL_SPARSE_SPMV_ALG_DEFAULT`、`ACL_SPARSE_SPMV_CSR_ALG1`、`ACL_SPARSE_SPMV_CSR_ALG2`；当前三个枚举共享同一正确性路径
+- **算法类型**：arch35（Ascend 950）支持 `ACL_SPARSE_SPMV_ALG_DEFAULT`、`ACL_SPARSE_SPMV_CSR_ALG1`、`ACL_SPARSE_SPMV_CSR_ALG2`，当前三个枚举共享同一正确性路径；arch22（Atlas A2/A3）支持 `ACL_SPARSE_SPMV_ALG_DEFAULT` 与 `ACL_SPARSE_SPMV_CSR_ALG_CUBE`（仅非转置，matA/vecX 为 fp32 或 fp16，输出 fp32）。传入所在架构不支持的算法会提示错误并返回 `ACL_SPARSE_STATUS_NOT_SUPPORTED`
 - **转置支持**：支持非转置和转置，暂不支持共轭转置
 - **非连续 Tensor**：CSR rowOffsets、colInd、values 通过 `aclsparseCsrSetStrides` 设置元素步长，x/y 通过
   `aclsparseDnVecSetStride` 设置元素步长；旧接口默认 stride=1，仅支持正步长，vecY 间隙元素保持不变
@@ -138,8 +138,8 @@ $$
 2. **CPU 参考计算**：非转置使用 `SpmvCpu`，转置使用 `SpmvTransCpu`，采用高于算子计算类型的参考累加精度
 3. **初始化 ACL 环境**：初始化 ACL 环境，设置设备和创建流
 4. **创建设备内存**：使用 `CreateDeviceTensor` 拷贝矩阵和向量数据到 device，用 `unique_ptr` 托管生命周期
-5. **创建描述符**：使用 `aclsparseCreateCsr` 和 `aclsparseCreateDnVec` 创建矩阵和向量描述符；非连续用例再通过 stride 设置接口写入五个数组的元素步长
-6. **执行 SpMV**：先调用 `aclsparseSpMVGetBufferSize`，按需分配 workspace，再调用可选的 `aclsparseSpMVPreprocess` 和 `aclsparseSpMV`
+5. **创建描述符**：使用 `aclsparseCreateCsr` 和 `aclsparseCreateDnVec` 创建矩阵和向量描述符；非连续用例再通过 stride 设置接口写入五个数组的元素步长（arch35）
+6. **执行 SpMV**：先调用 `aclsparseSpMVGetBufferSize` 查询 workspace 大小，按需分配 `externalBuffer`（返回 0 时传入 `nullptr`），再调用可选的 `aclsparseSpMVPreprocess`（仅 arch35 实现）和 `aclsparseSpMV`
 7. **结果验证**：将 device 结果回读到 host，与 CPU 参考结果比较。浮点类型使用生态算子混合容差及逐元素最大绝对误差门禁，int32 类型要求逐元素完全匹配；NaN 和同符号 Infinity 按 IEEE 分类一致性验证
 8. **清理资源**：销毁描述符，unique_ptr 自动释放设备/主机内存
 
@@ -155,6 +155,7 @@ $$
 | 延迟绑定与异步执行 | CSR 和 x/y 未绑定时可查询 workspace；execute 校验实际使用的指针；同 stream 异步 H2D 后直接执行，分别覆盖转置/非转置、显式/跳过 Preprocess |
 | 整数溢出回归 | 16 种乘法溢出、加法溢出、极值、抵消及边界场景，分别覆盖转置/非转置、连续/stride、Host/Device 标量，共 128 组；逐元素精确匹配并检查输出间隙哨兵 |
 | 性能门禁 | 任务书 4 个标准规模，按 95%/99%/97.5%/99.9% 稀疏率对比基准 |
+| Cube 算法（arch22） | fp32 11 组固定用例 + 10 条随机参数，fp16 输入 10 组；覆盖稠密/稀疏/单行/宽矩阵、alpha/beta 组合以及 nnz=0 回退向量版 |
 
 ### 精度验证方法
 
@@ -194,6 +195,16 @@ else
 
 // 执行 SpMV（alpha/beta 类型必须与 computeType 匹配）
 aclsparseOperation_t op = transpose ? ACL_SPARSE_OP_TRANSPOSE : ACL_SPARSE_OP_NON_TRANSPOSE;
+
+// 查询并按需申请 workspace（向量版返回 0，externalBuffer 保持 nullptr）
+size_t bufferSize = 0;
+sparseRet = aclsparseSpMVGetBufferSize(spHandle, op, &alphaTyped,
+                                       matDesc, vecXDesc, &betaTyped, vecYDesc,
+                                       compDt, ACL_SPARSE_SPMV_ALG_DEFAULT, &bufferSize);
+void *externalBuffer = nullptr;
+if (bufferSize > 0)
+    aclrtMalloc(&externalBuffer, bufferSize, ACL_MEM_MALLOC_HUGE_FIRST);
+
 sparseRet = aclsparseSpMV(spHandle, op, &alphaTyped,
                            matDesc, vecXDesc, &betaTyped, vecYDesc,
                            compDt, ACL_SPARSE_SPMV_ALG_DEFAULT,
@@ -266,8 +277,12 @@ Matched Ratio = 1; Max Absolute Error = 0
 
 ### aclsparseSpMVGetBufferSize
 
-Ascend 950 已实现。非转置返回 0；转置按矩阵列数和 NNZ 返回确定性预处理 workspace 大小。
+arch35（Ascend 950）：非转置返回 0；转置按矩阵列数和 NNZ 返回确定性预处理 workspace 大小。
 查询只验证描述符元数据，不要求 CSR 或 x/y 的数据指针已绑定。
+
+arch22（Atlas A2/A3）：向量版（`ACL_SPARSE_SPMV_ALG_DEFAULT`）返回 0；cube 版
+（`ACL_SPARSE_SPMV_CSR_ALG_CUBE`）返回分段求和所需的 workspace 大小，须作为
+`aclsparseSpMV` 的 `externalBuffer` 传入。
 
 **函数原型**：
 
@@ -297,7 +312,7 @@ aclsparseStatus_t aclsparseSpMVGetBufferSize(
 | beta        |  IN  | 标量 beta 指针，类型必须与 computeType 一致                                   |
 | vecY        |  IN  | 输出稠密向量 y 描述符                                                         |
 | computeType |  IN  | 计算数据类型（`ACL_FLOAT` / `ACL_INT32`）                                 |
-| alg         |  IN  | 算法类型，支持 DEFAULT / CSR_ALG1 / CSR_ALG2                                  |
+| alg         |  IN  | 算法类型，arch35 支持 DEFAULT / CSR_ALG1 / CSR_ALG2，arch22 支持 DEFAULT / CSR_ALG_CUBE |
 | bufferSize  | OUT | 所需工作缓冲区大小                                                            |
 
 ### aclsparseSpMVPreprocess
@@ -353,8 +368,8 @@ aclsparseStatus_t aclsparseSpMV(
 | beta           |   IN   | 标量 beta 指针，类型必须与 computeType 一致                                   |
 | vecY           | IN/OUT | 稠密向量 y 描述符（y 为被乘向量，结果覆盖写入 y）                             |
 | computeType    |   IN   | 计算数据类型（`ACL_FLOAT` / `ACL_INT32`）                                 |
-| alg            |   IN   | 算法类型，支持 DEFAULT / CSR_ALG1 / CSR_ALG2                                  |
-| externalBuffer |   IN   | 工作缓冲区（大小由`GetBufferSize` 获取；转置且 NNZ>0 时必需）                  |
+| alg            |   IN   | 算法类型，arch35 支持 DEFAULT / CSR_ALG1 / CSR_ALG2，arch22 支持 DEFAULT / CSR_ALG_CUBE |
+| externalBuffer |   IN   | 工作缓冲区（大小由`GetBufferSize` 获取；arch35 转置且 NNZ>0、arch22 cube 算法时必需） |
 
 **返回值**：
 

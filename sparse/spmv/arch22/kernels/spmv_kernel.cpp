@@ -16,18 +16,74 @@
 // 各 kernel 定义在 spmv_kernel_*type*.cpp 中
 
 #include "spmv_kernel.h"
+#include "tiling_spmv_cube.h"
+
+// cube 版 SpMV kernel（定义在 spmv_cube_kernel.cpp）
+extern "C" __global__ __aicore__ void spmv_cube_fp32(
+	GM_ADDR vec_in, GM_ADDR cols_in, GM_ADDR indptr, GM_ADDR x_in,
+	GM_ADDR vec_out, GM_ADDR workspace, tcuscan::SpMVCubeTiling tiling);
+
+extern "C" __global__ __aicore__ void spmv_cube_fp16(
+	GM_ADDR vec_in, GM_ADDR cols_in, GM_ADDR indptr, GM_ADDR x_in,
+	GM_ADDR vec_out, GM_ADDR workspace, tcuscan::SpMVCubeTiling tiling);
+
+// 注意：spmv.h 会把 GM_ADDR 重定义为普通 host 指针，
+// 因此上面的 kernel 声明必须放在它之前（需要 AscendC 的 __gm__ 限定）。
 #include "../spmv.h"
+#include "../spmv_cube_tiling.h"
+
+namespace {
+
+/**
+ * @brief 以 cube 版 kernel 计算非转置 SpMV：y = alpha * A @ x + beta * y。
+ *
+ * 支持 fp32（A / x / y 均为 fp32）与 fp16（A / x 为 fp16，cube 以 fp32 累加，
+ * y 为 fp32）两种输入类型，由 @p isHalfInput 选择对应的 kernel。
+ *
+ * tiling 由 host 侧（spmv_cube::MakeCubeTiling）算好后按值传入 kernel，
+ * workspace 由调用方通过 aclsparseSpMV 的 externalBuffer 提供，
+ * 因此本函数只做一次异步 launch：不申请显存、不拷贝 tiling、不同步 stream。
+ */
+void LaunchSpmvCube(GM_ADDR csrRowPtr, GM_ADDR csrColInd, GM_ADDR csrVal,
+					GM_ADDR xVec, GM_ADDR yVec, GM_ADDR workspace,
+					tcuscan::SpMVCubeTiling tiling, uint32_t aicBlocks,
+					bool isHalfInput, void *stream) {
+	// kernel 侧要在完整的 indptr（rows + 1 个元素、升序）上二分查找块边界，
+	// 因此这里传入 csrRowPtr 首地址，而不是行结束下标 csrRowPtr + 1。
+	if (isHalfInput) {
+		spmv_cube_fp16<<<aicBlocks, nullptr, stream>>>(
+			csrVal, csrColInd, csrRowPtr, xVec, yVec, workspace, tiling);
+	} else {
+		spmv_cube_fp32<<<aicBlocks, nullptr, stream>>>(
+			csrVal, csrColInd, csrRowPtr, xVec, yVec, workspace, tiling);
+	}
+}
+
+} // namespace
 
 extern "C" void spmv_kernel_do(GM_ADDR csrRowPtr, GM_ADDR csrColInd,
 							   GM_ADDR csrVal, GM_ADDR xVec, GM_ADDR yVec,
 							   SpmvTilingData tiling, const void *alpha,
 							   const void *beta, int32_t computeType,
 							   int32_t valType, int32_t outType, bool trans,
-							   uint32_t numBlocks, void *stream) {
+							   int32_t algType, uint32_t numBlocks,
+							   GM_ADDR cubeWorkspace,
+							   tcuscan::SpMVCubeTiling cubeTiling,
+							   uint32_t cubeBlocks, void *stream) {
 #define SPMV_LAUNCH(CompT, ValT, OutT)                                         \
 	spmv_kernel_##CompT##_##ValT##_##OutT<<<numBlocks, nullptr, stream>>>(     \
 		csrRowPtr, csrColInd, csrVal, xVec, yVec,                              \
 		tiling.totalRowsNum, tiling.totalColNum, a, b, trans)
+
+	// cube 版实现：fp32 或 fp16 输入 / fp32 输出的非转置 SpMV。
+	// host 侧已完成校验与 tiling；tiling 不可用（空矩阵等）时 host 会改派
+	// SPMV_ALG_VECTOR，因此这里不再回退。
+	if (algType == SPMV_ALG_CUBE) {
+		const bool isHalfInput = (valType == SPMV_VAL_HALF);
+		LaunchSpmvCube(csrRowPtr, csrColInd, csrVal, xVec, yVec, cubeWorkspace,
+					   cubeTiling, cubeBlocks, isHalfInput, stream);
+		return;
+	}
 
 	if (computeType == SPMV_COMPUTE_I32) {
 		int32_t a = *static_cast<const int32_t *>(alpha);

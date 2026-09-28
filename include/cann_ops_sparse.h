@@ -182,6 +182,13 @@ typedef enum aclsparseSpMVAlg_t {
     ACL_SPARSE_SPMV_SELL_ALG1,
     // Default algorithm for Sliced Ellpack sparse matrix format. Provides deterministic
     // (bit-wise) results for each run.
+    ACL_SPARSE_SPMV_CSR_ALG_CUBE,
+    // Cube (matrix unit) based segmented-sum algorithm for CSR sparse matrix format.
+    // Requires opA == ACL_SPARSE_OP_NON_TRANSPOSE, a float32 compute type and a float32
+    // output vector; the matrix values and the input vector are either float32 or
+    // float16 (float16 inputs are accumulated in float32 by the cube unit). May produce
+    // slightly different results than the vector-unit algorithms because the reduction
+    // order differs. Reference: Algorithm 4.4 in https://arxiv.org/pdf/2506.23906
 } aclsparseSpMVAlg_t;
 
 // Complex types (aligned with cuComplex / cuDoubleComplex).
@@ -558,10 +565,10 @@ aclsparseStatus_t aclsparseSpMVPreprocess(aclsparseHandle_t handle, aclsparseOpe
  *
  * @param handle IN, HOST, aclsparse 句柄
  * @param opA IN, HOST, 稀疏矩阵操作类型
- * @param alpha IN, HOST/DEVICE, 标量 alpha 指针
+ * @param alpha IN, HOST/DEVICE, 标量 alpha 指针，不可为空。
  * @param matA IN, HOST, 稀疏矩阵描述符
  * @param vecX IN, HOST, 稠密向量 x 描述符
- * @param beta IN, HOST/DEVICE, 标量 beta 指针
+ * @param beta IN, HOST/DEVICE, 标量 beta 指针，不可为空。
  * @param vecY IN, HOST, 稠密向量 y 描述符
  * @param computeType IN, HOST, 计算精度类型
  * @param alg IN, HOST, SpMV 算法类型

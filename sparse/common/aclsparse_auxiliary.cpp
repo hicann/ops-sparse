@@ -59,6 +59,30 @@ aclsparseStatus_t allocateDefaultWorkspace(aclsparseContext *h, size_t size)
 
 } // namespace
 
+aclsparseStatus_t aclsparseEnsureDefaultWorkspace(aclsparseContext *h, size_t size)
+{
+    if (h == nullptr) {
+        return ACL_SPARSE_STATUS_HANDLE_IS_NULLPTR;
+    }
+    if (size == 0) {
+        return ACL_SPARSE_STATUS_SUCCESS;
+    }
+
+    // 已经够大（含用户 workspace 的情形）直接复用，避免无谓的 free/malloc。
+    if (size <= aclsparseGetEffectiveWorkspaceSize(h) &&
+        aclsparseGetEffectiveWorkspace(h) != nullptr) {
+        return ACL_SPARSE_STATUS_SUCCESS;
+    }
+
+    // 用户自管 workspace 时库不代为扩容，由调用方决定是加大 buffer 还是切回默认。
+    if (h->use_user_workspace) {
+        return ACL_SPARSE_STATUS_INSUFFICIENT_RESOURCES;
+    }
+
+    freeDefaultWorkspace(h);
+    return allocateDefaultWorkspace(h, size);
+}
+
 extern "C" {
 
 aclsparseStatus_t aclsparseCreate(aclsparseHandle_t *handle)

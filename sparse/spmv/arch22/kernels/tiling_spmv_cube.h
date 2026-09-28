@@ -9,16 +9,32 @@
  * See LICENSE in the root of the software repository for the full text of the License.
  * ----------------------------------------------------------------------------------------------------------
  */
-
-#ifndef SPMV_TILING_DATA_H
-#define SPMV_TILING_DATA_H
+#pragma once
 
 #include <cstdint>
 
-struct SpmvTilingData {
-    uint32_t totalRowsNum; // 矩阵总行数
-    uint32_t totalColNum;  // 矩阵总列数
-    uint32_t totalNnz;     // 矩阵总非零元数
+namespace tcuscan {
+
+/**
+ * @brief `spmv` kernel tiling parameter structure.
+ */
+struct SpMVCubeTiling {
+  /// @brief Number of non-zeros elements.
+  uint32_t nnz;
+  /// @brief Total number of segments.
+  uint32_t num_segments;
+  /// @brief Length of the dense input vector.
+  uint32_t x_len;
+  /// @brief Tiling length.
+  uint32_t tile_len;
+  /// @brief Block length.
+  uint32_t block_len;
+  /// @brief Scaling factor applied to the SpMV product, i.e. the `alpha` of
+  /// `y = alpha * A @ x + beta * y`.
+  float alpha;
+  /// @brief Scaling factor applied to the incoming output vector, i.e. the
+  /// `beta` of `y = alpha * A @ x + beta * y`.
+  float beta;
 };
 
-#endif // SPMV_TILING_DATA_H
+} // namespace tcuscan

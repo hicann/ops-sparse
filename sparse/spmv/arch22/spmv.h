@@ -77,6 +77,10 @@ inline struct aclsparseDnVecDescr *ToVecInner(aclsparseConstDnVecDescr_t desc) {
 #define SPMV_OUT_BF16 2
 #define SPMV_OUT_I32 3
 
+// 算法实现选择：向量版（每核处理若干整行）/ cube 版（矩阵单元段求和）
+#define SPMV_ALG_VECTOR 0
+#define SPMV_ALG_CUBE 1
+
 static inline void SpmvTypesFromAcl(aclDataType computeType,
 									aclDataType valType, aclDataType outType,
 									int32_t *cType, int32_t *vType,

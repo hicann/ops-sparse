@@ -20,6 +20,8 @@
 #include <acl/acl.h>
 #include <cstddef>
 
+#include "cann_ops_sparse.h"
+
 /* ========== 版本信息 ========== */
 #define ACLSPARSE_VERSION_MAJOR 1
 #define ACLSPARSE_VERSION_MINOR 0
@@ -88,6 +90,17 @@ inline size_t aclsparseGetEffectiveWorkspaceSize(const aclsparseContext* h)
     if (h == nullptr) return 0;
     return h->use_user_workspace ? h->user_workspace_size : h->default_workspace_size;
 }
+
+/**
+ * @brief 保证当前活跃 workspace 至少有 size 字节可用。
+ *
+ * 使用默认 workspace 时按需扩容（grow-only，旧显存先释放再重新分配）；用户通过
+ * aclsparseSetWorkspace 设置了自己的 workspace 时不做任何分配，仅校验容量——
+ * 用户显式提供的显存不应被库悄悄替换掉。
+ *
+ * 调用成功后即可用 aclsparseGetEffectiveWorkspace 取到不小于 size 的缓冲区。
+ */
+aclsparseStatus_t aclsparseEnsureDefaultWorkspace(aclsparseContext* h, size_t size);
 
 /**
  * @brief 切回默认 workspace（不清除用户 workspace 缓存字段）

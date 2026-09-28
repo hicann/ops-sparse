@@ -41,7 +41,7 @@
 | [aclsparseSpMatGetValues](#aclsparsespmatgetvalues) | 获取稀疏矩阵描述符的 values 指针 |
 | [aclsparseSpMatSetValues](#aclsparsespmatsetvalues) | 设置稀疏矩阵描述符的 values 指针 |
 | [aclsparseSpMatGetSize](#aclsparsespmatgetsize) | 获取稀疏矩阵的行数、列数和非零元素个数 |
-| [aclsparseSpMVGetBufferSize](#aclsparsespmvgetbuffersize) | 获取SpMV缓冲区大小（**暂未支持**） |
+| [aclsparseSpMVGetBufferSize](#aclsparsespmvgetbuffersize) | 获取SpMV缓冲区大小 |
 | [aclsparseSpMVPreprocess](#aclsparsespmvpreprocess) | SpMV预处理（**暂未支持**） |
 | [aclsparseSpMV](#aclsparsespmv) | 稀疏矩阵向量乘法 |
 | [aclsparseCreateDnMat](#aclsparsecreatednmat) | 创建稠密矩阵 |
@@ -908,8 +908,6 @@ aclsparseStatus_t aclsparseConstCooGet(aclsparseConstSpMatDescr_t spMatDescr, in
 
 ### aclsparseSpMVGetBufferSize
 
-> **支持状态**：暂未支持。当前版本仅提供头文件声明，库中尚无实现；调用会导致链接失败。
-
 ```c
 aclsparseStatus_t aclsparseSpMVGetBufferSize(
     aclsparseHandle_t handle,
@@ -939,6 +937,11 @@ aclsparseStatus_t aclsparseSpMVGetBufferSize(
 - `computeType`（IN）：HOST，计算的数据类型。
 - `alg`（IN）：HOST，SpMV算法类型。
 - `size`（OUT）：HOST，所需的缓冲区大小。
+
+**说明**：`ACL_SPARSE_SPMV_ALG_DEFAULT`（向量版）的所有中间量都在 UB 内，返回 0。
+`ACL_SPARSE_SPMV_CSR_ALG_CUBE` 返回分段求和所需的 workspace 大小，调用方须按该大小
+申请显存并作为 `aclsparseSpMV` 的 `externalBuffer` 传入。空矩阵（`nnz == 0`）会回退到
+向量版实现，同样返回 0。
 
 **返回值**：
 
@@ -1846,6 +1849,7 @@ SpMV算法枚举：
 | `ACL_SPARSE_SPMV_CSR_ALG1` | CSR/CSC格式默认算法 |
 | `ACL_SPARSE_SPMV_CSR_ALG2` | CSR/CSC格式确定性算法 |
 | `ACL_SPARSE_SPMV_SELL_ALG1` | SELL格式默认算法 |
+| `ACL_SPARSE_SPMV_CSR_ALG_CUBE` | CSR格式 cube（矩阵单元）段求和算法，仅支持非转置计算，matA/vecX 为 fp32 或 fp16，vecY 为 fp32 |
 
 ### aclsparseSpMMAlg_t
 

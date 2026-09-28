@@ -233,19 +233,30 @@ void GenerateCsr(uint32_t numRows, uint32_t numCols, float sparsity,
 
 // ===================== CPU 参考实现 =====================
 
+/**
+ * @brief SpMV CPU 参考实现。
+ *
+ * @param productsInValT 若为 true，每个 `values[j] * x[cols[j]]` 乘积在累加前先舍入回
+ * ValT。cube 版算法在输入精度下计算这些乘积（gather 的输出即 ValT），向量版则先升位到
+ * CompT 再相乘，故两者需要不同的参考值。
+ */
 template <typename CompT, typename ValT = CompT, typename OutT = CompT>
 std::vector<OutT> SpmvCpu(const std::vector<int32_t> &csrRowPtr,
                           const std::vector<int32_t> &csrColInd,
                           const std::vector<ValT> &csrVal,
                           const std::vector<ValT> &xVec,
                           const std::vector<OutT> &yVec,
-                          CompT alpha = static_cast<CompT>(1), CompT beta = static_cast<CompT>(0)) {
+                          CompT alpha = static_cast<CompT>(1), CompT beta = static_cast<CompT>(0),
+                          bool productsInValT = false) {
     uint32_t M = csrRowPtr.size() - 1;
     std::vector<OutT> z(M);
     for (uint32_t i = 0; i < M; ++i) {
         CompT sum = 0;
-        for (uint32_t j = csrRowPtr[i]; j < csrRowPtr[i + 1]; ++j)
-            sum += static_cast<CompT>(csrVal[j]) * static_cast<CompT>(xVec[csrColInd[j]]);
+        for (uint32_t j = csrRowPtr[i]; j < csrRowPtr[i + 1]; ++j) {
+            const CompT prod =
+                static_cast<CompT>(csrVal[j]) * static_cast<CompT>(xVec[csrColInd[j]]);
+            sum += productsInValT ? static_cast<CompT>(static_cast<ValT>(prod)) : prod;
+        }
         CompT zm = alpha * sum + beta * static_cast<CompT>(yVec[i]);
         z[i] = static_cast<OutT>(zm);
     }
@@ -406,8 +417,14 @@ int32_t Verification(const std::vector<T> &cpuGolden,
 // ===================== 设备资源创建 =====================
 
 int CreateDeviceTensor(uint8_t *hostData, const size_t size, uint8_t **deviceAddr) {
-    auto ret = aclrtMalloc((void **)deviceAddr, size, ACL_MEM_MALLOC_HUGE_FIRST);
+    // 全零矩阵的 colInd / vals 为空数组，但描述符仍要求非空设备指针，
+    // 而 aclrtMalloc(0) 会返回 ACL_ERROR_INVALID_PARAM，故至少申请 1 字节。
+    const size_t allocSize = size > 0 ? size : 1;
+    auto ret = aclrtMalloc((void **)deviceAddr, allocSize, ACL_MEM_MALLOC_HUGE_FIRST);
     CHECK_RET(ret == ACL_SUCCESS, LOG_PRINT("aclrtMalloc failed. ERROR: %d\n", ret); return ret);
+    if (size == 0) {
+        return ACL_SUCCESS;
+    }
     ret = aclrtMemcpy(*deviceAddr, size, hostData, size, ACL_MEMCPY_HOST_TO_DEVICE);
     CHECK_RET(ret == ACL_SUCCESS, LOG_PRINT("aclrtMemcpy failed. ERROR: %d\n", ret); return ret);
     return ACL_SUCCESS;
@@ -457,8 +474,11 @@ template <typename CompT, typename ValT = CompT, typename OutT = CompT>
 int Test(const size_t M, const size_t N, const float sparsity,
          CompT alphaVal, CompT betaVal, bool transpose,
          float &MARE, float &MERE, aclrtStream stream,
-         std::string *worstInfo = nullptr) {
-    const char *label = transpose ? " Transpose" : "";
+         std::string *worstInfo = nullptr,
+         aclsparseSpMVAlg_t alg = ACL_SPARSE_SPMV_ALG_DEFAULT,
+         bool productsInValT = false) {
+    const char *label = transpose ? " Transpose"
+                                  : (alg == ACL_SPARSE_SPMV_CSR_ALG_CUBE ? " Cube" : "");
     std::cout << "====Test" << label << " case: row num = " << M
               << " col num = " << N
               << " sparsity (zero ratio) = " << sparsity
@@ -484,7 +504,8 @@ int Test(const size_t M, const size_t N, const float sparsity,
     if (transpose)
         output_cpu = SpmvTransCpu<CompT, ValT, OutT>(csrRowPtr, csrColInd, csrVal, xVec, yVec, M, N, alphaVal, betaVal);
     else
-        output_cpu = SpmvCpu<CompT, ValT, OutT>(csrRowPtr, csrColInd, csrVal, xVec, yVec, alphaVal, betaVal);
+        output_cpu = SpmvCpu<CompT, ValT, OutT>(csrRowPtr, csrColInd, csrVal, xVec, yVec, alphaVal, betaVal,
+                                               productsInValT);
 
     size_t totalRowPtrByteSize = csrRowPtr.size() * sizeof(int32_t);
     size_t totalColIdxByteSize = csrColInd.size() * sizeof(int32_t);
@@ -552,11 +573,27 @@ int Test(const size_t M, const size_t N, const float sparsity,
 
     aclsparseOperation_t op = transpose ? ACL_SPARSE_OP_TRANSPOSE : ACL_SPARSE_OP_NON_TRANSPOSE;
 
-    void *externalBuffer = nullptr;  // 当前算法中不需要用到额外空间
+    // cube 版按 aclsparseSpMVGetBufferSize 报出的大小申请 workspace；
+    // 向量版返回 0，此时 externalBuffer 保持为空。
+    size_t bufferSize = 0;
+    sparseRet = aclsparseSpMVGetBufferSize(spHandle, op, &alphaVal, matDesc, vecXDesc,
+                                           &betaVal, vecYDesc, compDt, alg, &bufferSize);
+    CHECK_RET(sparseRet == ACL_SPARSE_STATUS_SUCCESS,
+              LOG_PRINT("aclsparseSpMVGetBufferSize failed. ERROR: %d\n", sparseRet);
+              return sparseRet);
+
+    void *externalBuffer = nullptr;
+    if (bufferSize > 0) {
+        aclRet = aclrtMalloc(&externalBuffer, bufferSize, ACL_MEM_MALLOC_HUGE_FIRST);
+        CHECK_RET(aclRet == ACL_SUCCESS,
+                  LOG_PRINT("[ERROR] externalBuffer aclrtMalloc failed, ret=%d\n", aclRet);
+                  return aclRet);
+    }
+    std::unique_ptr<void, aclError (*)(void *)> ebp(externalBuffer, aclrtFree);
 
     sparseRet = aclsparseSpMV(spHandle, op, &alphaVal, matDesc, vecXDesc,
                               &betaVal, vecYDesc, compDt,
-                              ACL_SPARSE_SPMV_ALG_DEFAULT, externalBuffer);
+                              alg, externalBuffer);
     CHECK_RET(sparseRet == ACL_SPARSE_STATUS_SUCCESS, return sparseRet);
 
     // ==================== 同步 ====================
@@ -570,7 +607,9 @@ int Test(const size_t M, const size_t N, const float sparsity,
     std::vector<OutT> yResult;
     yResult.assign((OutT *)yHost, (OutT *)(yHost + totalYByteSize));
 
-    const MixedToleranceParams toleranceParams = GetMixedToleranceParams<OutT>();
+    // 乘积在输入精度下计算时（cube 版 fp16），按输入类型而非输出类型取容差。
+    const MixedToleranceParams toleranceParams =
+        productsInValT ? GetMixedToleranceParams<ValT>() : GetMixedToleranceParams<OutT>();
     int verifyRet = Verification<OutT>(output_cpu, yResult, MARE, MERE, toleranceParams, worstInfo);
 
     aclsparseDestroySpMat(matDesc);
@@ -595,10 +634,13 @@ struct TestStats {
 template <typename CompT, typename ValT = CompT, typename OutT = CompT>
 int RunAndTrack(size_t M, size_t N, float sparsity, CompT alpha, CompT beta,
                 bool transpose,
-                TestStats &stats, aclrtStream stream, const std::string &tag = "") {
+                TestStats &stats, aclrtStream stream, const std::string &tag = "",
+                aclsparseSpMVAlg_t alg = ACL_SPARSE_SPMV_ALG_DEFAULT,
+                bool productsInValT = false) {
     float MARE = 0, MERE = 0;
     std::string worstInfo;
-    int ret = Test<CompT, ValT, OutT>(M, N, sparsity, alpha, beta, transpose, MARE, MERE, stream, &worstInfo);
+    int ret = Test<CompT, ValT, OutT>(M, N, sparsity, alpha, beta, transpose, MARE, MERE, stream,
+                                      &worstInfo, alg, productsInValT);
 
     stats.total++;
     if (ret == 0) {
@@ -612,6 +654,7 @@ int RunAndTrack(size_t M, size_t N, float sparsity, CompT alpha, CompT beta,
         oss << "type=" << (std::is_same_v<CompT, float> ? "float" : "int32")
             << (std::is_same_v<ValT, CompT> ? "" : " MixPrec")
             << (transpose ? " Transpose" : "")
+            << (alg == ACL_SPARSE_SPMV_CSR_ALG_CUBE ? " Cube" : "")
             << " M=" << M << " N=" << N
             << " sparsity=" << sparsity
             << " alpha=" << alpha << " beta=" << beta
@@ -627,9 +670,11 @@ int RunAndTrack(size_t M, size_t N, float sparsity, CompT alpha, CompT beta,
 
 template <typename T, typename ADist, typename BDist>
 void RunRandomParams(int numCases, const std::string &tagPrefix, bool transpose,
-                     TestStats &stats, aclrtStream stream, ADist alphaDist, BDist betaDist) {
+                     TestStats &stats, aclrtStream stream, ADist alphaDist, BDist betaDist,
+                     aclsparseSpMVAlg_t alg = ACL_SPARSE_SPMV_ALG_DEFAULT) {
     std::cout << "\n======== " << (std::is_same_v<T, float> ? "Float" : "Int32")
               << (transpose ? " Transpose" : "")
+              << (alg == ACL_SPARSE_SPMV_CSR_ALG_CUBE ? " Cube" : "")
               << " Random Tests ========\n";
 
     std::mt19937 rng(static_cast<uint32_t>(
@@ -648,7 +693,7 @@ void RunRandomParams(int numCases, const std::string &tagPrefix, bool transpose,
                   << (transpose ? " trans" : "")
                   << " case " << (i + 1) << "/" << numCases << " ---\n";
         RunAndTrack<T>(M, N, sp, a, b, transpose, stats, stream,
-                       tagPrefix + std::to_string(i + 1));
+                       tagPrefix + std::to_string(i + 1), alg);
     }
 }
 
@@ -695,6 +740,40 @@ int main(int32_t /*argc*/, char * /*argv*/[]) {
     RunRandomParams<float>(30, "float-rand-", false, stats, stream,
                            std::uniform_real_distribution<float>(-2.0f, 2.0f),
                            std::uniform_real_distribution<float>(-1.0f, 1.0f));
+
+    // ============ Cube 算法 fp32 用例（ACL_SPARSE_SPMV_CSR_ALG_CUBE，仅非转置）============
+    std::cout << "\n======== Float Cube Algorithm Tests ========\n";
+    constexpr aclsparseSpMVAlg_t kCube = ACL_SPARSE_SPMV_CSR_ALG_CUBE;
+    RunAndTrack<float>(512, 1024, 0.9f, 1.0f, 0.0f, false, stats, stream, "cube-default", kCube);
+    RunAndTrack<float>(512, 1024, 0.0f, 1.0f, 0.0f, false, stats, stream, "cube-dense", kCube);
+    RunAndTrack<float>(512, 1024, 0.999f, 1.0f, 0.0f, false, stats, stream, "cube-sparse", kCube);
+    RunAndTrack<float>(10, 1024, 0.999f, 1.0f, 0.0f, false, stats, stream, "cube-fewrow", kCube);
+    RunAndTrack<float>(1, 1024, 0.9f, 1.0f, 0.0f, false, stats, stream, "cube-1row", kCube);
+    RunAndTrack<float>(512, 8192, 0.1f, 1.0f, 0.0f, false, stats, stream, "cube-wide", kCube);
+    RunAndTrack<float>(512, 1024, 0.9f, 2.0f, 0.0f, false, stats, stream, "cube-alpha2", kCube);
+    RunAndTrack<float>(512, 1024, 0.9f, 0.5f, 0.5f, false, stats, stream, "cube-half", kCube);
+    RunAndTrack<float>(256, 2048, 0.95f, 1.5f, 0.2f, false, stats, stream, "cube-mix", kCube);
+    RunAndTrack<float>(512, 1024, 0.9f, 0.0f, 1.0f, false, stats, stream, "cube-betaOnly", kCube);
+    // 全零矩阵（nnz == 0）：cube 版退化为 y = beta * y，由向量版 kernel 接管。
+    RunAndTrack<float>(512, 1024, 1.0f, 1.0f, 0.5f, false, stats, stream, "cube-empty", kCube);
+    RunRandomParams<float>(10, "cube-rand-", false, stats, stream,
+                           std::uniform_real_distribution<float>(-2.0f, 2.0f),
+                           std::uniform_real_distribution<float>(-1.0f, 1.0f), kCube);
+
+    // ============ Cube 算法 fp16 用例（矩阵/x 为 fp16，cube 以 fp32 累加，y 为 fp32）============
+    // 乘积在 fp16 下计算，故参考实现同样把乘积舍入回 fp16，并按 fp16 容差校验。
+    std::cout << "\n======== Float16 Cube Algorithm Tests ========\n";
+    constexpr bool kProductsInF16 = true;
+    RunAndTrack<float, half, float>(512, 1024, 0.9f, 1.0f, 0.0f, false, stats, stream, "cube-f16-default", kCube, kProductsInF16);
+    RunAndTrack<float, half, float>(512, 1024, 0.0f, 1.0f, 0.0f, false, stats, stream, "cube-f16-dense", kCube, kProductsInF16);
+    RunAndTrack<float, half, float>(512, 1024, 0.999f, 1.0f, 0.0f, false, stats, stream, "cube-f16-sparse", kCube, kProductsInF16);
+    RunAndTrack<float, half, float>(10, 1024, 0.999f, 1.0f, 0.0f, false, stats, stream, "cube-f16-fewrow", kCube, kProductsInF16);
+    RunAndTrack<float, half, float>(1, 1024, 0.9f, 1.0f, 0.0f, false, stats, stream, "cube-f16-1row", kCube, kProductsInF16);
+    RunAndTrack<float, half, float>(512, 8192, 0.1f, 1.0f, 0.0f, false, stats, stream, "cube-f16-wide", kCube, kProductsInF16);
+    RunAndTrack<float, half, float>(512, 1024, 0.9f, 2.0f, 0.0f, false, stats, stream, "cube-f16-alpha2", kCube, kProductsInF16);
+    RunAndTrack<float, half, float>(512, 1024, 0.9f, 0.5f, 0.5f, false, stats, stream, "cube-f16-half", kCube, kProductsInF16);
+    RunAndTrack<float, half, float>(256, 2048, 0.95f, 1.5f, 0.2f, false, stats, stream, "cube-f16-mix", kCube, kProductsInF16);
+    RunAndTrack<float, half, float>(512, 1024, 0.9f, 0.0f, 1.0f, false, stats, stream, "cube-f16-betaOnly", kCube, kProductsInF16);
 
     // ============ Int32 基础用例 ============
     std::cout << "\n======== Int32 Basic Tests (alpha=1, beta=0) ========\n";
