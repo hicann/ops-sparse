@@ -34,8 +34,7 @@ namespace sparse_test {
 //   index_base   : "ZERO" / "ONE"       (CSR index base)
 //   one_based_data : 0 / 1              (L3 whitebox: 1 -> real 1-based colInd data
 //                                        transmitted to NPU descriptor; golden stays 0-based)
-//   opB          : "N" / "T"            (v2 §3.2, op(B); T -> NOT_SUPPORTED, first phase
-//                                        only supports opB=NON_TRANSPOSE)
+//   opB          : "N" / "T"            (op(B); both modes are supported)
 struct SpsmParam : public SparseTestParamBase {
     std::string case_name;
 
@@ -71,7 +70,7 @@ struct SpsmParam : public SparseTestParamBase {
 
     int one_based_data = 0;     // 1 -> real 1-based colInd to NPU (L3 whitebox new)
 
-    std::string opB;            // "N" / "T" (v2 new, op(B); T -> NOT_SUPPORTED)
+    std::string opB;            // "N" / "T" (op(B))
 
     // Convenience accessors
     bool isLower() const { return uplo == "LOWER"; }

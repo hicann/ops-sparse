@@ -20,3 +20,18 @@
 #                      the test target is skipped until the operator source lands.
 # EIGEN: golden uses Eigen SparseMatrix<double> (FP64).
 ops_sparse_add_gtest_tests(spsm ${OPS_SPARSE} VARIANT spsm WARN_ON_MISSING_SRC EIGEN)
+if(TARGET spsm_test AND "arch35" IN_LIST SOC_ARCH_DIRS)
+    target_sources(spsm_test PRIVATE spsm/arch35/spsm_extended_test.cpp)
+
+    add_executable(spsm_perf spsm/arch35/spsm_perf.cpp)
+    target_compile_features(spsm_perf PRIVATE cxx_std_17)
+    target_include_directories(spsm_perf PRIVATE
+        ${CMAKE_SOURCE_DIR}/include
+        ${CMAKE_SOURCE_DIR}/test/frame
+        ${ASCEND_CANN_PACKAGE_PATH}/${CMAKE_SYSTEM_PROCESSOR}-linux/include
+        $ENV{LINUX_INCLUDE_PATH})
+    target_link_libraries(spsm_perf PRIVATE
+        ${OPS_SPARSE}
+        ${_ops_sparse_ascendcl_lib}
+        ${_ops_sparse_libc_sec})
+endif()

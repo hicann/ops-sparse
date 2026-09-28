@@ -1,10 +1,10 @@
-/**
+/*
  * Copyright (c) 2026 Huawei Technologies Co., Ltd.
- * This program is free software; you can redistribute it and/or modify it under the terms and conditions of
+ * This program is free software, you can redistribute it and/or modify it under the terms and conditions of
  * CANN Open Software License Agreement Version 2.0 (the "License").
  * Please refer to the License for details. You may not use this file except in compliance with the License.
  * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
- * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE.
+ * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY OR FITNESS FOR A PARTICULAR PURPOSE.
  * See LICENSE in the root of the software repository for the full text of the License.
  */
 
@@ -23,8 +23,10 @@
 #error "spsm_golden.h requires Eigen (enable EIGEN in ops_sparse_add_gtest_tests)."
 #endif
 #include <Eigen/Dense>
+#include <Eigen/Sparse>
 
-namespace sparse_test {
+namespace sparse_test
+{
 
 // ============================================================================
 // Triangular CSR generators
@@ -34,38 +36,54 @@ namespace sparse_test {
 //                 (diagonal value in [diagLo, diagHi], avoids 0)
 // ============================================================================
 
-// UNIT diagonal: off-diagonal uplo part only (existing, kept for compatibility).
-inline CsrMatrix makeTriangularCsr(int m, bool isLower, double density,
-                                    double valueLo, double valueHi, uint32_t seed) {
+inline CsrMatrix MakeEmptyCsr(int m)
+{
     CsrMatrix out;
     out.rows = m;
     out.cols = m;
     out.rowOffsets.assign(static_cast<size_t>(m) + 1, 0);
-    if (m <= 0) return out;
+    return out;
+}
+
+// UNIT diagonal: off-diagonal uplo part only (existing, kept for compatibility).
+inline CsrMatrix makeTriangularCsr(int m, bool isLower, double density, double valueLo, double valueHi, uint32_t seed)
+{
+    CsrMatrix out = MakeEmptyCsr(m);
+    if (m <= 0)
+    {
+        return out;
+    }
 
     density = std::clamp(density, 0.0, 1.0);
     std::mt19937 rng(seed);
-    std::uniform_real_distribution<float> valDist(static_cast<float>(valueLo),
-                                                   static_cast<float>(valueHi));
+    std::uniform_real_distribution<float> valDist(static_cast<float>(valueLo), static_cast<float>(valueHi));
     std::uniform_real_distribution<float> zeroDist(0.0f, 1.0f);
 
     int64_t currentNnz = 0;
     std::vector<int32_t> rowCols;
-    for (int i = 0; i < m; ++i) {
+    for (int i = 0; i < m; ++i)
+    {
         out.rowOffsets[i] = static_cast<int32_t>(currentNnz);
         int colLo = isLower ? 0 : (i + 1);
         int colHi = isLower ? (i - 1) : (m - 1);
         int span = colHi - colLo + 1;
-        if (span > 0 && density > 0.0) {
-            for (int c = colLo; c <= colHi; ++c) {
-                if (zeroDist(rng) < static_cast<float>(density)) {
+        if (span > 0 && density > 0.0)
+        {
+            for (int c = colLo; c <= colHi; ++c)
+            {
+                if (zeroDist(rng) < static_cast<float>(density))
+                {
                     rowCols.push_back(c);
                 }
             }
-            for (int32_t c : rowCols) {
+            for (int32_t c : rowCols)
+            {
                 out.colIndices.push_back(c);
                 float v = valDist(rng);
-                if (v == 0.0f) v = 1.0f;
+                if (v == 0.0f)
+                {
+                    v = 1.0f;
+                }
                 out.values.push_back(v);
                 ++currentNnz;
             }
@@ -77,73 +95,84 @@ inline CsrMatrix makeTriangularCsr(int m, bool isLower, double density,
     return out;
 }
 
-inline void SortAndAppendEntries(std::vector<std::pair<int32_t, float>>& rowEntries,
-                                 CsrMatrix& out, int64_t& currentNnz) {
-    std::sort(rowEntries.begin(), rowEntries.end(),
-              [](const auto& a, const auto& b) { return a.first < b.first; });
-    for (const auto& [c, v] : rowEntries) {
+inline void SortAndAppendEntries(
+    std::vector<std::pair<int32_t, float>>& rowEntries, CsrMatrix& out, int64_t& currentNnz)
+{
+    std::sort(rowEntries.begin(), rowEntries.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
+    for (const auto& [c, v] : rowEntries)
+    {
         out.colIndices.push_back(c);
         out.values.push_back(v);
         ++currentNnz;
     }
 }
 
-inline void GenerateOffDiagEntries(std::mt19937& rng,
-                                   std::uniform_real_distribution<float>& valDist,
-                                   std::uniform_real_distribution<float>& zeroDist,
-                                   double density, int colLo, int colHi,
-                                   std::vector<std::pair<int32_t, float>>& rowEntries) {
-    if (density <= 0.0 || colLo > colHi) return;
-    for (int c = colLo; c <= colHi; ++c) {
-        if (zeroDist(rng) < static_cast<float>(density)) {
+inline void GenerateOffDiagEntries(std::mt19937& rng, std::uniform_real_distribution<float>& valDist,
+    std::uniform_real_distribution<float>& zeroDist, double density, int colLo, int colHi,
+    std::vector<std::pair<int32_t, float>>& rowEntries)
+{
+    if (density <= 0.0 || colLo > colHi)
+    {
+        return;
+    }
+    for (int c = colLo; c <= colHi; ++c)
+    {
+        if (zeroDist(rng) < static_cast<float>(density))
+        {
             float v = valDist(rng);
-            if (v == 0.0f) v = 1.0f;
+            if (v == 0.0f)
+            {
+                v = 1.0f;
+            }
             rowEntries.emplace_back(c, v);
         }
     }
 }
 
-struct SpsmRngState {
+struct SpsmRngState
+{
     std::mt19937 rng;
     std::uniform_real_distribution<float> valDist;
     std::uniform_real_distribution<float> diagDist;
     std::uniform_real_distribution<float> zeroDist;
 };
 
-inline SpsmRngState MakeSpsmRngState(uint32_t seed, double valueLo, double valueHi,
-                                     double diagLo, double diagHi) {
-    return SpsmRngState{
-        std::mt19937(seed),
+inline SpsmRngState MakeSpsmRngState(uint32_t seed, double valueLo, double valueHi, double diagLo, double diagHi)
+{
+    return SpsmRngState { std::mt19937(seed),
         std::uniform_real_distribution<float>(static_cast<float>(valueLo), static_cast<float>(valueHi)),
         std::uniform_real_distribution<float>(static_cast<float>(diagLo), static_cast<float>(diagHi)),
-        std::uniform_real_distribution<float>(0.0f, 1.0f)
-    };
+        std::uniform_real_distribution<float>(0.0f, 1.0f) };
 }
 
-inline void AppendDiagEntry(SpsmRngState& rs, int32_t i,
-                            std::vector<std::pair<int32_t, float>>& rowEntries) {
+inline void AppendDiagEntry(SpsmRngState& rs, int32_t i, std::vector<std::pair<int32_t, float>>& rowEntries)
+{
     float dv = rs.diagDist(rs.rng);
-    if (dv == 0.0f) dv = 1.0f;
+    if (dv == 0.0f)
+    {
+        dv = 1.0f;
+    }
     rowEntries.emplace_back(i, dv);
 }
 
 // NON_UNIT diagonal: off-diagonal uplo part + explicit diagonal entries.
 // Diagonal values in [diagLo, diagHi] (avoids 0 for non-singular cases).
-inline CsrMatrix makeTriangularCsrNonUnit(int m, bool isLower, double density,
-                                          double valueLo, double valueHi,
-                                          double diagLo, double diagHi, uint32_t seed) {
-    CsrMatrix out;
-    out.rows = m;
-    out.cols = m;
-    out.rowOffsets.assign(static_cast<size_t>(m) + 1, 0);
-    if (m <= 0) return out;
+inline CsrMatrix makeTriangularCsrNonUnit(
+    int m, bool isLower, double density, double valueLo, double valueHi, double diagLo, double diagHi, uint32_t seed)
+{
+    CsrMatrix out = MakeEmptyCsr(m);
+    if (m <= 0)
+    {
+        return out;
+    }
 
     density = std::clamp(density, 0.0, 1.0);
     auto rs = MakeSpsmRngState(seed, valueLo, valueHi, diagLo, diagHi);
 
     int64_t currentNnz = 0;
     std::vector<std::pair<int32_t, float>> rowEntries;
-    for (int i = 0; i < m; ++i) {
+    for (int i = 0; i < m; ++i)
+    {
         out.rowOffsets[i] = static_cast<int32_t>(currentNnz);
         rowEntries.clear();
         int colLo = isLower ? 0 : (i + 1);
@@ -160,33 +189,40 @@ inline CsrMatrix makeTriangularCsrNonUnit(int m, bool isLower, double density,
 
 // Banded triangular CSR: off-diagonal uplo entries only within |i-j| <= bw.
 // isUnitDiag=true -> diagonal implicit; false -> explicit diagonal [diagLo, diagHi].
-inline CsrMatrix makeBandedTriangularCsr(int m, bool isLower, int bw,
-                                         double valueLo, double valueHi,
-                                         bool isUnitDiag,
-                                         double diagLo, double diagHi, uint32_t seed) {
+inline CsrMatrix makeBandedTriangularCsr(int m, bool isLower, int bw, double valueLo, double valueHi, bool isUnitDiag,
+    double diagLo, double diagHi, uint32_t seed)
+{
     CsrMatrix out;
     out.rows = m;
     out.cols = m;
     out.rowOffsets.assign(static_cast<size_t>(m) + 1, 0);
-    if (m <= 0) return out;
+    if (m <= 0)
+    {
+        return out;
+    }
 
     auto rs = MakeSpsmRngState(seed, valueLo, valueHi, diagLo, diagHi);
 
     int64_t currentNnz = 0;
     std::vector<std::pair<int32_t, float>> rowEntries;
-    for (int i = 0; i < m; ++i) {
+    for (int i = 0; i < m; ++i)
+    {
         out.rowOffsets[i] = static_cast<int32_t>(currentNnz);
         rowEntries.clear();
         int colLo, colHi;
-        if (isLower) {
+        if (isLower)
+        {
             colLo = std::max(0, i - bw);
             colHi = i - 1;
-        } else {
+        }
+        else
+        {
             colLo = i + 1;
             colHi = std::min(m - 1, i + bw);
         }
         GenerateOffDiagEntries(rs.rng, rs.valDist, rs.zeroDist, 0.5, colLo, colHi, rowEntries);
-        if (!isUnitDiag) {
+        if (!isUnitDiag)
+        {
             AppendDiagEntry(rs, i, rowEntries);
         }
         SortAndAppendEntries(rowEntries, out, currentNnz);
@@ -198,15 +234,17 @@ inline CsrMatrix makeBandedTriangularCsr(int m, bool isLower, int bw,
 
 // Block-diagonal triangular CSR: m must be divisible by blk.
 // Within each blk×blk block, only uplo triangle is nonzero; outside blocks all zero.
-inline CsrMatrix makeBlockDiagTriangularCsr(int m, bool isLower, int blk,
-                                            double density, double valueLo, double valueHi,
-                                            bool isUnitDiag,
-                                            double diagLo, double diagHi, uint32_t seed) {
+inline CsrMatrix makeBlockDiagTriangularCsr(int m, bool isLower, int blk, double density, double valueLo,
+    double valueHi, bool isUnitDiag, double diagLo, double diagHi, uint32_t seed)
+{
     CsrMatrix out;
     out.rows = m;
     out.cols = m;
     out.rowOffsets.assign(static_cast<size_t>(m) + 1, 0);
-    if (m <= 0 || blk == 0) return out;
+    if (m <= 0 || blk == 0)
+    {
+        return out;
+    }
 
     density = std::clamp(density, 0.0, 1.0);
     auto rs = MakeSpsmRngState(seed, valueLo, valueHi, diagLo, diagHi);
@@ -214,22 +252,28 @@ inline CsrMatrix makeBlockDiagTriangularCsr(int m, bool isLower, int blk,
     int64_t currentNnz = 0;
     std::vector<std::pair<int32_t, float>> rowEntries;
     int numBlocks = (m + blk - 1) / blk;
-    for (int b = 0; b < numBlocks; ++b) {
+    for (int b = 0; b < numBlocks; ++b)
+    {
         int blkStart = b * blk;
         int blkEnd = std::min(m, blkStart + blk);
-        for (int i = blkStart; i < blkEnd; ++i) {
+        for (int i = blkStart; i < blkEnd; ++i)
+        {
             out.rowOffsets[i] = static_cast<int32_t>(currentNnz);
             rowEntries.clear();
             int colLo, colHi;
-            if (isLower) {
+            if (isLower)
+            {
                 colLo = blkStart;
                 colHi = i - 1;
-            } else {
+            }
+            else
+            {
                 colLo = i + 1;
                 colHi = blkEnd - 1;
             }
             GenerateOffDiagEntries(rs.rng, rs.valDist, rs.zeroDist, density, colLo, colHi, rowEntries);
-            if (!isUnitDiag) {
+            if (!isUnitDiag)
+            {
                 AppendDiagEntry(rs, i, rowEntries);
             }
             SortAndAppendEntries(rowEntries, out, currentNnz);
@@ -242,26 +286,31 @@ inline CsrMatrix makeBlockDiagTriangularCsr(int m, bool isLower, int blk,
 
 // Singular NON_UNIT triangular CSR: diagonal stored but at least one entry is 0.
 // Generates a normal NON_UNIT triangular CSR, then zeroes out one diagonal element.
-inline CsrMatrix makeSingularTriangularCsr(int m, bool isLower, double density,
-                                           double valueLo, double valueHi,
-                                           double diagLo, double diagHi, uint32_t seed) {
-    CsrMatrix out = makeTriangularCsrNonUnit(m, isLower, density, valueLo, valueHi,
-                                              diagLo, diagHi, seed);
+inline CsrMatrix makeSingularTriangularCsr(
+    int m, bool isLower, double density, double valueLo, double valueHi, double diagLo, double diagHi, uint32_t seed)
+{
+    CsrMatrix out = makeTriangularCsrNonUnit(m, isLower, density, valueLo, valueHi, diagLo, diagHi, seed);
     // Zero out the middle diagonal element to create singularity.
-    if (m <= 0) return out;
+    if (m <= 0)
+    {
+        return out;
+    }
     int targetRow = m / 2;
     int rowStart = out.rowOffsets[targetRow];
     int rowEnd = out.rowOffsets[targetRow + 1];
     bool zeroed = false;
-    for (int p = rowStart; p < rowEnd; ++p) {
-        if (out.colIndices[p] == targetRow) {
+    for (int p = rowStart; p < rowEnd; ++p)
+    {
+        if (out.colIndices[p] == targetRow)
+        {
             out.values[p] = 0.0f;
             zeroed = true;
             break;
         }
     }
     // If diagonal not found (shouldn't happen for NON_UNIT), add a zero diagonal entry
-    if (!zeroed && rowEnd > rowStart) {
+    if (!zeroed && rowEnd > rowStart)
+    {
         out.values[rowStart] = 0.0f;
     }
     return out;
@@ -274,16 +323,25 @@ constexpr uint32_t kShuffleSeedSalt = 0xDEADBEEFu;
 
 // Shuffle colInd within each row (unsorted indices). Values are shuffled in
 // tandem to preserve (colInd, value) correspondence. rowOffsets unchanged.
-inline void shuffleRowInternal(CsrMatrix& csr, uint32_t seed) {
-    if (csr.nnz <= 0) return;
+inline void shuffleRowInternal(CsrMatrix& csr, uint32_t seed)
+{
+    if (csr.nnz <= 0)
+    {
+        return;
+    }
     std::mt19937 rng(seed ^ kShuffleSeedSalt);
-    for (int i = 0; i < static_cast<int>(csr.rows); ++i) {
+    for (int i = 0; i < static_cast<int>(csr.rows); ++i)
+    {
         int start = csr.rowOffsets[i];
         int end = csr.rowOffsets[i + 1];
         int len = end - start;
-        if (len <= 1) continue;
+        if (len <= 1)
+        {
+            continue;
+        }
         // Fisher-Yates shuffle on [start, end)
-        for (int k = len - 1; k > 0; --k) {
+        for (int k = len - 1; k > 0; --k)
+        {
             int j = std::uniform_int_distribution<int>(0, k)(rng);
             std::swap(csr.colIndices[start + k], csr.colIndices[start + j]);
             std::swap(csr.values[start + k], csr.values[start + j]);
@@ -294,91 +352,110 @@ inline void shuffleRowInternal(CsrMatrix& csr, uint32_t seed) {
 // Apply 1-based index base: add 1 to all colInd (for indexBase=ONE).
 // The golden/wrapper must subtract 1 before use; this only affects the raw CSR
 // passed to the NPU descriptor. Golden receives 0-based internally.
-inline void applyIndexBaseOne(CsrMatrix& csr) {
-    for (auto& c : csr.colIndices) c += 1;
+inline void applyIndexBaseOne(CsrMatrix& csr)
+{
+    for (auto& r : csr.rowOffsets)
+    {
+        r += 1;
+    }
+    for (auto& c : csr.colIndices)
+    {
+        c += 1;
+    }
 }
 
 // ============================================================================
 // Golden result: solution X (flat vector, layout depends on order).
 // COL order: column-major (ldb x n); ROW order: row-major (ldb x n).
-// The golden computes in FP64 internally; output is cast to FP32 for unified
-// verification against the NPU result.
+// The Golden stays in FP64 through verification against the FP32 NPU result.
 // ============================================================================
-struct SpsmGoldenResult {
-    std::vector<float> X;  // size ldb * n, layout per order
+struct SpsmGoldenResult
+{
+    std::vector<double> X; // size ldb * n, layout per order
 };
 
-inline Eigen::MatrixXd SpsmGoldenBuildMatrixA(const std::vector<int32_t>& csrRowPtr,
-                                              const std::vector<int32_t>& csrColInd,
-                                              const std::vector<float>& csrVals,
-                                              int m, bool isUnitDiag) {
-    Eigen::MatrixXd A = Eigen::MatrixXd::Zero(m, m);
-    for (int i = 0; i < m; ++i) {
+using SpsmGoldenMatrix = Eigen::SparseMatrix<double, Eigen::RowMajor, int32_t>;
+
+inline SpsmGoldenMatrix SpsmGoldenBuildMatrixA(const std::vector<int32_t>& csrRowPtr,
+    const std::vector<int32_t>& csrColInd, const std::vector<float>& csrVals, int m, bool isUnitDiag)
+{
+    SpsmGoldenMatrix A(m, m);
+    std::vector<Eigen::Triplet<double, int32_t>> entries;
+    entries.reserve(csrVals.size() + (isUnitDiag ? m : 0));
+    for (int i = 0; i < m; ++i)
+    {
         int32_t rowStart = csrRowPtr[i];
         int32_t rowEnd = csrRowPtr[i + 1];
-        for (int32_t p = rowStart; p < rowEnd; ++p) {
+        for (int32_t p = rowStart; p < rowEnd; ++p)
+        {
             int32_t j = csrColInd[p];
-            if (j < 0 || j >= m) continue;
-            A(i, j) = static_cast<double>(csrVals[p]);
+            if (j < 0 || j >= m || (isUnitDiag && j == i))
+            {
+                continue;
+            }
+            entries.emplace_back(i, j, static_cast<double>(csrVals[p]));
         }
-        if (isUnitDiag) {
-            A(i, i) = 1.0;
+        if (isUnitDiag)
+        {
+            entries.emplace_back(i, i, 1.0);
         }
     }
+    A.setFromTriplets(entries.begin(), entries.end());
     return A;
 }
 
-inline Eigen::MatrixXd SpsmGoldenBuildRhs(const std::vector<float>& B,
-                                          int m, int n, int ldb,
-                                          bool isRowOrder,
-                                          double alphaD) {
+inline Eigen::MatrixXd SpsmGoldenBuildRhs(
+    const std::vector<float>& B, int m, int n, int ldb, bool isRowOrder, double alphaD)
+{
     Eigen::MatrixXd rhs = Eigen::MatrixXd::Zero(m, n);
-    for (int j = 0; j < n; ++j) {
-        for (int i = 0; i < m; ++i) {
-            int64_t off = isRowOrder
-                ? static_cast<int64_t>(i) * ldb + j
-                : static_cast<int64_t>(j) * ldb + i;
+    for (int j = 0; j < n; ++j)
+    {
+        for (int i = 0; i < m; ++i)
+        {
+            int64_t off = isRowOrder ? static_cast<int64_t>(i) * ldb + j : static_cast<int64_t>(j) * ldb + i;
             rhs(i, j) = alphaD * static_cast<double>(B[off]);
         }
     }
     return rhs;
 }
 
-inline Eigen::MatrixXd SpsmGoldenTriangularSolve(const Eigen::MatrixXd& A,
-                                                 const Eigen::MatrixXd& rhs,
-                                                 bool isLower, bool isTranspose,
-                                                 bool isUnitDiag) {
-    Eigen::MatrixXd X(A.rows(), rhs.cols());
-    auto solve = [&](auto triView) { X = triView.solve(rhs); };
-    if (!isTranspose) {
-        if (isLower) {
-            if (isUnitDiag) solve(A.triangularView<Eigen::UnitLower>());
-            else            solve(A.triangularView<Eigen::Lower>());
-        } else {
-            if (isUnitDiag) solve(A.triangularView<Eigen::UnitUpper>());
-            else            solve(A.triangularView<Eigen::Upper>());
-        }
-    } else {
-        if (isLower) {
-            if (isUnitDiag) solve(A.transpose().triangularView<Eigen::UnitUpper>());
-            else            solve(A.transpose().triangularView<Eigen::Upper>());
-        } else {
-            if (isUnitDiag) solve(A.transpose().triangularView<Eigen::UnitLower>());
-            else            solve(A.transpose().triangularView<Eigen::Lower>());
-        }
-    }
-    return X;
+template <unsigned int Mode, typename Matrix>
+inline Eigen::MatrixXd SpsmGoldenSolveView(const Matrix& matrix, const Eigen::MatrixXd& rhs)
+{
+    return matrix.template triangularView<Mode>().solve(rhs);
 }
 
-inline void SpsmGoldenWriteOutput(const Eigen::MatrixXd& X,
-                                  int m, int n, int ldb,
-                                  bool isRowOrder, SpsmGoldenResult& result) {
-    for (int j = 0; j < n; ++j) {
-        for (int i = 0; i < m; ++i) {
-            int64_t off = isRowOrder
-                ? static_cast<int64_t>(i) * ldb + j
-                : static_cast<int64_t>(j) * ldb + i;
-            result.X[off] = static_cast<float>(X(i, j));
+inline Eigen::MatrixXd SpsmGoldenTriangularSolve(
+    const SpsmGoldenMatrix& A, const Eigen::MatrixXd& rhs, bool isLower, bool isTranspose, bool isUnitDiag)
+{
+    if (!isTranspose && isLower)
+    {
+        return isUnitDiag ? SpsmGoldenSolveView<Eigen::UnitLower>(A, rhs)
+                          : SpsmGoldenSolveView<Eigen::Lower>(A, rhs);
+    }
+    if (!isTranspose)
+    {
+        return isUnitDiag ? SpsmGoldenSolveView<Eigen::UnitUpper>(A, rhs)
+                          : SpsmGoldenSolveView<Eigen::Upper>(A, rhs);
+    }
+    if (isLower)
+    {
+        return isUnitDiag ? SpsmGoldenSolveView<Eigen::UnitUpper>(A.transpose(), rhs)
+                          : SpsmGoldenSolveView<Eigen::Upper>(A.transpose(), rhs);
+    }
+    return isUnitDiag ? SpsmGoldenSolveView<Eigen::UnitLower>(A.transpose(), rhs)
+                      : SpsmGoldenSolveView<Eigen::Lower>(A.transpose(), rhs);
+}
+
+inline void SpsmGoldenWriteOutput(
+    const Eigen::MatrixXd& X, int m, int n, int ldb, bool isRowOrder, SpsmGoldenResult& result)
+{
+    for (int j = 0; j < n; ++j)
+    {
+        for (int i = 0; i < m; ++i)
+        {
+            int64_t off = isRowOrder ? static_cast<int64_t>(i) * ldb + j : static_cast<int64_t>(j) * ldb + i;
+            result.X[off] = X(i, j);
         }
     }
 }
@@ -411,35 +488,31 @@ inline void SpsmGoldenWriteOutput(const Eigen::MatrixXd& X,
 //   csrVals   : size nnz
 //   B         : size ldb * n, layout per isRowOrder
 // ============================================================================
-inline SpsmGoldenResult SpsmGolden(
-    const std::vector<int32_t>& csrRowPtr,
-    const std::vector<int32_t>& csrColInd,
-    const std::vector<float>& csrVals,
-    int m, int n, int ldb,
-    const std::vector<float>& B,
-    float alpha,
-    bool isLower,
+inline SpsmGoldenResult SpsmGolden(const std::vector<int32_t>& csrRowPtr, const std::vector<int32_t>& csrColInd,
+    const std::vector<float>& csrVals, int m, int n, int ldb, const std::vector<float>& B, float alpha, bool isLower,
     bool isTranspose,
-    bool isUnitDiag,    // v2 new: false -> NON_UNIT
-    bool isRowOrder) {  // v2 new: true -> ROW order
+    bool isUnitDiag, // v2 new: false -> NON_UNIT
+    bool isRowOrder)
+{ // v2 new: true -> ROW order
     SpsmGoldenResult result;
     // Buffer size: COL order -> ldb * n (n columns, stride ldb);
     //              ROW order -> ldb * m (m rows, stride ldb).
-    const int64_t outSize = isRowOrder
-        ? static_cast<int64_t>(ldb) * m
-        : static_cast<int64_t>(ldb) * n;
+    const int64_t outSize = isRowOrder ? static_cast<int64_t>(ldb) * m : static_cast<int64_t>(ldb) * n;
     result.X.assign(static_cast<size_t>(outSize), 0.0f);
-    if (m <= 0 || n <= 0) return result;
+    if (m <= 0 || n <= 0)
+    {
+        return result;
+    }
 
     double alphaD = static_cast<double>(alpha);
 
-    Eigen::MatrixXd A = SpsmGoldenBuildMatrixA(csrRowPtr, csrColInd, csrVals, m, isUnitDiag);
+    SpsmGoldenMatrix A = SpsmGoldenBuildMatrixA(csrRowPtr, csrColInd, csrVals, m, isUnitDiag);
     Eigen::MatrixXd rhs = SpsmGoldenBuildRhs(B, m, n, ldb, isRowOrder, alphaD);
     Eigen::MatrixXd X = SpsmGoldenTriangularSolve(A, rhs, isLower, isTranspose, isUnitDiag);
     SpsmGoldenWriteOutput(X, m, n, ldb, isRowOrder, result);
     return result;
 }
 
-}  // namespace sparse_test
+} // namespace sparse_test
 
-#endif  // TEST_SPSM_SPSM_GOLDEN_H_
+#endif // TEST_SPSM_SPSM_GOLDEN_H_
