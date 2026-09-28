@@ -14,24 +14,14 @@
 
 /*!
  * \file sparse2dense_kernel.cpp
- * \brief SparseToDense SIMT kernel 实现（仅 arch35/DAV-3510 可用）。
+ * \brief SparseToDense arch35 SIMT（对标 gather/scatter/densetosparse）。
  *
- * 三层结构：
- *   Layer 1: __simt_vf__ 计算函数（线程级并行，grid-stride loop）
- *   Layer 2: __global__ 调度器（读 tiling → asc_vf_call 分发）
- *   Layer 3: kernel_do 启动器（<<<>>> 异步 launch）
+ * Host 同 stream 先 launch zero kernel（uint64 grid-stride），再 launch scatter。
+ * CSR/CSC/COO 均按 nnz grid-stride 写非零元（__gm__ 直写）；CSR/CSC 用 ptr
+ * 二分定位所属行/列，避免中等密度时按行/列并行度不足。
  *
- * 支持三种稀疏格式：
- *   CSR: ptrs=rowOffsets(m+1), idxs=colInd(nnz) — 按行切分，行并行
- *   CSC: ptrs=colOffsets(n+1), idxs=rowInd(nnz) — 按列切分，列并行
- *   COO: ptrs=cooRowInd(nnz),  idxs=cooColInd(nnz) — 按 nnz grid-stride
- *
- * CSR/CSC 安全性：不同行/列由不同线程处理，无跨线程写冲突。
- * COO 安全性：重复 (row,col) 走 last-write-wins（与 cuSPARSE 一致）。
- *
- * 模板实例化矩阵：
- *   [f32] [f16] [bf16] [i32] [i8]
- * 由 dispatcher 按 tiling.valueType 选择。
+ * 本路径为 SIMT GM 直写，不走 DataCopyPad MTE2/MTE3 UB 中转，因此无需
+ * SetFlag/WaitFlag HardEvent::MTE2_MTE3（该检视意见适用于 arch22 EmitRun）。
  */
 
 #include <cstdint>
@@ -39,272 +29,208 @@
 #include "simt_api/asc_simt.h"
 #include "sparse2dense_kernel.h"
 
-// ===========================================================================
-// Dispatcher 基类：提取公共逻辑（block→范围映射、线程数计算）
-// ===========================================================================
+namespace {
 
-struct Sparse2DenseDispatcherBase {
-    int32_t  m_{0};
-    int32_t  n_{0};
-    int32_t  indexBase_{0};
-    int32_t  valueType_{SPARSE2DENSE_VAL_F32};
-    int32_t  isColMajor_{0};
-    int32_t  ld_{0};
-    int32_t  format_{SPARSE2DENSE_FMT_CSR};
-    uint32_t perBlock_{0};
-    uint64_t nnz_{0};
-
-    __aicore__ inline static uint32_t AlignToWarp(uint32_t simtThreadNum)
-    {
-        return (simtThreadNum + kSparse2DenseWarpSize - 1u) & ~(kSparse2DenseWarpSize - 1u);
-    }
-
-    // CSR/CSC: 根据 GetBlockIdx() 计算本 core 行/列范围，并对齐 SIMT 线程数到 warp 整数倍
-    // 使用 int64_t 中间变量避免 blockId * perBlock_ 在 INT32_MAX 附近溢出
-    // 尾核可能 rangeStart >= totalDim，此时 coreRangeLen <= 0，simtThreadNum 置 0
-    __aicore__ inline void ComputeRangeAndThreads(
-        int32_t &rangeStart, int32_t &rangeEnd, uint32_t &simtThreadNum)
-    {
-        uint32_t blockId = AscendC::GetBlockIdx();
-        int64_t rangeStart64 = static_cast<int64_t>(blockId) * static_cast<int64_t>(perBlock_);
-        int64_t totalDim64 = static_cast<int64_t>(format_ == SPARSE2DENSE_FMT_CSC ? n_ : m_);
-        if (rangeStart64 >= totalDim64) {
-            rangeStart = static_cast<int32_t>(totalDim64);
-            rangeEnd = rangeStart;
-            simtThreadNum = 0;
-            return;
-        }
-        int64_t rangeEnd64 = rangeStart64 + static_cast<int64_t>(perBlock_);
-        if (rangeEnd64 > totalDim64) {
-            rangeEnd64 = totalDim64;
-        }
-        rangeStart = static_cast<int32_t>(rangeStart64);
-        rangeEnd = static_cast<int32_t>(rangeEnd64);
-        int32_t coreRangeLen = rangeEnd - rangeStart;
-        if (coreRangeLen <= 0) {
-            simtThreadNum = 0;
-            return;
-        }
-        simtThreadNum = (coreRangeLen < static_cast<int32_t>(kSparse2DenseMaxThreadsPerBlock))
-            ? static_cast<uint32_t>(coreRangeLen)
-            : kSparse2DenseMaxThreadsPerBlock;
-        simtThreadNum = AlignToWarp(simtThreadNum);
-    }
-
-    // COO: 每核处理的 nnz 范围
-    // 尾核可能 nnzStart >= nnz_，此时 simtThreadNum 置 0 避免 uint64 下溢
-    __aicore__ inline void ComputeNnzRangeAndThreads(
-        uint64_t &nnzStart, uint64_t &nnzEnd, uint32_t &simtThreadNum)
-    {
-        uint32_t blockId = AscendC::GetBlockIdx();
-        nnzStart = static_cast<uint64_t>(blockId) * static_cast<uint64_t>(perBlock_);
-        if (nnzStart >= nnz_) {
-            nnzEnd = nnz_;
-            simtThreadNum = 0;
-            return;
-        }
-        nnzEnd = nnzStart + static_cast<uint64_t>(perBlock_);
-        if (nnzEnd > nnz_) {
-            nnzEnd = nnz_;
-        }
-        uint64_t coreNnz = nnzEnd - nnzStart;
-        simtThreadNum = (coreNnz < kSparse2DenseMaxThreadsPerBlock)
-            ? static_cast<uint32_t>(coreNnz)
-            : kSparse2DenseMaxThreadsPerBlock;
-        simtThreadNum = AlignToWarp(simtThreadNum);
-    }
-};
-
-// ===========================================================================
-// Layer 1a: CSR/CSC SIMT VF 计算函数
-//   CSR: 逐行遍历非零元，scatter 到 dnMat[r, col]
-//   CSC: 逐列遍历非零元，scatter 到 dnMat[row, c]
-// ===========================================================================
-template <typename ValT>
-__simt_vf__ __aicore__ __launch_bounds__(kSparse2DenseMaxThreadsPerBlock) inline void
-Sparse2DenseSimtComputeCsrCsc(
-    __gm__ const int32_t *offsets,   // CSR: rowOffsets; CSC: colOffsets
-    __gm__ const int32_t *indices,   // CSR: colInd;    CSC: rowInd
-    __gm__ const ValT    *values,
-    __gm__ ValT          *dnMat,
-    int32_t indexBase,
-    int32_t isColMajor,
-    int32_t ld,
-    int32_t rangeStart, int32_t rangeEnd,
-    int32_t threadsPerCore,
-    int32_t format)
+__simt_callee__ __aicore__ inline uint64_t DenseOff(
+    int32_t r, int32_t c, int32_t ld, int32_t isColMajor)
 {
-    const int32_t rangeLen = rangeEnd - rangeStart;
-    for (int32_t idx = static_cast<int32_t>(threadIdx.x);
-         idx < rangeLen;
-         idx += threadsPerCore) {
-        const int32_t major = rangeStart + idx;  // CSR: row; CSC: col
-        const int32_t oStart = offsets[major]     - indexBase;
-        const int32_t oEnd   = offsets[major + 1] - indexBase;
+    return isColMajor != 0
+        ? static_cast<uint64_t>(c) * static_cast<uint64_t>(ld) + static_cast<uint64_t>(r)
+        : static_cast<uint64_t>(r) * static_cast<uint64_t>(ld) + static_cast<uint64_t>(c);
+}
 
-        for (int32_t p = oStart; p < oEnd; ++p) {
-            const int32_t minor = indices[p] - indexBase;  // CSR: col; CSC: row
-            const ValT val = values[p];
-
-            int64_t denseIdx;
-            if (format == SPARSE2DENSE_FMT_CSC) {
-                // CSC: major=col, minor=row
-                if (isColMajor) {
-                    denseIdx = static_cast<int64_t>(major) * ld + minor;
-                } else {
-                    denseIdx = static_cast<int64_t>(minor) * ld + major;
-                }
-            } else {
-                // CSR: major=row, minor=col
-                if (isColMajor) {
-                    denseIdx = static_cast<int64_t>(minor) * ld + major;
-                } else {
-                    denseIdx = static_cast<int64_t>(major) * ld + minor;
-                }
-            }
-            dnMat[denseIdx] = val;
+/** Largest seg in [0, nSeg) with ptr[seg]-base <= p (nnz index). */
+__simt_callee__ __aicore__ inline int32_t FindSegByNnz(
+    __gm__ const int32_t *ptr, int32_t nSeg, int32_t base, int32_t p)
+{
+    int32_t lo = 0;
+    int32_t hi = nSeg - 1;
+    while (lo < hi) {
+        // Avoid int32 overflow of (lo + hi + 1) when nSeg is large (e.g. m~1.5e9).
+        const int32_t mid = lo + ((hi - lo + 1) >> 1);
+        if (ptr[mid] - base <= p) {
+            lo = mid;
+        } else {
+            hi = mid - 1;
         }
+    }
+    return lo;
+}
+
+__simt_vf__ __aicore__ __launch_bounds__(kSparse2DenseMaxThreadsPerBlock) inline void
+Sparse2DenseZeroU64(
+    __gm__ uint64_t *denseWords, uint64_t nWords, uint32_t numBlocks)
+{
+    const uint64_t tid =
+        static_cast<uint64_t>(blockIdx.x) * static_cast<uint64_t>(blockDim.x) +
+        static_cast<uint64_t>(threadIdx.x);
+    const uint64_t stride =
+        static_cast<uint64_t>(numBlocks) * static_cast<uint64_t>(blockDim.x);
+    for (uint64_t i = tid; i < nWords; i += stride) {
+        denseWords[i] = 0ULL;
     }
 }
 
-// ===========================================================================
-// Layer 1b: COO SIMT VF 计算函数
-//   按 nnz grid-stride 遍历，每个线程处理若干非零元
-// ===========================================================================
-template <typename ValT>
 __simt_vf__ __aicore__ __launch_bounds__(kSparse2DenseMaxThreadsPerBlock) inline void
-Sparse2DenseSimtComputeCoo(
-    __gm__ const int32_t *cooRowInd,
-    __gm__ const int32_t *cooColInd,
-    __gm__ const ValT    *values,
-    __gm__ ValT          *dnMat,
-    int32_t indexBase,
-    int32_t isColMajor,
-    int32_t ld,
-    uint64_t nnzStart, uint64_t nnzEnd,
-    int32_t threadsPerCore)
+Sparse2DenseZeroU8(
+    __gm__ uint8_t *denseBytes, uint64_t nBytes, uint32_t numBlocks)
 {
-    const uint64_t init = static_cast<uint64_t>(threadIdx.x);
-    for (uint64_t p = nnzStart + init; p < nnzEnd; p += static_cast<uint64_t>(threadsPerCore)) {
-        const int32_t row = cooRowInd[p] - indexBase;
-        const int32_t col = cooColInd[p] - indexBase;
-        const ValT val = values[p];
-
-        int64_t denseIdx;
-        if (isColMajor) {
-            denseIdx = static_cast<int64_t>(col) * ld + row;
-        } else {
-            denseIdx = static_cast<int64_t>(row) * ld + col;
-        }
-        dnMat[denseIdx] = val;
+    const uint64_t tid =
+        static_cast<uint64_t>(blockIdx.x) * static_cast<uint64_t>(blockDim.x) +
+        static_cast<uint64_t>(threadIdx.x);
+    const uint64_t stride =
+        static_cast<uint64_t>(numBlocks) * static_cast<uint64_t>(blockDim.x);
+    for (uint64_t i = tid; i < nBytes; i += stride) {
+        denseBytes[i] = 0;
     }
 }
 
-// ===========================================================================
-// 主转换 Dispatcher
-// ===========================================================================
-class Sparse2DenseDispatcher : public Sparse2DenseDispatcherBase {
-public:
-    __aicore__ inline void Init(
-        GM_ADDR gmOffsets, GM_ADDR gmIndices, GM_ADDR gmValues,
-        GM_ADDR gmDnMat,
-        const Sparse2DenseTilingData *tiling)
-    {
-        offsets_  = (__gm__ const int32_t *)gmOffsets;
-        indices_  = (__gm__ const int32_t *)gmIndices;
-        values_   = (__gm__ const uint8_t *)gmValues;
-        dnMat_    = (__gm__ uint8_t *)gmDnMat;
-        m_          = tiling->m;
-        n_          = tiling->n;
-        indexBase_  = tiling->indexBase;
-        valueType_  = tiling->valueType;
-        isColMajor_ = tiling->isColMajor;
-        ld_         = tiling->ld;
-        perBlock_   = tiling->perBlock;
-        format_     = tiling->format;
-        nnz_        = tiling->nnz;
+template <typename ValT>
+__simt_vf__ __aicore__ __launch_bounds__(kSparse2DenseMaxThreadsPerBlock) inline void
+Sparse2DenseCsrSimt(
+    __gm__ const int32_t *rowPtr, __gm__ const int32_t *colInd,
+    __gm__ const ValT *values, __gm__ ValT *dense,
+    int32_t rows, uint64_t nnz, int32_t ld, int32_t indexBase, int32_t isColMajor,
+    uint32_t numBlocks)
+{
+    const uint64_t tid =
+        static_cast<uint64_t>(blockIdx.x) * static_cast<uint64_t>(blockDim.x) +
+        static_cast<uint64_t>(threadIdx.x);
+    const uint64_t stride =
+        static_cast<uint64_t>(numBlocks) * static_cast<uint64_t>(blockDim.x);
+    const int32_t base = indexBase;
+    for (uint64_t p = tid; p < nnz; p += stride) {
+        const int32_t row = FindSegByNnz(rowPtr, rows, base, static_cast<int32_t>(p));
+        const int32_t c = colInd[p] - base;
+        dense[DenseOff(row, c, ld, isColMajor)] = values[p];
     }
+}
 
-    __aicore__ inline void Process()
-    {
-        if (format_ == SPARSE2DENSE_FMT_COO) {
-            uint64_t nnzStart{}, nnzEnd{};
-            uint32_t simtThreadNum{};
-            ComputeNnzRangeAndThreads(nnzStart, nnzEnd, simtThreadNum);
-            if (simtThreadNum == 0) return;
-            DispatchCoo(simtThreadNum, nnzStart, nnzEnd, static_cast<int32_t>(simtThreadNum));
-        } else {
-            int32_t rangeStart{}, rangeEnd{};
-            uint32_t simtThreadNum{};
-            ComputeRangeAndThreads(rangeStart, rangeEnd, simtThreadNum);
-            if (simtThreadNum == 0) return;
-            DispatchCsrCsc(simtThreadNum, rangeStart, rangeEnd, static_cast<int32_t>(simtThreadNum));
-        }
+template <typename ValT>
+__simt_vf__ __aicore__ __launch_bounds__(kSparse2DenseMaxThreadsPerBlock) inline void
+Sparse2DenseCscSimt(
+    __gm__ const int32_t *colPtr, __gm__ const int32_t *rowInd,
+    __gm__ const ValT *values, __gm__ ValT *dense,
+    int32_t cols, uint64_t nnz, int32_t ld, int32_t indexBase, int32_t isColMajor,
+    uint32_t numBlocks)
+{
+    const uint64_t tid =
+        static_cast<uint64_t>(blockIdx.x) * static_cast<uint64_t>(blockDim.x) +
+        static_cast<uint64_t>(threadIdx.x);
+    const uint64_t stride =
+        static_cast<uint64_t>(numBlocks) * static_cast<uint64_t>(blockDim.x);
+    const int32_t base = indexBase;
+    for (uint64_t p = tid; p < nnz; p += stride) {
+        const int32_t col = FindSegByNnz(colPtr, cols, base, static_cast<int32_t>(p));
+        const int32_t r = rowInd[p] - base;
+        dense[DenseOff(r, col, ld, isColMajor)] = values[p];
     }
+}
 
-private:
-    __aicore__ inline void DispatchCsrCsc(
-        uint32_t simtThreadNum,
-        int32_t rangeStart, int32_t rangeEnd, int32_t threadsPerCore)
-    {
-#define S2D_DISPATCH_CSR(KernelFunc, ValT) \
-        asc_vf_call<KernelFunc<ValT>>(dim3{simtThreadNum}, offsets_, indices_, \
-            reinterpret_cast<__gm__ const ValT *>(values_), \
-            reinterpret_cast<__gm__ ValT *>(dnMat_), \
-            indexBase_, isColMajor_, ld_, rangeStart, rangeEnd, threadsPerCore, format_)
-        if (valueType_ == SPARSE2DENSE_VAL_F16)      { S2D_DISPATCH_CSR(Sparse2DenseSimtComputeCsrCsc, half); }
-        else if (valueType_ == SPARSE2DENSE_VAL_BF16) { S2D_DISPATCH_CSR(Sparse2DenseSimtComputeCsrCsc, bfloat16_t); }
-        else if (valueType_ == SPARSE2DENSE_VAL_I32)  { S2D_DISPATCH_CSR(Sparse2DenseSimtComputeCsrCsc, int32_t); }
-        else if (valueType_ == SPARSE2DENSE_VAL_I8)   { S2D_DISPATCH_CSR(Sparse2DenseSimtComputeCsrCsc, int8_t); }
-        else                                           { S2D_DISPATCH_CSR(Sparse2DenseSimtComputeCsrCsc, float); }
-#undef S2D_DISPATCH_CSR
+// COO duplicates: element store is last-write-wins (cuSPARSE-compatible).
+// No DUPLICATE status / host sync-back on the Generic execute path.
+template <typename ValT>
+__simt_vf__ __aicore__ __launch_bounds__(kSparse2DenseMaxThreadsPerBlock) inline void
+Sparse2DenseCooSimt(
+    __gm__ const int32_t *rowInd, __gm__ const int32_t *colInd,
+    __gm__ const ValT *values, __gm__ ValT *dense,
+    uint64_t nnz, int32_t ld, int32_t indexBase, int32_t isColMajor, uint32_t numBlocks)
+{
+    const uint64_t tid =
+        static_cast<uint64_t>(blockIdx.x) * static_cast<uint64_t>(blockDim.x) +
+        static_cast<uint64_t>(threadIdx.x);
+    const uint64_t stride =
+        static_cast<uint64_t>(numBlocks) * static_cast<uint64_t>(blockDim.x);
+    const int32_t base = indexBase;
+    for (uint64_t p = tid; p < nnz; p += stride) {
+        const int32_t r = rowInd[p] - base;
+        const int32_t c = colInd[p] - base;
+        dense[DenseOff(r, c, ld, isColMajor)] = values[p];
     }
+}
 
-    __aicore__ inline void DispatchCoo(
-        uint32_t simtThreadNum,
-        uint64_t nnzStart, uint64_t nnzEnd, int32_t threadsPerCore)
-    {
-#define S2D_DISPATCH_COO(KernelFunc, ValT) \
-        asc_vf_call<KernelFunc<ValT>>(dim3{simtThreadNum}, offsets_, indices_, \
-            reinterpret_cast<__gm__ const ValT *>(values_), \
-            reinterpret_cast<__gm__ ValT *>(dnMat_), \
-            indexBase_, isColMajor_, ld_, nnzStart, nnzEnd, threadsPerCore)
-        if (valueType_ == SPARSE2DENSE_VAL_F16)      { S2D_DISPATCH_COO(Sparse2DenseSimtComputeCoo, half); }
-        else if (valueType_ == SPARSE2DENSE_VAL_BF16) { S2D_DISPATCH_COO(Sparse2DenseSimtComputeCoo, bfloat16_t); }
-        else if (valueType_ == SPARSE2DENSE_VAL_I32)  { S2D_DISPATCH_COO(Sparse2DenseSimtComputeCoo, int32_t); }
-        else if (valueType_ == SPARSE2DENSE_VAL_I8)   { S2D_DISPATCH_COO(Sparse2DenseSimtComputeCoo, int8_t); }
-        else                                           { S2D_DISPATCH_COO(Sparse2DenseSimtComputeCoo, float); }
-#undef S2D_DISPATCH_COO
+template <typename ValT>
+__aicore__ inline void DispatchByFormat(
+    GM_ADDR gmOffsets, GM_ADDR gmIndices, GM_ADDR gmValues, GM_ADDR gmDense,
+    const Sparse2DenseTilingData &tiling)
+{
+    auto *offsets = reinterpret_cast<__gm__ const int32_t *>(gmOffsets);
+    auto *indices = reinterpret_cast<__gm__ const int32_t *>(gmIndices);
+    auto *values = reinterpret_cast<__gm__ const ValT *>(gmValues);
+    auto *dense = reinterpret_cast<__gm__ ValT *>(gmDense);
+    if (tiling.format == SPARSE2DENSE_FMT_CSC) {
+        asc_vf_call<Sparse2DenseCscSimt<ValT>>(
+            dim3{kSparse2DenseMaxThreadsPerBlock},
+            offsets, indices, values, dense,
+            tiling.n, tiling.nnz, tiling.ld, tiling.indexBase, tiling.isColMajor,
+            tiling.numBlocks);
+    } else if (tiling.format == SPARSE2DENSE_FMT_COO) {
+        asc_vf_call<Sparse2DenseCooSimt<ValT>>(
+            dim3{kSparse2DenseMaxThreadsPerBlock},
+            offsets, indices, values, dense,
+            tiling.nnz, tiling.ld, tiling.indexBase, tiling.isColMajor, tiling.numBlocks);
+    } else {
+        asc_vf_call<Sparse2DenseCsrSimt<ValT>>(
+            dim3{kSparse2DenseMaxThreadsPerBlock},
+            offsets, indices, values, dense,
+            tiling.m, tiling.nnz, tiling.ld, tiling.indexBase, tiling.isColMajor,
+            tiling.numBlocks);
     }
+}
 
-    __gm__ const int32_t *offsets_{nullptr};
-    __gm__ const int32_t *indices_{nullptr};
-    __gm__ const uint8_t *values_{nullptr};
-    __gm__ uint8_t       *dnMat_{nullptr};
-};
+} // namespace
 
-// ===========================================================================
-// __global__ 调度器
-// ===========================================================================
+extern "C" __global__ __aicore__ void sparse2dense_zero_kernel(
+    GM_ADDR gmDense, const Sparse2DenseTilingData tiling)
+{
+    KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_AIV_ONLY);
+    const uint64_t bytes = tiling.denseBytes;
+    if (bytes == 0) {
+        return;
+    }
+    const uint64_t nWords = bytes >> 3;
+    if (nWords > 0) {
+        asc_vf_call<Sparse2DenseZeroU64>(
+            dim3{kSparse2DenseMaxThreadsPerBlock},
+            reinterpret_cast<__gm__ uint64_t *>(gmDense), nWords, tiling.numBlocks);
+    }
+    const uint64_t remOff = nWords << 3;
+    const uint64_t rem = bytes - remOff;
+    if (rem > 0) {
+        asc_vf_call<Sparse2DenseZeroU8>(
+            dim3{kSparse2DenseMaxThreadsPerBlock},
+            reinterpret_cast<__gm__ uint8_t *>(gmDense) + remOff, rem, tiling.numBlocks);
+    }
+}
+
 extern "C" __global__ __aicore__ void sparse2dense_kernel(
-    GM_ADDR gmOffsets, GM_ADDR gmIndices, GM_ADDR gmValues,
-    GM_ADDR gmDnMat,
+    GM_ADDR gmOffsets, GM_ADDR gmIndices, GM_ADDR gmValues, GM_ADDR gmDense,
     const Sparse2DenseTilingData tiling)
 {
     KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_AIV_ONLY);
-    Sparse2DenseDispatcher dispatcher;
-    dispatcher.Init(gmOffsets, gmIndices, gmValues, gmDnMat, &tiling);
-    dispatcher.Process();
+    if (tiling.valueType == SPARSE2DENSE_VAL_F16) {
+        DispatchByFormat<half>(gmOffsets, gmIndices, gmValues, gmDense, tiling);
+    } else if (tiling.valueType == SPARSE2DENSE_VAL_BF16) {
+        DispatchByFormat<bfloat16_t>(gmOffsets, gmIndices, gmValues, gmDense, tiling);
+    } else if (tiling.valueType == SPARSE2DENSE_VAL_I32) {
+        DispatchByFormat<int32_t>(gmOffsets, gmIndices, gmValues, gmDense, tiling);
+    } else if (tiling.valueType == SPARSE2DENSE_VAL_I8) {
+        DispatchByFormat<int8_t>(gmOffsets, gmIndices, gmValues, gmDense, tiling);
+    } else if (tiling.valueType == SPARSE2DENSE_VAL_COMPLEX64) {
+        DispatchByFormat<uint64_t>(gmOffsets, gmIndices, gmValues, gmDense, tiling);
+    } else {
+        DispatchByFormat<float>(gmOffsets, gmIndices, gmValues, gmDense, tiling);
+    }
 }
 
-// kernel_do 启动器
 extern "C" void sparse2dense_kernel_do(
-    GM_ADDR sparseOffsets, GM_ADDR sparseIndices, GM_ADDR sparseValues,
-    GM_ADDR dense,
-    const Sparse2DenseTilingData &tiling,
-    uint32_t numBlocks,
-    void *stream)
+    GM_ADDR sparseOffsets, GM_ADDR sparseIndices, GM_ADDR sparseValues, GM_ADDR dense,
+    const Sparse2DenseTilingData &tiling, uint32_t numBlocks, void *stream)
 {
+    // Same-stream ordering: all AIVs finish zero before any scatter starts.
+    if (tiling.denseBytes > 0) {
+        sparse2dense_zero_kernel<<<numBlocks, nullptr, stream>>>(dense, tiling);
+    }
     sparse2dense_kernel<<<numBlocks, nullptr, stream>>>(
         sparseOffsets, sparseIndices, sparseValues, dense, tiling);
 }

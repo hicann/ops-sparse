@@ -69,17 +69,31 @@ void ExpectSparse2DenseGolden(const Sparse2DenseParam &p,
         p.base == "ONE" ? 1 : 0,
         Sparse2DenseValueType(p.value_type),
         p.distribution, p.seed);
-    EXPECT_EQ(actual.dense, golden.dense) << p.caseId();
+    if (actual.dense != golden.dense) {
+        size_t mismatch = 0;
+        const size_t n = std::min(actual.dense.size(), golden.dense.size());
+        while (mismatch < n && actual.dense[mismatch] == golden.dense[mismatch]) {
+            ++mismatch;
+        }
+        ADD_FAILURE() << p.caseId()
+                      << " dense mismatch at byte " << mismatch
+                      << " actual_size=" << actual.dense.size()
+                      << " golden_size=" << golden.dense.size()
+                      << (mismatch < n
+                              ? (std::string(" actual_byte=") +
+                                 std::to_string(actual.dense[mismatch]) +
+                                 " golden_byte=" +
+                                 std::to_string(golden.dense[mismatch]))
+                              : std::string(" (size mismatch)"));
+    }
 }
 
 TEST_P(Sparse2DenseTest, BitwiseGolden) {
     const auto &p = GetParam();
     const auto host = MakeSparse2DenseInput(p);
     const auto actual = RunSparse2Dense(*handle_, env_->stream(), p, host);
-    if (p.m == 0 || p.n == 0) {
-        EXPECT_EQ(actual.executeStatus, ACL_SPARSE_STATUS_SUCCESS) << p.caseId();
-        return;
-    }
+    // Empty shape (m==0 or n==0): still require SUCCESS + stream sync + all-zero
+    // physical plane (majorDim * ld * esize, may be 0 bytes).
     ExpectSparse2DenseStatuses(p, actual);
     ExpectSparse2DenseGolden(p, actual);
 }
@@ -123,6 +137,16 @@ static aclsparseStatus_t InvokeMutation(const std::string &mutation,
     if (mutation == "nonzero_nnz_idxs_null") {
         sparseInner->nnz = 4;
         sparseInner->idxs = nullptr;
+        return aclsparseSparseToDense(handle, sparse, dense, alg, nullptr);
+    }
+    // dense->values==nullptr: bufferSize must still succeed; execute rejects.
+    if (mutation == "nonzero_dense_null") {
+        size_t probe = 0;
+        auto qs = aclsparseSparseToDense_bufferSize(handle, sparse, dense, alg, &probe);
+        if (qs != ACL_SPARSE_STATUS_SUCCESS) {
+            return qs;
+        }
+        size = probe;
         return aclsparseSparseToDense(handle, sparse, dense, alg, nullptr);
     }
     return aclsparseSparseToDense_bufferSize(handle, sparse, dense, alg, &size);

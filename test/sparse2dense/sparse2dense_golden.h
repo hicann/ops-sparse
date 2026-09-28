@@ -53,6 +53,7 @@ inline size_t Sparse2DenseElemWidth(aclDataType type) {
     if (type == ACL_INT8) return 1;
     if (type == ACL_FLOAT16 || type == ACL_BF16) return 2;
     if (type == ACL_FLOAT || type == ACL_INT32) return 4;
+    if (type == ACL_COMPLEX64) return 8;
     return 0;
 }
 
@@ -69,6 +70,10 @@ inline uint32_t Sparse2DenseInputBits(aclDataType type, uint64_t linear,
         return 0x3801u + static_cast<uint16_t>(linear % 63);
     if (type == ACL_INT32)
         return static_cast<uint32_t>(linear + seed + 1);
+    if (type == ACL_COMPLEX64) {
+        // 仅返回实部 pattern；GenerateCsrGolden 对 width=8 按字节展开时需特殊处理
+        return 0x3f000001u + static_cast<uint32_t>(linear % 127);
+    }
     return 0x3f01u + static_cast<uint16_t>(linear % 63);
 }
 
@@ -107,11 +112,24 @@ inline CsrData GenerateCsrGolden(int64_t m, int64_t n, int64_t ld,
             if (!Sparse2DenseIsNonzero(dist, linear, logical, seed))
                 continue;
             c.colInd.push_back(static_cast<int32_t>(col + base));
-            const uint32_t bits =
-                Sparse2DenseInputBits(valueType, linear, seed);
-            for (size_t b = 0; b < width; ++b)
-                c.values.push_back(
-                    static_cast<uint8_t>((bits >> (b * 8)) & 0xffu));
+            if (valueType == ACL_COMPLEX64) {
+                const uint32_t realBits =
+                    0x3f000001u + static_cast<uint32_t>(linear % 127);
+                const uint32_t imagBits =
+                    0x3e800001u + static_cast<uint32_t>((linear + seed) % 127);
+                for (size_t b = 0; b < 4; ++b)
+                    c.values.push_back(
+                        static_cast<uint8_t>((realBits >> (b * 8)) & 0xffu));
+                for (size_t b = 0; b < 4; ++b)
+                    c.values.push_back(
+                        static_cast<uint8_t>((imagBits >> (b * 8)) & 0xffu));
+            } else {
+                const uint32_t bits =
+                    Sparse2DenseInputBits(valueType, linear, seed);
+                for (size_t b = 0; b < width; ++b)
+                    c.values.push_back(
+                        static_cast<uint8_t>((bits >> (b * 8)) & 0xffu));
+            }
             ++c.nnz;
         }
         c.rowOff[static_cast<size_t>(row + 1)] =

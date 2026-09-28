@@ -73,6 +73,8 @@ façade。首次以 NPU 稀疏 Tensor 调用 `torch.sparse.mm` 时才会 JIT 编
 
 具体接口语义、支持范围、约束和调用示例请参阅
 [SpGEMM 接口说明](cann_ops_sparse/docs/zh/spgemm.md)。
+SparseToDense（`aten::_to_dense`）见
+[SparseToDense 接口说明](cann_ops_sparse/docs/zh/sparse2dense.md)。
 
 ## 可复现构建与调用
 

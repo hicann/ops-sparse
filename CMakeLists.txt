@@ -152,14 +152,14 @@ set_source_files_properties(
 )
 
 target_include_directories(${OPS_SPARSE} PRIVATE
+    ./include
+    ./sparse/common
     ${ASCEND_CANN_PACKAGE_PATH}/pkg_inc/op_common/
     ${ASCEND_CANN_PACKAGE_PATH}/pkg_inc/base/
     ${ASCEND_CANN_PACKAGE_PATH}/pkg_inc/
     ${ASCEND_CANN_PACKAGE_PATH}/include/op_common
     ${ASCEND_CANN_PACKAGE_PATH}/aarch64-linux/asc/include/utils
     ${ASCEND_CANN_PACKAGE_PATH}/aarch64-linux/asc/include
-    ./include
-    ./sparse/common
 )
 
 target_compile_options(${OPS_SPARSE} PRIVATE

@@ -20,9 +20,8 @@
  *   F1. aclsparseSparseToDense_bufferSize — 查询 workspace 大小
  *   F2. aclsparseSparseToDense            — 执行 Sparse→Dense 转换
  *
- * 支持 CSR / CSC / COO 三种稀疏格式，值类型 FP32/FP16/BF16/INT32/INT8。
- * 对标 cuSPARSE cusparseSparseToDense / cusparseSparseToDense_bufferSize。
- * 仅支持 arch35（DAV-3510）。
+ * 支持 CSR / CSC / COO；值类型 FP32/FP16/BF16/INT32/INT8/COMPLEX64。
+ * arch35 使用 SIMT（对标 gather/scatter/densetosparse），对标 cuSPARSE SparseToDense。
  */
 
 #include <algorithm>
@@ -35,12 +34,6 @@
 #include "aclsparse_host_utils.h"
 #include "sparse2dense.h"
 #include "sparse2dense_tiling_data.h"
-
-// Host 侧不引入 kernel_operator.h，此处提供 GM_ADDR 的 host 编译回退定义。
-// NPU 侧由 toolkit (kernel_utils_macros.h) 自动定义为 __gm__ uint8_t*。
-#ifndef GM_ADDR
-#define GM_ADDR uint8_t *
-#endif
 #include "sparse2dense_kernel.h"
 
 static constexpr const char *kTag = "aclsparseSparseToDense";
@@ -73,9 +66,8 @@ static aclsparseStatus_t ValidateSparseDescriptor(const aclsparseSpMatDescr *mat
         return ACL_SPARSE_STATUS_INVALID_VALUE;
     }
     aclDataType valType = matInner->valueType;
-    if (valType != ACL_FLOAT && valType != ACL_FLOAT16 &&
-        valType != ACL_BF16 && valType != ACL_INT32 &&
-        valType != ACL_INT8) {
+    if (valType != ACL_FLOAT && valType != ACL_FLOAT16 && valType != ACL_BF16 &&
+        valType != ACL_INT32 && valType != ACL_INT8 && valType != ACL_COMPLEX64) {
         OP_LOGE(kTag, "unsupported valueType %d", static_cast<int>(valType));
         return ACL_SPARSE_STATUS_NOT_SUPPORTED;
     }
@@ -87,9 +79,10 @@ static aclsparseStatus_t ValidateSparseDescriptor(const aclsparseSpMatDescr *mat
     return ACL_SPARSE_STATUS_SUCCESS;
 }
 
-static aclsparseStatus_t ValidateDenseDescriptor(const aclsparseDnMatDescr *dnInner,
-                                                  aclDataType valType,
-                                                  uint64_t sparseRows, uint64_t sparseCols)
+// Shape/ld/dtype only — used by bufferSize (values may still be nullptr).
+static aclsparseStatus_t ValidateDenseDescriptorMeta(
+    const aclsparseDnMatDescr *dnInner, aclDataType valType,
+    uint64_t sparseRows, uint64_t sparseCols)
 {
     if (dnInner->valueType != valType) {
         OP_LOGE(kTag, "matB valueType %d != matA valueType %d",
@@ -119,6 +112,18 @@ static aclsparseStatus_t ValidateDenseDescriptor(const aclsparseDnMatDescr *dnIn
                 dnInner->ld, isColMajor ? "rows" : "cols", minLd);
         return ACL_SPARSE_STATUS_INVALID_VALUE;
     }
+    return ACL_SPARSE_STATUS_SUCCESS;
+}
+
+static aclsparseStatus_t ValidateDenseDescriptorForExecute(
+    const aclsparseDnMatDescr *dnInner, aclDataType valType,
+    uint64_t sparseRows, uint64_t sparseCols)
+{
+    aclsparseStatus_t st =
+        ValidateDenseDescriptorMeta(dnInner, valType, sparseRows, sparseCols);
+    if (st != ACL_SPARSE_STATUS_SUCCESS) {
+        return st;
+    }
     if (dnInner->values == nullptr) {
         OP_LOGE(kTag, "matB.values is nullptr");
         return ACL_SPARSE_STATUS_INVALID_VALUE;
@@ -126,9 +131,9 @@ static aclsparseStatus_t ValidateDenseDescriptor(const aclsparseDnMatDescr *dnIn
     return ACL_SPARSE_STATUS_SUCCESS;
 }
 
-static aclsparseStatus_t ValidateSparseToDenseParams(
+static aclsparseStatus_t ValidateSparseToDenseCommon(
     aclsparseHandle_t handle, aclsparseConstSpMatDescr_t matA,
-    aclsparseDnMatDescr_t matB)
+    aclsparseDnMatDescr_t matB, bool requireDenseValues)
 {
     if (handle == nullptr) {
         OP_LOGE(kTag, "handle is nullptr");
@@ -140,59 +145,79 @@ static aclsparseStatus_t ValidateSparseToDenseParams(
     }
     auto *matInner = Sparse2DenseToConstMatInner(matA);
     aclsparseStatus_t st = ValidateSparseDescriptor(matInner);
-    if (st != ACL_SPARSE_STATUS_SUCCESS) return st;
+    if (st != ACL_SPARSE_STATUS_SUCCESS) {
+        return st;
+    }
     auto *dnInner = Sparse2DenseToDnMatInner(matB);
-    return ValidateDenseDescriptor(dnInner, matInner->valueType,
-                                   matInner->rows, matInner->cols);
+    if (requireDenseValues) {
+        return ValidateDenseDescriptorForExecute(
+            dnInner, matInner->valueType, matInner->rows, matInner->cols);
+    }
+    return ValidateDenseDescriptorMeta(
+        dnInner, matInner->valueType, matInner->rows, matInner->cols);
 }
 
 // ===========================================================================
-// block 切分
-// CSR: 按行数 m 切分；CSC: 按列数 n 切分；COO: 按 nnz 切分
+// SIMT tiling + launch
 // ===========================================================================
-static aclsparseStatus_t ComputeBlockSplits(
-    int32_t dim, uint32_t &useBlocks, uint32_t &perBlock)
+
+// Physical plane: ROW → m*ld, COL → n*ld (majorDim * ld * esize).
+static inline size_t DenseStorageBytes(int32_t m, int32_t n, int32_t ld,
+                                       bool isColMajor, size_t elemSize)
 {
-    if (dim <= 0) {
-        useBlocks = 0;
-        perBlock = 0;
-        return ACL_SPARSE_STATUS_SUCCESS;
-    }
+    const int64_t majorDim = isColMajor ? static_cast<int64_t>(n)
+                                        : static_cast<int64_t>(m);
+    return static_cast<size_t>(majorDim * static_cast<int64_t>(ld)) * elemSize;
+}
+
+static aclsparseStatus_t ComputeSimtTiling(
+    const aclsparseSpMatDescr *matInner, int32_t m, int32_t n,
+    Sparse2DenseTilingData &tiling, uint32_t &useBlocks)
+{
     uint32_t aivCoreNum = GetAivCoreCount();
     CHECK_RET(aivCoreNum > 0,
               OP_LOGE(kTag, "GetAivCoreCount returned 0");
               return ACL_SPARSE_STATUS_INTERNAL_ERROR);
-    useBlocks = std::min(aivCoreNum,
-        CeilDiv<uint32_t>(static_cast<uint32_t>(dim), kSparse2DenseMaxThreadsPerBlock));
+
+    // CSR/CSC/COO scatter is nnz-parallel; size blocks by nnz (and dense zero words).
+    if (matInner->nnz > static_cast<uint64_t>(INT32_MAX)) {
+        OP_LOGE(kTag, "nnz=%llu exceeds INT32_MAX",
+                static_cast<unsigned long long>(matInner->nnz));
+        return ACL_SPARSE_STATUS_NOT_SUPPORTED;
+    }
+    uint64_t workItems = matInner->nnz;
+    (void)m;
+    (void)n;
+    // Dense zero dominates P scenes; size blocks by max(nnz-axis, dense uint64 words).
+    const uint64_t denseWords = tiling.denseBytes >> 3;
+    if (denseWords > workItems) {
+        workItems = denseWords;
+    }
+    if (workItems == 0 && tiling.denseBytes == 0) {
+        useBlocks = 0;
+        tiling.numBlocks = 0;
+        return ACL_SPARSE_STATUS_SUCCESS;
+    }
+    if (workItems == 0) {
+        workItems = 1;
+    }
+    useBlocks = static_cast<uint32_t>(std::min<uint64_t>(
+        CeilDiv<uint64_t>(workItems, kSparse2DenseMaxThreadsPerBlock), aivCoreNum));
     if (useBlocks == 0) {
         useBlocks = 1;
     }
-    perBlock = CeilDiv<uint32_t>(static_cast<uint32_t>(dim), useBlocks);
-    if (perBlock == 0) {
-        perBlock = 1;
-    }
+    tiling.numBlocks = useBlocks;
+    OP_LOGD(kTag, "SIMT tiling: fmt=%d workItems=%llu denseBytes=%llu blocks=%u threads=%u",
+            tiling.format, static_cast<unsigned long long>(workItems),
+            static_cast<unsigned long long>(tiling.denseBytes), useBlocks,
+            kSparse2DenseMaxThreadsPerBlock);
     return ACL_SPARSE_STATUS_SUCCESS;
-}
-
-// 计算稠密矩阵实际存储字节数（用于 memset 清零）。
-// 行主序：m 行 × ld stride；列主序：n 列 × ld stride。
-static inline size_t DenseStorageBytes(int32_t m, int32_t n, int32_t ld,
-                                       bool isColMajor, size_t elemSize)
-{
-    int64_t elems = isColMajor
-        ? static_cast<int64_t>(n) * ld
-        : static_cast<int64_t>(m) * ld;
-    return static_cast<size_t>(elems) * elemSize;
 }
 
 }  // namespace
 
-// ===========================================================================
-// Public APIs
-// ===========================================================================
 extern "C" {
 
-// F1: bufferSize
 aclsparseStatus_t aclsparseSparseToDense_bufferSize(
     aclsparseHandle_t handle,
     aclsparseConstSpMatDescr_t matA,
@@ -200,7 +225,8 @@ aclsparseStatus_t aclsparseSparseToDense_bufferSize(
     aclsparseSparseToDenseAlg_t alg,
     size_t *bufferSize)
 {
-    aclsparseStatus_t st = ValidateSparseToDenseParams(handle, matA, matB);
+    // Workspace size does not depend on dense->values; allow values==nullptr.
+    aclsparseStatus_t st = ValidateSparseToDenseCommon(handle, matA, matB, false);
     if (st != ACL_SPARSE_STATUS_SUCCESS) { return st; }
 
     if (bufferSize == nullptr) {
@@ -217,13 +243,12 @@ aclsparseStatus_t aclsparseSparseToDense_bufferSize(
     return ACL_SPARSE_STATUS_SUCCESS;
 }
 
-// F2: execute
 static aclsparseStatus_t ZeroDenseOutput(const aclsparseDnMatDescr *dnInner,
-                                          size_t dnMatBytes)
+                                          size_t dnMatBytes, aclrtStream stream)
 {
-    aclError ret = aclrtMemset(dnInner->values, dnMatBytes, 0, dnMatBytes);
+    aclError ret = aclrtMemsetAsync(dnInner->values, dnMatBytes, 0, dnMatBytes, stream);
     if (ret != ACL_SUCCESS) {
-        OP_LOGE(kTag, "aclrtMemset failed, ret=%d", ret);
+        OP_LOGE(kTag, "aclrtMemsetAsync failed, ret=%d", ret);
         return ACL_SPARSE_STATUS_INTERNAL_ERROR;
     }
     return ACL_SPARSE_STATUS_SUCCESS;
@@ -232,18 +257,20 @@ static aclsparseStatus_t ZeroDenseOutput(const aclsparseDnMatDescr *dnInner,
 static aclsparseStatus_t ValidateAndZeroOutput(const aclsparseSpMatDescr *matInner,
                                                 const aclsparseDnMatDescr *dnInner,
                                                 int32_t m, int32_t n,
-                                                size_t elemSize, size_t dnMatBytes)
+                                                size_t elemSize, size_t dnMatBytes,
+                                                aclrtStream stream)
 {
+    (void)elemSize;
     if (m == 0 || n == 0) {
         if (dnMatBytes > 0) {
-            aclsparseStatus_t zst = ZeroDenseOutput(dnInner, dnMatBytes);
+            aclsparseStatus_t zst = ZeroDenseOutput(dnInner, dnMatBytes, stream);
             if (zst != ACL_SPARSE_STATUS_SUCCESS) return zst;
         }
         OP_LOGD(kTag, "empty matrix, output zeroed, skip kernel launch");
         return ACL_SPARSE_STATUS_SUCCESS;
     }
     if (matInner->nnz == 0) {
-        aclsparseStatus_t zst = ZeroDenseOutput(dnInner, dnMatBytes);
+        aclsparseStatus_t zst = ZeroDenseOutput(dnInner, dnMatBytes, stream);
         if (zst != ACL_SPARSE_STATUS_SUCCESS) return zst;
         OP_LOGD(kTag, "nnz=0, output zeroed, skip kernel launch");
         return ACL_SPARSE_STATUS_SUCCESS;
@@ -257,39 +284,17 @@ static aclsparseStatus_t ValidateAndZeroOutput(const aclsparseSpMatDescr *matInn
                 static_cast<unsigned long long>(matInner->nnz));
         return ACL_SPARSE_STATUS_INVALID_VALUE;
     }
-    return ZeroDenseOutput(dnInner, dnMatBytes);
-}
-
-static int32_t ComputeSplitDim(const aclsparseSpMatDescr *matInner,
-                                int32_t m, int32_t n,
-                                aclsparseStatus_t &status)
-{
-    status = ACL_SPARSE_STATUS_SUCCESS;
-    if (matInner->format == ACL_SPARSE_FORMAT_CSC) return n;
-    if (matInner->format == ACL_SPARSE_FORMAT_COO) {
-        if (matInner->nnz > static_cast<uint64_t>(INT32_MAX)) {
-            OP_LOGE(kTag, "nnz exceeds INT32_MAX for COO split, not supported");
-            status = ACL_SPARSE_STATUS_NOT_SUPPORTED;
-            return 0;
-        }
-        return static_cast<int32_t>(matInner->nnz);
-    }
-    return m;
+    // Hot path: kernel SIMT uint64 zero replaces host aclrtMemsetAsync.
+    (void)dnInner;
+    (void)stream;
+    return ACL_SPARSE_STATUS_SUCCESS;
 }
 
 static aclsparseStatus_t LaunchSparseToDenseKernel(
     const aclsparseSpMatDescr *matInner, const aclsparseDnMatDescr *dnInner,
-    int32_t m, int32_t n, bool isColMajor, aclrtStream stream)
+    int32_t m, int32_t n, bool isColMajor, size_t elemSize, size_t dnMatBytes,
+    aclrtStream stream)
 {
-    aclsparseStatus_t dimStatus = ACL_SPARSE_STATUS_SUCCESS;
-    int32_t splitDim = ComputeSplitDim(matInner, m, n, dimStatus);
-    if (dimStatus != ACL_SPARSE_STATUS_SUCCESS) { return dimStatus; }
-
-    uint32_t useBlocks = 0;
-    uint32_t perBlock = 0;
-    aclsparseStatus_t st = ComputeBlockSplits(splitDim, useBlocks, perBlock);
-    if (st != ACL_SPARSE_STATUS_SUCCESS) { return st; }
-
     Sparse2DenseTilingData tiling{};
     tiling.m = m;
     tiling.n = n;
@@ -297,9 +302,19 @@ static aclsparseStatus_t LaunchSparseToDenseKernel(
     tiling.valueType = Sparse2DenseValTypeFromAcl(matInner->valueType);
     tiling.isColMajor = isColMajor ? 1 : 0;
     tiling.ld = static_cast<int32_t>(dnInner->ld);
-    tiling.perBlock = perBlock;
     tiling.format = Sparse2DenseFormatFromAcl(matInner->format);
     tiling.nnz = matInner->nnz;
+    tiling.denseBytes = static_cast<uint64_t>(dnMatBytes);
+    (void)elemSize;
+
+    uint32_t useBlocks = 0;
+    aclsparseStatus_t st = ComputeSimtTiling(matInner, m, n, tiling, useBlocks);
+    if (st != ACL_SPARSE_STATUS_SUCCESS) {
+        return st;
+    }
+    if (useBlocks == 0) {
+        return ACL_SPARSE_STATUS_SUCCESS;
+    }
 
     sparse2dense_kernel_do(
         reinterpret_cast<GM_ADDR>(matInner->ptrs),
@@ -308,8 +323,10 @@ static aclsparseStatus_t LaunchSparseToDenseKernel(
         reinterpret_cast<GM_ADDR>(dnInner->values),
         tiling, useBlocks, stream);
 
-    OP_LOGI(kTag, "kernel launched: m=%d, n=%d, fmt=%d, numBlocks=%u, valType=%d, order=%s",
-            m, n, tiling.format, useBlocks, tiling.valueType,
+    OP_LOGI(kTag,
+            "SIMT launched: m=%d n=%d fmt=%d blocks=%u nnz=%llu valType=%d order=%s",
+            m, n, tiling.format, useBlocks,
+            static_cast<unsigned long long>(tiling.nnz), tiling.valueType,
             tiling.isColMajor ? "col-major" : "row-major");
     return ACL_SPARSE_STATUS_SUCCESS;
 }
@@ -321,7 +338,10 @@ aclsparseStatus_t aclsparseSparseToDense(
     aclsparseSparseToDenseAlg_t alg,
     void *buffer)
 {
-    aclsparseStatus_t st = ValidateSparseToDenseParams(handle, matA, matB);
+    // Async on handle stream: no SynchronizeStream here; caller syncs.
+    // Invalid device coords / COO duplicates are undefined (cuSPARSE-like):
+    // scatter is last-write-wins; no sync-back status.
+    aclsparseStatus_t st = ValidateSparseToDenseCommon(handle, matA, matB, true);
     if (st != ACL_SPARSE_STATUS_SUCCESS) { return st; }
     if (alg != ACL_SPARSE_SPARSETODENSE_ALG_DEFAULT) {
         OP_LOGE(kTag, "unsupported alg %d", static_cast<int>(alg));
@@ -347,13 +367,14 @@ aclsparseStatus_t aclsparseSparseToDense(
                                           isColMajor, elemSize);
 
     aclsparseStatus_t zst = ValidateAndZeroOutput(matInner, dnInner, m, n,
-                                                   elemSize, dnMatBytes);
+                                                   elemSize, dnMatBytes, stream);
     if (zst != ACL_SPARSE_STATUS_SUCCESS) { return zst; }
     if (m == 0 || n == 0 || matInner->nnz == 0) {
         return ACL_SPARSE_STATUS_SUCCESS;
     }
 
-    return LaunchSparseToDenseKernel(matInner, dnInner, m, n, isColMajor, stream);
+    return LaunchSparseToDenseKernel(matInner, dnInner, m, n, isColMajor, elemSize,
+                                     dnMatBytes, stream);
 }
 
 }  // extern "C"

@@ -675,6 +675,7 @@ aclsparseStatus_t aclsparseCreateDnMat(aclsparseDnMatDescr_t *dnMatDescr,
     if (dnMatDescr == nullptr) {
         return ACL_SPARSE_STATUS_INVALID_VALUE;
     }
+    // Allow zero dims (SparseToDense / DenseToSparse empty matrix paths).
     if (rows < 0 || cols < 0) {
         return ACL_SPARSE_STATUS_INVALID_VALUE;
     }
@@ -690,7 +691,7 @@ aclsparseStatus_t aclsparseCreateDnMat(aclsparseDnMatDescr_t *dnMatDescr,
     if (order != ACL_SPARSE_ORDER_ROW && order != ACL_SPARSE_ORDER_COL) {
         return ACL_SPARSE_STATUS_INVALID_VALUE;
     }
-    // ld 约束：行主序需 >= cols；列主序需 >= rows。
+    // ld 约束：行主序需 >= cols；列主序需 >= rows（零维时另一侧可为 0）。
     if (order == ACL_SPARSE_ORDER_ROW && ld < cols) {
         return ACL_SPARSE_STATUS_INVALID_VALUE;
     }

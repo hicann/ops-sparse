@@ -62,6 +62,9 @@ RunSparse2Dense(HandleManager &handle, aclrtStream stream,
 
     DeviceBuffer dOffsets, dIndices, dValues, dDense;
     CopyHostToDevice(host, dOffsets, dIndices, dValues);
+    // aclrtMalloc(0) is unreliable; keep a 1-byte device stub when the physical
+    // plane is empty (m==0 or n==0 → majorDim*ld*esize == 0). Host golden and
+    // result.dense must still be exactly dnBytes (may be 0).
     dDense = DeviceBuffer::alloc(std::max<size_t>(dnBytes, 1));
 
     SpMatManager spMat;
@@ -92,8 +95,10 @@ RunSparse2Dense(HandleManager &handle, aclrtStream stream,
     if (result.syncStatus != ACL_SUCCESS)
         return result;
 
-    result.dense.resize(std::max<size_t>(dnBytes, 1));
-    dDense.copyToHost(result.dense.data(), result.dense.size());
+    result.dense.resize(dnBytes);
+    if (dnBytes > 0) {
+        dDense.copyToHost(result.dense.data(), dnBytes);
+    }
     return result;
 }
 

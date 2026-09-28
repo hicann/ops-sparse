@@ -25,13 +25,15 @@
 #include <cstdint>
 #include "sparse2dense_tiling_data.h"
 
-// GM_ADDR: 由 Ascend C toolkit 标准定义（kernel_utils_macros.h）。
-// NPU 侧为 __gm__ uint8_t*（携带全局内存地址空间属性），Host 侧为 uint8_t*。
+// GM_ADDR: NPU 侧由 Ascend C toolkit（kernel_utils_macros.h）定义为 __gm__ uint8_t*。
+// Host 侧不重定义宏，仅用类型别名回退，避免与 toolkit 抢 #define。
+#ifndef GM_ADDR
+using GM_ADDR = uint8_t *;
+#endif
 
 extern "C" {
 
-/// SparseToDense kernel：将稀疏矩阵的非零元 scatter 到稠密矩阵。
-/// 输出稠密矩阵需在调用前由 host 侧 memset 为 0。
+/// SparseToDense：同 stream 先 SIMT 清零 dense，再 scatter 非零元。
 void sparse2dense_kernel_do(
     GM_ADDR sparseOffsets,  // CSR:rowOffsets / CSC:colOffsets / COO:cooRowInd (int32_t*)
     GM_ADDR sparseIndices,  // CSR:colInd / CSC:rowInd / COO:cooColInd (int32_t*)

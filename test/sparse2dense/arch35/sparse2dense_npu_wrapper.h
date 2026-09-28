@@ -34,6 +34,7 @@ inline aclDataType Sparse2DenseValueType(const std::string &name) {
     if (name == "INT32")   return ACL_INT32;
     if (name == "FP32")    return ACL_FLOAT;
     if (name == "FP64")    return ACL_DOUBLE;
+    if (name == "COMPLEX64") return ACL_COMPLEX64;
     return static_cast<aclDataType>(-1);
 }
 

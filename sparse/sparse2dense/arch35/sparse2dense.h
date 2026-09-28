@@ -58,19 +58,39 @@ inline const struct aclsparseDnMatDescr *Sparse2DenseToConstDnMatInner(aclsparse
 /// 返回 ACL 数据类型的字节大小（调用方需先通过 Validate 校验，此函数不含非法值）
 static inline uint32_t AclDataTypeSize(aclDataType valueType)
 {
-    if (valueType == ACL_INT8)                    return 1;
-    if (valueType == ACL_FLOAT16 || valueType == ACL_BF16) return 2;
-    if (valueType == ACL_FLOAT || valueType == ACL_INT32)  return 4;
+    if (valueType == ACL_INT8) {
+        return 1;
+    }
+    if (valueType == ACL_FLOAT16 || valueType == ACL_BF16) {
+        return 2;
+    }
+    if (valueType == ACL_FLOAT || valueType == ACL_INT32) {
+        return 4;
+    }
+    if (valueType == ACL_COMPLEX64) {
+        return 8; // Reg 路径按 uint64_t bit-copy
+    }
     return 0;
 }
 
 /// 将 ACL 数据类型映射为 kernel 内部值类型编码（调用方需先通过 Validate 校验，此函数不含非法值）
 static inline int32_t Sparse2DenseValTypeFromAcl(aclDataType valueType)
 {
-    if (valueType == ACL_FLOAT16)      return SPARSE2DENSE_VAL_F16;
-    if (valueType == ACL_BF16)         return SPARSE2DENSE_VAL_BF16;
-    if (valueType == ACL_INT32)        return SPARSE2DENSE_VAL_I32;
-    if (valueType == ACL_INT8)         return SPARSE2DENSE_VAL_I8;
+    if (valueType == ACL_FLOAT16) {
+        return SPARSE2DENSE_VAL_F16;
+    }
+    if (valueType == ACL_BF16) {
+        return SPARSE2DENSE_VAL_BF16;
+    }
+    if (valueType == ACL_INT32) {
+        return SPARSE2DENSE_VAL_I32;
+    }
+    if (valueType == ACL_INT8) {
+        return SPARSE2DENSE_VAL_I8;
+    }
+    if (valueType == ACL_COMPLEX64) {
+        return SPARSE2DENSE_VAL_COMPLEX64;
+    }
     return SPARSE2DENSE_VAL_F32;
 }
 

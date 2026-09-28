@@ -30,6 +30,13 @@
 #include <acl/acl.h>
 #include "cann_ops_sparse.h"
 
+// Installed CANN headers may only expose ACL_SPARSE_SPGEMM_ALG_DEFAULT as an
+// enum enumerator (not a macro). #ifndef is required because #defined(enum)
+// is always false.
+#ifndef ACL_SPARSE_SPGEMM_DEFAULT
+#define ACL_SPARSE_SPGEMM_DEFAULT ACL_SPARSE_SPGEMM_ALG_DEFAULT
+#endif
+
 // 描述符签名常量，用于在 Destroy/Get/Set/Execute 前识别不透明句柄的描述符类型，
 // 并拒绝错误类型的句柄。
 enum DescrSignature : uint32_t {

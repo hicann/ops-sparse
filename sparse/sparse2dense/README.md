@@ -19,10 +19,11 @@ $$
 主要特性：
 - **纯数据搬运**：kernel 仅执行 `B[idx] = A.val[p]` 的 scatter 写操作，无任何算术运算、无类型转换，输入输出同 dtype，故**零精度损失**（bit-exact）
 - **三格式支持**：CSR、CSC、COO 三种稀疏格式，通过描述符 `format` 字段自动分流
-- **多核并行**：CSR/CSC 按行/列切分到多个 AI Core，COO 按 nnz grid-stride 切分；SIMT 线程并行 scatter
-- **全 dtype 输出同型**：直接以原始 dtype 读写，不做 float 中转
+- **Reg 优先（asc-devkit）**：arch35 使用 `AscendC::Reg::Scatter` / `Duplicate` 在 UB 条带内离散写回再 `DataCopyPad`；禁止与 SIMT 混编
+- **多核并行**：按输出布局主轴（ROW→行 / COL→列）切分 AI Core；次轴按 `tileLen` 切 UB 条带
+- **全 dtype 输出同型**：直接以原始 dtype 读写，不做 float 中转；含 COMPLEX64（按 uint64 bit-copy）
 - **支持异步执行**：两个 API 均异步返回，同步由调用方通过 stream 负责
-- **零 workspace**：scatter 写无需临时缓冲，`bufferSize` 恒返回 0
+- **零 workspace**：`bufferSize` 恒返回 0
 - **支持行/列主序输出**：通过 `aclsparseOrder_t` 指定，支持任意 leading dimension（ld）
 
 ## 接口原型
@@ -96,8 +97,9 @@ arch35 实现支持以下 value 类型，且 `matA` 与 `matB` 的 value 类型�
 | bfloat16 | `ACL_BF16` | 2B |
 | int32 | `ACL_INT32` | 4B |
 | int8 | `ACL_INT8` | 1B |
+| complex64 | `ACL_COMPLEX64` | 8B（Reg 路径按 `uint64_t` bit-copy） |
 
-不支持 float64 和任何复数类型；传入这些类型返回 `ACL_SPARSE_STATUS_NOT_SUPPORTED`。
+不支持 float64；传入返回 `ACL_SPARSE_STATUS_NOT_SUPPORTED`。
 
 ## 数值、布局与边界语义
 
@@ -106,7 +108,7 @@ arch35 实现支持以下 value 类型，且 `matA` 与 `matB` 的 value 类型�
 - leading dimension (ld) 可大于最小值（即允许 stride padding），用于满足对齐需求。
 - matA 和 matB 的 value 类型必须一致，不支持跨类型转换。kernel 以原始 dtype 读写，
   保证 bit-exact 无精度损失。
-- matB 的 Device 内存由算子内部通过 `aclrtMemset` 清零，调用方无需预先清零。
+- matB 的 Device 内存由算子内部清零（热路径为 SIMT uint64 grid-stride；`nnz=0`/空矩阵走 `aclrtMemsetAsync`），调用方无需预先清零。
 - NaN（包括其 payload）、`+Inf`、`-Inf`、`+0`、`-0` 和普通有限非零值均按位搬运，
   不执行数值计算或类型转换。
 - 支持零维矩阵、全零矩阵和全非零矩阵。`nnz=0` 时仅执行清零后直接返回，不 launch kernel。
@@ -125,7 +127,7 @@ arch35 实现支持以下 value 类型，且 `matA` 与 `matB` 的 value 类型�
 |--------|------|
 | `ACL_SPARSE_STATUS_SUCCESS` | 成功 |
 | `ACL_SPARSE_STATUS_HANDLE_IS_NULLPTR` | handle 为 NULL |
-| `ACL_SPARSE_STATUS_INVALID_VALUE` | matA/matB 为 NULL；bufferSize 为 NULL；stream 未设置；维度不匹配；matB.values 为 NULL；nnz>0 但 idxs/values 为 NULL |
+| `ACL_SPARSE_STATUS_INVALID_VALUE` | matA/matB 为 NULL；bufferSize 为 NULL；stream 未设置；维度不匹配；**execute** 时 matB.values 为 NULL；nnz>0 但 idxs/values 为 NULL |
 | `ACL_SPARSE_STATUS_NOT_SUPPORTED` | 格式非 CSR/CSC/COO；索引类型非 I32；值类型不在支持列表；matA/matB 值类型不一致；alg 非 DEFAULT；m/n 超过 INT32_MAX |
 
 ## 调用示例
@@ -300,7 +302,7 @@ Dense matrix (4 x 4, row-major):
 | 非法 ld | row-major ld < cols |
 | 非法格式 | format 枚举越界 |
 | 非法算法 | alg 枚举越界 |
-| 不支持 dtype | FP64 / COMPLEX64 |
+| 不支持 dtype | FP64 |
 | nnz>0 空指针 | ptrs / idxs 为 NULL |
 | INT32 越界 | m > INT32_MAX |
 | 不支持索引类型 | I64 |
@@ -310,3 +312,20 @@ Dense matrix (4 x 4, row-major):
 | 芯片 | 支持情况 |
 |------|----------|
 | Ascend 950PR / Ascend 950DT | 支持（arch35 / dav-3510） |
+
+## PyTorch / Torch Extension
+
+PyTorch 适配走仓内统一的 `torch_extension` 框架（与 SpGEMM 相同），注册标准
+`aten::_to_dense`，用户调用 `Tensor.to_dense()`。源码目录：
+
+```text
+sparse/sparse2dense/torch_extension/
+├── __init__.py
+├── sparse2dense.py
+└── csrc/sparse2dense.cpp
+```
+
+构建、安装与 pytest 命令见
+[`../../test/sparse2dense/python/README.md`](../../test/sparse2dense/python/README.md)、
+[`../../torch_extension/README.md`](../../torch_extension/README.md) 与
+[`../../torch_extension/cann_ops_sparse/docs/zh/sparse2dense.md`](../../torch_extension/cann_ops_sparse/docs/zh/sparse2dense.md)。
