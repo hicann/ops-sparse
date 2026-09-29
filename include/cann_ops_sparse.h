@@ -348,6 +348,29 @@ aclsparseStatus_t aclsparseGather(
     aclsparseSpVecDescr_t vecX);
 
 /**
+ * @brief Gather 裸指针快路径（跳过 DnVec/SpVec 描述符建销）。
+ *
+ * 与 aclsparseGather 算法/精度完全等价，但调用方直接传入设备指针，避免每次调用
+ * 的描述符创建/销毁开销（用于 Python/ATen 等高频、µs 级小 gather 场景，降低
+ * 端到端 host 开销）。indices 固定 int32，idxBase 仅 ZERO/ONE。
+ *
+ * @param handle   IN, HOST, aclsparse handle。
+ * @param y_ptr    IN, DEVICE, 稠密源向量 Y 的设备指针（只读）。
+ * @param y_len    IN, HOST,  Y 的元素个数。
+ * @param valueType IN, HOST, 值的数据类型（f16/bf16/f32/c64）。
+ * @param idx_ptr  IN, DEVICE, int32 索引向量设备指针（只读）。
+ * @param out_ptr  OUT, DEVICE, 输出 X.values 设备指针（可写，nnz 个元素）。
+ * @param nnz      IN, HOST,  输出元素个数。
+ * @param idxBase  IN, HOST,  索引基（ZERO=0 / ONE=1）。
+ * @return aclsparseStatus_t
+ */
+aclsparseStatus_t aclsparseGatherRaw(
+    aclsparseHandle_t handle,
+    const void *y_ptr, int64_t y_len, aclDataType valueType,
+    const void *idx_ptr, void *out_ptr, int64_t nnz,
+    aclsparseIndexBase_t idxBase);
+
+/**
  * @brief 获取稠密向量描述符的全部字段。
  *
  * @param dnVecDescr IN, HOST, 稠密向量描述符。
