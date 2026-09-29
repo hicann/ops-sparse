@@ -485,17 +485,27 @@ aclsparseStatus_t aclsparseCreateBlockedEll(
         return ACL_SPARSE_STATUS_INVALID_VALUE;
     }
     const int64_t safeEllBlockSize = ellBlockSize > 0 ? ellBlockSize : 1;
-    if (ellCols < 0 || ellCols > cols ||
+    // Blocked-ELL uses a ceil-padded block grid: the trailing block row and
+    // column cover fewer than ellBlockSize logical elements (their payload
+    // slots still exist and hold dtype-positive zeros). ellCols is therefore
+    // allowed up to the padded column extent. Operators that only support
+    // fully divisible grids re-validate in their own host layer.
+    const int64_t paddedCols =
+        (cols + safeEllBlockSize - 1) / safeEllBlockSize * safeEllBlockSize;
+    const int64_t paddedRows =
+        (rows + safeEllBlockSize - 1) / safeEllBlockSize * safeEllBlockSize;
+    if (ellCols < 0 || ellCols > paddedCols ||
         (indexType != ACL_SPARSE_INDEX_32I && indexType != ACL_SPARSE_INDEX_64I) ||
         (indexBase != ACL_SPARSE_INDEX_BASE_ZERO && indexBase != ACL_SPARSE_INDEX_BASE_ONE) ||
-        rows % safeEllBlockSize != 0 || cols % safeEllBlockSize != 0 ||
         ellCols % safeEllBlockSize != 0 ||
-        (rows != 0 && ellCols > std::numeric_limits<int64_t>::max() / rows)) {
+        (paddedRows != 0 &&
+         ellCols > std::numeric_limits<int64_t>::max() / paddedRows)) {
         return ACL_SPARSE_STATUS_INVALID_VALUE;
     }
-    const int64_t valueCount = rows * ellCols;
+    const int64_t valueCount = paddedRows * ellCols;
     const int64_t indexCount =
-        (rows / safeEllBlockSize) * (ellCols / safeEllBlockSize);
+        ((rows + safeEllBlockSize - 1) / safeEllBlockSize) *
+        (ellCols / safeEllBlockSize);
     if ((indexCount > 0 && ellColInd == nullptr) ||
         (valueCount > 0 && ellValue == nullptr)) {
         return ACL_SPARSE_STATUS_INVALID_VALUE;
@@ -677,6 +687,11 @@ aclsparseStatus_t aclsparseCreateDnMat(aclsparseDnMatDescr_t *dnMatDescr,
     }
     // Allow zero dims (SparseToDense / DenseToSparse empty matrix paths).
     if (rows < 0 || cols < 0) {
+        return ACL_SPARSE_STATUS_INVALID_VALUE;
+    }
+    // 稀疏侧 offsets/indices 走 I32：超出 INT32_MAX 的维度在创建期拒绝。
+    if (rows > static_cast<int64_t>(INT32_MAX) ||
+        cols > static_cast<int64_t>(INT32_MAX)) {
         return ACL_SPARSE_STATUS_INVALID_VALUE;
     }
     if (ld <= 0) {

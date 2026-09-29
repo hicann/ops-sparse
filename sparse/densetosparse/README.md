@@ -1,8 +1,18 @@
 # DenseToSparse 算子
 
-> 6.1 文档补全阶段产出。本文面向 `ops-sparse` 接口使用者。
+## 产品支持情况
 
-## 功能描述
+| 产品 | 是否支持 |
+| :--- | :---: |
+| <term>Ascend 950PR / Ascend 950DT</term> | √（arch35） |
+| <term>Atlas A3 训练系列产品 / Atlas A3 推理系列产品</term> | √（arch22） |
+| <term>Atlas A2 训练系列产品 / Atlas A2 推理系列产品</term> | √（arch22） |
+| <term>Atlas 200I/500 A2 推理产品</term> | × |
+| <term>Atlas 推理系列产品</term> | × |
+| <term>Atlas 训练系列产品</term> | × |
+
+## 功能说明
+
 
 `DenseToSparse` 将二维稠密矩阵转换为 CSR、CSC、COO 或 Blocked-ELL
 （下文简称 BELL）稀疏矩阵。接口语义对标 cuSPARSE Generic API 的
@@ -11,78 +21,28 @@
 阶段调用，以便从 Dense 自动生成目标标准描述符中的结构信息。
 
 对于 CSR 和 CSC，Analysis 统计非零元素、写入 offsets 并更新 `matB` 的 `nnz`；
-COO Analysis 通过 `matB.nnz` 发布实际非零元素数；Convert 再消费当前标准描述符
-中的这些数据并写入索引和值。BELL 的结构和 storage 容量由调用者预置，Convert
-只提取固定 pattern 覆盖的稠密块，不发现或扩充结构。
+COO Analysis 通过 `matB.nnz` 发布实际非零元素数；Convert 信任 Analysis 发布的
+结构（要求与 Analysis 使用同一块 workspace），只写入索引和值。BELL 的结构和
+storage 容量由调用者预置，Convert 只提取固定 pattern 覆盖的稠密块，不发现或
+扩充结构；BELL 使用向上取整的块网格，尾块的越界逻辑元素输出 dtype 正零，
+values 载荷按填充网格（`ceil(rows/b)*b x ellCols`）分配，空槽的块列索引为
+`-1`（小于 index base 即视为空）。
 
-## 接口原型
+接口语义对标 cuSPARSE Generic API 的
+`cusparseDenseToSparse_bufferSize`、`cusparseDenseToSparse_analysis` 和
+`cusparseDenseToSparse_convert`，推荐按查询 workspace、分析结构、执行转换
+三个阶段调用。
 
-```cpp
-aclsparseStatus_t aclsparseDenseToSparseGetBufferSize(
-    aclsparseHandle_t handle,
-    aclsparseConstDnMatDescr_t matA,
-    aclsparseSpMatDescr_t matB,
-    aclsparseDenseToSparseAlg_t alg,
-    size_t *bufferSize);
+### 接口与职责
 
-aclsparseStatus_t aclsparseDenseToSparseAnalysis(
-    aclsparseHandle_t handle,
-    aclsparseConstDnMatDescr_t matA,
-    aclsparseSpMatDescr_t matB,
-    aclsparseDenseToSparseAlg_t alg,
-    void *buffer);
-
-aclsparseStatus_t aclsparseDenseToSparseConvert(
-    aclsparseHandle_t handle,
-    aclsparseConstDnMatDescr_t matA,
-    aclsparseSpMatDescr_t matB,
-    aclsparseDenseToSparseAlg_t alg,
-    void *buffer);
-```
-
-`matA` 是只读稠密矩阵描述符，`matB` 是可变稀疏矩阵描述符。既可使用
-`aclsparseCreateConstDnMat` 创建 `matA`，也可将
-`aclsparseCreateDnMat` 创建的非 const 描述符直接传入；接口不会修改 `matA`
-或其数据。
-
-## 参数说明
-
-三个接口的公共参数如下。
-
-| 参数 | 内存位置 | 方向 | 类型 | 说明 |
-|------|----------|------|------|------|
-| `handle` | Host | 输入 | `aclsparseHandle_t` | `ops-sparse` 上下文句柄，携带执行 stream，不可为空 |
-| `matA` | Host 描述符；数据在 Device | 输入 | `aclsparseConstDnMatDescr_t` | 稠密矩阵 A，包含行数、列数、`ld`、布局、数据类型和数据指针 |
-| `matB` | Host 描述符；数组在 Device | 输入/输出 | `aclsparseSpMatDescr_t` | 可变稀疏矩阵 B；Analysis 可更新 CSR/CSC/COO 的 `nnz`，Convert 写入数组 |
-| `alg` | Host | 输入 | `aclsparseDenseToSparseAlg_t` | 仅支持 `ACL_SPARSE_DENSETOSPARSE_ALG_DEFAULT` |
-
-各阶段的专有参数如下。
-
-| 接口 | 参数 | 内存位置 | 方向 | 说明 |
-|------|------|----------|------|------|
-| `GetBufferSize` | `bufferSize` | Host | 输出 | Analysis/Convert 所需 Device workspace 字节数，不可为空；该接口是纯查询，不记录阶段状态 |
-| `Analysis` | `buffer` | Device | 输入/输出 | 不少于 `bufferSize` 字节的 workspace；`bufferSize == 0` 时可为空 |
-| `Convert` | `buffer` | Device | 输入/输出 | 不少于 `bufferSize` 字节的 workspace；可与 Analysis 使用不同地址；`bufferSize == 0` 时可为空 |
-
-## 推荐调用流程
-
-1. 创建 handle、稠密矩阵描述符和目标格式的可变稀疏矩阵描述符。
-2. 调用 `aclsparseDenseToSparseGetBufferSize`，按返回大小分配 Device workspace。
-3. 调用 `aclsparseDenseToSparseAnalysis`。
-4. 对 CSR、CSC、COO，使用 `aclsparseSpMatGetSize` 查询实际 `nnz`，分配输出
-   indices/values，并调用对应的 `aclsparseCsrSetPointers`、
-   `aclsparseCscSetPointers` 或 `aclsparseCooSetPointers` 绑定指针。BELL 不执行
-   此步骤，其固定数组在创建描述符前就应分配完成。
-5. 调用 `aclsparseDenseToSparseConvert`，然后同步 handle 绑定的 stream，再读取结果。
-
-这套顺序用于从 Dense 自动得到 `nnz` 和 CSR/CSC offsets，并据此分配 payload
-数组。`GetBufferSize` 不修改描述符，也不是 Analysis 的状态前置条件。Convert
-不检查私有阶段标志或 Analysis 时的指针、shape、`ld`、order 快照；如果调用者已
-提供与当前 Dense 一致的完整标准描述符数据和足量存储，Convert 可直接消费这些
-当前数据。无论数据由 Analysis 生成还是由调用者提供，指针、容量和生命周期均由
-调用者保证。
+| 接口名 | 功能简述 |
+| --- | --- |
+| `aclsparseDenseToSparseGetBufferSize` | 查询 Analysis/Convert 所需 Device workspace 字节数（纯查询，无阶段副作用） |
+| `aclsparseDenseToSparseAnalysis` | 分析结构：CSR/CSC 统计非零并写 offsets、更新 `nnz`；COO 发布 `nnz`；BELL 校验几何与 pattern |
+| `aclsparseDenseToSparseConvert` | 执行转换：CSR/CSC/COO 写入 indices/values（信任 Analysis 前缀）；BELL 按 pattern 提取块值 |
 
 ## 稀疏格式语义
+
 
 | 格式 | Analysis 前必须提供 | Analysis 后绑定 | 输出语义 |
 |------|---------------------|----------------|----------|
@@ -110,6 +70,7 @@ COO 的 row/column index 共用描述符指定的 index 类型。所有格式均
 `ACL_SPARSE_INDEX_BASE_ZERO` 和 `ACL_SPARSE_INDEX_BASE_ONE`。
 
 ## Blocked-ELL（BELL）
+
 
 BELL 转换使用调用者在调用前确定的固定 pattern，而不是从稠密矩阵发现结构。
 `ellColInd` 中的每一项表示一个 **block column index**，并按描述符的
@@ -233,25 +194,27 @@ BELL 的 index 类型支持 `ACL_SPARSE_INDEX_32I` 和
 
 ## 支持数据类型
 
-arch35 实现支持以下 value 类型，且 `matA` 与 `matB` 的 value 类型必须相同。
 
-| 数据类型 | 枚举 |
-|----------|------|
-| int8 | `ACL_INT8` |
-| float16 | `ACL_FLOAT16` |
-| bfloat16 | `ACL_BF16` |
-| float32 | `ACL_FLOAT` |
+value 类型要求 `matA` 与 `matB` 相同；各架构支持范围如下。
 
-不支持 float64 和任何复数类型；传入这些类型返回
+| 数据类型 | 枚举 | arch22 (A2/A3) | arch35 |
+|----------|------|----------------|---------|
+| int8 | `ACL_INT8` | 支持 | 支持 |
+| float16 | `ACL_FLOAT16` | 支持 | 支持 |
+| bfloat16 | `ACL_BF16` | 支持 | 支持 |
+| float32 | `ACL_FLOAT` | 支持 | 支持 |
+| complex64 | `ACL_COMPLEX64` | 支持 | 不支持 |
+
+不支持 float64；arch35 不支持任何复数类型。传入不支持类型返回
 `ACL_SPARSE_STATUS_NOT_SUPPORTED`。
 
-索引和 offset 可使用 `ACL_SPARSE_INDEX_32I` 或
-`ACL_SPARSE_INDEX_64I`。对于 CSR/CSC 的 DenseToSparse 执行，二者必须相同；
-混合的 I32/I64 和 I64/I32 组合虽然可用于创建标准 descriptor，但不属于该算子的
-支持范围。矩阵行数、列数和 CSR/CSC/COO 的实际 `nnz` 范围为 `[0, INT32_MAX]`；
-选择 I32 时，所有输出 offset/index 还必须能由 I32 表示。
+**Device 索引固定为 I32（`ACL_SPARSE_INDEX_32I`）**：I64 描述符在三阶段接口上
+返回 `ACL_SPARSE_STATUS_NOT_SUPPORTED`（描述符创建本身可能成功，属公开创建
+能力与算子执行能力之差）。矩阵行数、列数和 CSR/CSC/COO 的实际 `nnz` 范围为
+`[0, INT32_MAX]`，所有输出 offset/index 必须能由 I32 表示。
 
 ## 数值、布局与边界语义
+
 
 - 同时支持 `ACL_SPARSE_ORDER_ROW`（row-major）和
   `ACL_SPARSE_ORDER_COL`（column-major）。row-major 要求 `ld >= n`，
@@ -265,22 +228,62 @@ arch35 实现支持以下 value 类型，且 `matA` 与 `matB` 的 value 类型�
 - CSR/CSC/COO 的实际 `nnz` 不超过 `m * n`。维度、`ld`、workspace 或地址计算
   溢出时返回参数错误。
 
-## Workspace 与生命周期
+## 接口说明
 
-- workspace 是每次调用使用的临时 scratch，不保存跨阶段身份。Analysis 和 Convert
-  可以使用不同的足量 Device 地址；接口没有 workspace 长度参数，无法代替调用者
-  校验实际 allocation 大小。
+### 公共参数
+
+
+三个接口的公共参数如下。
+
+| 参数 | 内存位置 | 方向 | 类型 | 说明 |
+|------|----------|------|------|------|
+| `handle` | Host | 输入 | `aclsparseHandle_t` | `ops-sparse` 上下文句柄，携带执行 stream，不可为空 |
+| `matA` | Host 描述符；数据在 Device | 输入 | `aclsparseConstDnMatDescr_t` | 稠密矩阵 A，包含行数、列数、`ld`、布局、数据类型和数据指针 |
+| `matB` | Host 描述符；数组在 Device | 输入/输出 | `aclsparseSpMatDescr_t` | 可变稀疏矩阵 B；Analysis 可更新 CSR/CSC/COO 的 `nnz`，Convert 写入数组 |
+| `alg` | Host | 输入 | `aclsparseDenseToSparseAlg_t` | 仅支持 `ACL_SPARSE_DENSETOSPARSE_ALG_DEFAULT` |
+
+各阶段的专有参数如下。
+
+| 接口 | 参数 | 内存位置 | 方向 | 说明 |
+|------|------|----------|------|------|
+| `GetBufferSize` | `bufferSize` | Host | 输出 | Analysis/Convert 所需 Device workspace 字节数，不可为空；该接口是纯查询，不记录阶段状态 |
+| `Analysis` | `buffer` | Device | 输入/输出 | 不少于 `bufferSize` 字节的 workspace；`bufferSize == 0` 时可为空 |
+| `Convert` | `buffer` | Device | 输入/输出 | 不少于 `bufferSize` 字节的 workspace；**必须与 Analysis 使用同一块 workspace**（Convert 信任 Analysis 写入该 workspace 的结构前缀，跨缓冲或未执行 Analysis 的调用返回参数错误）；`bufferSize == 0` 时可为空 |
+
+### 调用流程
+
+
+1. 创建 handle、稠密矩阵描述符和目标格式的可变稀疏矩阵描述符。
+2. 调用 `aclsparseDenseToSparseGetBufferSize`，按返回大小分配 Device workspace。
+3. 调用 `aclsparseDenseToSparseAnalysis`。
+4. 对 CSR、CSC、COO，使用 `aclsparseSpMatGetSize` 查询实际 `nnz`，分配输出
+   indices/values，并调用对应的 `aclsparseCsrSetPointers`、
+   `aclsparseCscSetPointers` 或 `aclsparseCooSetPointers` 绑定指针。BELL 不执行
+   此步骤，其固定数组在创建描述符前就应分配完成。
+5. 调用 `aclsparseDenseToSparseConvert`，然后同步 handle 绑定的 stream，再读取结果。
+
+这套顺序用于从 Dense 自动得到 `nnz` 和 CSR/CSC offsets，并据此分配 payload
+数组。`GetBufferSize` 不修改描述符，也不是 Analysis 的状态前置条件。Convert
+信任 Analysis 写入 workspace 的 status/level0 结构前缀（同一块 workspace 在
+描述符上登记，跨缓冲或未执行 Analysis 的 Convert 调用返回参数错误），仅写
+payload 不重扫结构；指针、容量和生命周期均由调用者保证。
+
+
+- workspace 仅按 `GetBufferSize` 查询值分配，Analysis 与 Convert 复用同一块
+  workspace（arch22 协议：Analysis 在描述符上登记所用 workspace，Convert 使用
+  不同地址或未先执行 Analysis 时返回 `ACL_SPARSE_STATUS_INVALID_VALUE`，
+  对齐 cuSPARSE DenseToSparse 的 analysis 前置契约）；接口没有 workspace 长度
+  参数，无法代替调用者校验实际 allocation 大小。
 - `bufferSize > 0` 时，传给当前 API 的 workspace 必须非空，并至少保持有效到该次
   stream 工作完成。BELL 以及不需要 scratch 的空输入返回 0，此时 `buffer` 可为空。
 - CSR/CSC/COO 的 Analysis 会在返回前取得实际 `nnz` 并更新 Host 描述符；Convert
   按 handle 的 stream 异步执行，调用者必须在读取或释放输出、workspace、描述符及
   handle 前同步该 stream。
-- Convert 只校验并消费调用时的当前标准描述符字段，不保存或匹配 Analysis 时的
-  Dense values、shape、`ld`、order、offsets 指针等快照。调用者必须保证当前
+- arch22 的 Convert 信任 Analysis 写入同一 workspace 的 status/level0 结构
+  前缀，仅消费当前标准描述符字段写 payload（不重扫结构）；调用者必须保证当前
   描述符数据与当前 Dense 一致，并为其声明的容量提供有效存储。
-- CSR/CSC Convert 将当前 offsets 作为输出位置的权威来源，并在 Device 上校验每个
-  major span 与当前 Dense 的重计数结果及 `matB.nnz` 一致；COO 以当前
-  `matB.nnz` 作为容量和一致性门槛。不一致时 Device 会在写 payload 前退出。
+- CSR/CSC 的输出位置以当前 offsets 为权威来源；COO 以当前 `matB.nnz` 作为
+  容量门槛（arch22 不做 Device 侧重计数校验，结构以 Analysis 前缀为准）。
 - Convert 保持 stream 异步：上述 Device mismatch 不会通过 host 同步回读转换成
   本次 API launch 的同步错误返回。调用者仍须在读取结果或复用、释放资源前同步
   stream。
@@ -289,7 +292,6 @@ arch35 实现支持以下 value 类型，且 `matA` 与 `matB` 的 value 类型�
 - 描述符只借用 Device 指针，不拥有其内存。先同步 stream，再销毁描述符并释放其
   引用的 Device 内存；workspace 和数据指针均由调用者分配、释放。
 
-## 返回值 / 错误码
 
 | 返回值 | 含义 |
 |--------|------|
@@ -304,6 +306,7 @@ arch35 实现支持以下 value 类型，且 `matA` 与 `matB` 的 value 类型�
 处理。
 
 ## 调用示例
+
 
 以下示例将 row-major FP32 稠密矩阵转换为 0-based、I32 CSR。示例特意使用
 `aclsparseCreateDnMat` 创建非 const 描述符，并将其传给只读 `matA` 参数。
@@ -458,8 +461,42 @@ int main()
 具体编译和链接方式请参考
 [编译与运行样例](../../docs/zh/develop/compile_and_run_example.md)。
 
-## 支持芯片
+## 编译与测试
 
-| 芯片 | 支持情况 |
-|------|----------|
-| Ascend 950PR / Ascend 950DT | 支持（arch35 / dav-3510） |
+```bash
+cmake -S . -B build \
+  -DSOC_VERSION=ascend910b3 \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DBUILD_TEST=ON \
+  -DOP_LIST=densetosparse
+cmake --build build --target densetosparse_test densetosparse_perf --parallel
+./build/test/densetosparse/densetosparse_test --gtest_color=no
+```
+
+PyTorch 接口（`Tensor.to_sparse*` 的 NPU 适配）通过 `torch_extension`
+框架提供，构建和加载方式见
+[`../torch_extension/README.md`](../torch_extension/README.md)。
+
+## 目录结构
+
+```text
+sparse/densetosparse/
+├── README.md
+├── arch22/                        # Atlas A2/A3（AIV 向量编程模型）
+│   ├── densetosparse_host.cpp     # 三阶段 Host 编排与校验
+│   ├── densetosparse_count_kernel.cpp   # 计数/扫描链/offsets 收尾 + 启动编排
+│   ├── densetosparse_convert_kernel.cpp # CSR/CSC/COO 载荷提取（面板快路径）
+│   ├── densetosparse_bell_kernel.cpp    # Blocked-ELL 专换（任务环流水）
+│   ├── densetosparse_judge.h      # 共享判定链/位图/几何选择
+│   ├── densetosparse_kernel.h / densetosparse_kernel_shared.h
+│   └── densetosparse_tiling_data.h
+├── arch35/                        # Ascend 950PR
+│   ├── densetosparse_host.cpp
+│   └── densetosparse_kernel.cpp / densetosparse_kernel.h
+└── torch_extension/               # PyTorch 接口注册（JIT 单独编译）
+    ├── __init__.py / dense_to_sparse.py
+    └── csrc/densetosparse.cpp
+```
+
+测试代码位于 `test/densetosparse/`（`arch22/` 为 C++ UT 与 perf 基准，
+`python/` 为 ATen/端到端测试）。
