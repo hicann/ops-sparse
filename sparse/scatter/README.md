@@ -55,11 +55,11 @@ aclsparseStatus_t aclsparseScatter(aclsparseHandle_t handle, aclsparseConstSpVec
 
 #### A2/A3参数说明
  	 
- 	 | 参数名 | 输入/输出 | 参数类型 | 说明 |
- 	 |--------|----------|---------|------|
- 	 | handle | 输入 | aclsparseHandle_t | ops-sparse 库上下文句柄，携带执行 stream，Host 内存 |
- 	 | vecX | 输入 | aclsparseSpVecDescr_t | 输入稀疏向量描述符（由 `aclsparseCreateSpVec` 创建），其 indices/values 为 Device 指针，Host 内存 |
- 	 | vecY | 输入/输出 | aclsparseDnVecDescr_t | 输入/输出稠密向量描述符（由 `aclsparseCreateDnVec` 创建），其 values 为 Device 指针，作为写入目标，Host 内存 |
+| 参数名 | 输入/输出 | 参数类型 | 说明 |
+|--------|----------|---------|------|
+| handle | 输入 | aclsparseHandle_t | ops-sparse 库上下文句柄，携带执行 stream，Host 内存 |
+| vecX | 输入 | aclsparseSpVecDescr_t | 输入稀疏向量描述符（由 `aclsparseCreateSpVec` 创建），其 indices/values 为 Device 指针，Host 内存 |
+| vecY | 输入/输出 | aclsparseDnVecDescr_t | 输入/输出稠密向量描述符（由 `aclsparseCreateDnVec` 创建），其 values 为 Device 指针，作为写入目标，Host 内存 |
 
 #### A5支持数据类型
 
