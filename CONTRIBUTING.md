@@ -56,7 +56,7 @@
 
 **需求接纳：**
 
-若需求被接纳，[SIG 成员](https://gitcode.com/cann/community/blob/master/CANN/sigs/ops-linear-algebra/sig-info.yaml)将为您分配合适的算子分类路径，请将贡献算子提交至 `src/${operator}/` 对应目录。
+若需求被接纳，[SIG 成员](https://gitcode.com/cann/community/blob/master/CANN/sigs/ops-linear-algebra/sig-info.yaml)将为您分配合适的算子分类路径，请将贡献算子提交至 `sparse/${operator}/` 对应目录。
 
 ### 3. PR 提交
 
@@ -85,7 +85,7 @@
 **提交规范：**
 
 - **接口声明**：新增算子需在 `include/cann_ops_sparse.h` 中添加 API 声明。
-- **贡献目录**：按 SIG 成员意见提交至 `src/${operator}/` 目录下，可参考已有算子文件放置规则。
+- **贡献目录**：按 SIG 成员意见提交至 `sparse/${operator}/` 目录下，可参考已有算子文件放置规则。
 - **PR 提交**：通过 `git` 命令提交目标分支 PR，检查 PR 标题是否清晰、PR 描述是否规范（指明更改内容和原因、是否关联对应 Issue）。
 
 > **注意**：如果您希望贡献项目标准算子，其交付件和开发过程比生态算子复杂，包括多架构支持等，具体贡献指导参考 [附录](#附录)。
@@ -146,7 +146,7 @@ Committer 检视通过后，将标注 `/lgtm` 标签。Maintainer 最终审核�
 ### 项目标准算子交付件
 
 ```text
-src/${operator}/                            # 算子源码目录
+sparse/${operator}/                            # 算子源码目录
 └── ${arch_dir}/                            # 面向特定架构的实现（如 arch22、arch35）
     ├── ${operator}_host.cpp                # Host 侧：参数校验、任务下发
     ├── ${operator}_kernel.cpp              # Device 侧：Ascend C 核函数实现
@@ -166,7 +166,7 @@ test/${operator}/                           # 算子测试目录
 >   - `arch22`：Ascend 910B / 910_93（NPU 架构 `dav-2201`）
 >   - `arch35`：Ascend 950（NPU 架构 `dav-3510`）
 >   - `arch20`：Ascend 310P（NPU 架构 `dav-2002`）
-> - 算子源码目录（`src/`）下**无需**提供 `CMakeLists.txt`，由 `src/CMakeLists.txt` 自动收集。
+> - 算子源码目录（`sparse/`）下**无需**提供 `CMakeLists.txt`，由 `sparse/CMakeLists.txt` 自动收集。
 > - 测试目录（`test/`）下**必须**提供 `CMakeLists.txt`，调用 `ops_sparse_add_test()` 注册测试可执行文件。
 > - 目录结构详细说明参考 [目录结构说明](docs/zh/install/dir_structure.md)。
 
@@ -182,9 +182,9 @@ test/${operator}/                           # 算子测试目录
 
 **放置原则**：
 
-1. Host/Kernel 实现放入 `src/${operator}/${arch_dir}/`，不要在算子根目录与多个 `${arch_dir}/` 下同时放置同名入口文件，否则会产生符号冲突。
+1. Host/Kernel 实现放入 `sparse/${operator}/${arch_dir}/`，不要在算子根目录与多个 `${arch_dir}/` 下同时放置同名入口文件，否则会产生符号冲突。
 2. 同一算子在不同芯片上的实现，分别维护在各自的 `${arch_dir}/` 目录（如 910B 的 `arch22/`、950 的 `arch35/`）。
-3. 测试文件放入 `test/${operator}/${arch_dir}/${operator}_test.cpp`，与 `src/${operator}/${arch_dir}/` 一一对应；`CMakeLists.txt` 调用 `ops_sparse_add_test()`，按 `SOC_ARCH_DIRS` 自动选择当前 SOC 的测试源文件，无匹配则跳过。
+3. 测试文件放入 `test/${operator}/${arch_dir}/${operator}_test.cpp`，与 `sparse/${operator}/${arch_dir}/` 一一对应；`CMakeLists.txt` 调用 `ops_sparse_add_test()`，按 `SOC_ARCH_DIRS` 自动选择当前 SOC 的测试源文件，无匹配则跳过。
 
 **测试 CMakeLists 示例**：
 
@@ -195,7 +195,7 @@ ops_sparse_add_test(spmm ${OPS_SPARSE})
 **具体示例**（`spmm`：当前实现面向 Ascend 950，位于 `arch35/`）：
 
 ```text
-src/spmm/
+sparse/spmm/
 └── arch35/
     ├── spmm_host.cpp
     ├── spmm_kernel.cpp
