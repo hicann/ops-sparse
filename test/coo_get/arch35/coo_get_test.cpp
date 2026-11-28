@@ -23,6 +23,7 @@
 
 #include "test_common.h"
 
+#include "raw_enum_api.h"
 #include "../coo_get_param.h"
 #include "coo_get_npu_wrapper.h"
 
@@ -208,4 +209,23 @@ TEST_F(CooGetExceptionTest, ConstCooGetRoundTrip) {
     EXPECT_EQ(v, values_.data());
     EXPECT_EQ(it, ACL_SPARSE_INDEX_32I);
     aclsparseDestroySpMat(descr);
+}
+
+// E7: out-of-range idxBase -> ACL_SPARSE_STATUS_INVALID_VALUE，descr 保持 nullptr
+TEST_F(CooGetExceptionTest, CreateCooInvalidIndexBase) {
+    aclsparseSpMatDescr_t descr = nullptr;
+    EXPECT_EQ(AclsparseCreateCooRawEnums(&descr, 2, 2, 2, rowInd_.data(), colInd_.data(),
+                                         values_.data(), ACL_SPARSE_INDEX_32I, 99, ACL_FLOAT),
+              ACL_SPARSE_STATUS_INVALID_VALUE);
+    EXPECT_EQ(descr, nullptr) << "failed Create should not touch OUT";
+}
+
+// E8: unsupported valueType -> ACL_SPARSE_STATUS_INVALID_VALUE，descr 保持 nullptr
+TEST_F(CooGetExceptionTest, CreateCooInvalidValueType) {
+    aclsparseSpMatDescr_t descr = nullptr;
+    EXPECT_EQ(AclsparseCreateCooRawEnums(&descr, 2, 2, 2, rowInd_.data(), colInd_.data(),
+                                         values_.data(), ACL_SPARSE_INDEX_32I,
+                                         ACL_SPARSE_INDEX_BASE_ZERO, 999),
+              ACL_SPARSE_STATUS_INVALID_VALUE);
+    EXPECT_EQ(descr, nullptr) << "failed Create should not touch OUT";
 }

@@ -29,12 +29,14 @@
  *                                             语义（SE-S01）
  *   - TEST_F (CreateSlicedEllExceptionTest) : OUT 句柄 null（mutable+const）/
  *                                             rows/cols/nnz/sliceNnz/numSlices 负值/
- *                                             非法 sellIdxType（SE-E01~E07），
- *                                             失败后断言 OUT 保持 nullptr 不被污染
+ *                                             非法 sellIdxType / idxBase / valueType
+ *                                             （SE-E01~E09），失败后断言 OUT 保持
+ *                                             nullptr 不被污染
  */
 
 #include "test_common.h"
 #include "spmat_csv_common.h"      // GetCasesFromCsvChecked：带构成校验的 CSV 装载（描述符测试私有共享）
+#include "raw_enum_api.h"
 
 #include "create_sliced_ell_param.h"
 #include "create_sliced_ell_npu_wrapper.h"
@@ -158,8 +160,8 @@ TEST_F(CreateSlicedEllSemanticsTest, NullPointersDelayedBinding)
 
 // ============================================================================
 // Exception test fixture: CreateSlicedEllExceptionTest
-// 失败路径直调 API（不经 wrapper）；每条锁定一个校验分支，断言错误码返回且
-// OUT 保持 nullptr 不被污染。
+// 失败路径直调 API（非法枚举值经 raw_enum_api 的 C 包装传入）；每条锁定一个
+// 校验分支，断言错误码返回且 OUT 保持 nullptr 不被污染。
 // ============================================================================
 class CreateSlicedEllExceptionTest : public testing::Test {
 public:
@@ -253,6 +255,28 @@ TEST_F(CreateSlicedEllExceptionTest, NegativeNumSlices)
     EXPECT_EQ(aclsparseCreateSlicedEll(&descr, 4, 4, 4, 2, -1, hostIdx_.data(),
                                        hostIdx_.data(), hostVal_.data(), ACL_SPARSE_INDEX_32I,
                                        ACL_SPARSE_INDEX_BASE_ZERO, ACL_FLOAT),
+              ACL_SPARSE_STATUS_INVALID_VALUE);
+    EXPECT_EQ(descr, nullptr) << "failed Create should not touch OUT";
+}
+
+// SE-E08: idxBase=99 -> INVALID_VALUE，OUT 保持 nullptr
+TEST_F(CreateSlicedEllExceptionTest, InvalidIndexBase)
+{
+    aclsparseSpMatDescr_t descr = nullptr;
+    EXPECT_EQ(AclsparseCreateSlicedEllRawEnums(&descr, 4, 4, 4, 2, 2, hostIdx_.data(),
+                                               hostIdx_.data(), hostVal_.data(), ACL_SPARSE_INDEX_32I,
+                                               99, ACL_FLOAT),
+              ACL_SPARSE_STATUS_INVALID_VALUE);
+    EXPECT_EQ(descr, nullptr) << "failed Create should not touch OUT";
+}
+
+// SE-E09: valueType=999 -> INVALID_VALUE，OUT 保持 nullptr
+TEST_F(CreateSlicedEllExceptionTest, InvalidValueType)
+{
+    aclsparseSpMatDescr_t descr = nullptr;
+    EXPECT_EQ(AclsparseCreateSlicedEllRawEnums(&descr, 4, 4, 4, 2, 2, hostIdx_.data(),
+                                               hostIdx_.data(), hostVal_.data(), ACL_SPARSE_INDEX_32I,
+                                               ACL_SPARSE_INDEX_BASE_ZERO, 999),
               ACL_SPARSE_STATUS_INVALID_VALUE);
     EXPECT_EQ(descr, nullptr) << "failed Create should not touch OUT";
 }

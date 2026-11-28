@@ -55,6 +55,9 @@ aclsparseStatus_t aclsparseCreateCsc(aclsparseSpMatDescr_t *spMatDescr, int64_t 
 
 - rows >= 0，cols >= 0，nnz >= 0，否则返回 `ACL_SPARSE_STATUS_INVALID_VALUE`
 - spMatDescr（输出句柄）不可为 nullptr，否则返回 `ACL_SPARSE_STATUS_INVALID_VALUE`
+- idxBase 仅支持 `ACL_SPARSE_INDEX_BASE_ZERO` / `ACL_SPARSE_INDEX_BASE_ONE`，否则返回 `ACL_SPARSE_STATUS_INVALID_VALUE`
+- valueType 必须在支持的数据类型白名单内（FLOAT、FLOAT16、DOUBLE、INT8/16/32/64、UINT8/16/32/64、BF16、FLOAT8_E4M3FN、FLOAT8_E5M2、FLOAT4_E2M1、COMPLEX64、COMPLEX128），否则返回 `ACL_SPARSE_STATUS_INVALID_VALUE`
+- idxBase 或 valueType 校验失败时，`*spMatDescr` 保持原值，不会被改写为半成品句柄
 - cscColOffsetsType 与 cscRowIndType 为**两个独立的索引类型**，各自支持 `ACL_SPARSE_INDEX_32I` 与 `ACL_SPARSE_INDEX_64I`（四种组合均接受），非法索引类型返回 `ACL_SPARSE_STATUS_INVALID_VALUE`
 - cscColOffsets / cscRowInd / cscValues 允许为 nullptr（延迟绑定语义），可在使用前通过 `aclsparseCscSetPointers` 重新绑定
 - cscColOffsets / cscRowInd / cscValues 传入非空时，须分别与 cscColOffsetsType / cscRowIndType / valueType 所指定数据类型的大小对齐（如 `ACL_SPARSE_INDEX_32I` / `ACL_FLOAT` 为 4 字节对齐、`ACL_SPARSE_INDEX_64I` 为 8 字节对齐、`ACL_FLOAT16` 为 2 字节对齐）。该要求面向后续消费该描述符的计算接口；本算子的访问器接口仅存取指针本身，不解引用设备数据
@@ -98,7 +101,7 @@ aclsparseStatus_t aclsparseCreateConstCsc(aclsparseConstSpMatDescr_t *spMatDescr
 
 #### 约束说明
 
-- 约束同 aclsparseCreateCsc（rows / cols / nnz 非负，spMatDescr 非 nullptr，索引类型合法）
+- 约束同 aclsparseCreateCsc（rows / cols / nnz 非负，spMatDescr 非 nullptr，索引类型合法，idxBase 仅 0/1，valueType 在白名单内；校验失败时 `*spMatDescr` 保持原值）
 - 构造出的描述符为 const 变体，只能传给接收 const 形参的接口（如 `aclsparseConstCscGet`）；销毁统一用 `aclsparseDestroySpMat`
 - 索引类型支持与 aclsparseCreateCsc 一致（`ACL_SPARSE_INDEX_32I` 与 `ACL_SPARSE_INDEX_64I` 及其四种组合均接受）
 - 其余约束与 aclsparseCreateCsc 一致

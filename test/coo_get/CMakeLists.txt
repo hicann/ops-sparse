@@ -10,3 +10,9 @@
 
 # aclsparseCooGet GTest tests (arch35 / ascend950)
 ops_sparse_add_gtest_tests(coo_get ${OPS_SPARSE} WARN_ON_MISSING_SRC)
+if(TARGET coo_get_test)
+    target_include_directories(coo_get_test PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/../spmat_descr_common)
+    target_sources(coo_get_test PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/../spmat_descr_common/raw_enum_api.c)
+endif()

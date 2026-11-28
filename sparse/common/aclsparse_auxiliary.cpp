@@ -262,6 +262,9 @@ aclsparseStatus_t aclsparseCreateCsc(aclsparseSpMatDescr_t *spMatDescr, int64_t 
     if (cscRowIndType != ACL_SPARSE_INDEX_32I && cscRowIndType != ACL_SPARSE_INDEX_64I) {
         return ACL_SPARSE_STATUS_INVALID_VALUE;
     }
+    if (!IsValidSparseIndexBase(idxBase) || !IsValidSparseValueType(valueType)) {
+        return ACL_SPARSE_STATUS_INVALID_VALUE;
+    }
     auto *inner = new (std::nothrow) aclsparseSpMatDescr();
     if (inner == nullptr) {
         return ACL_SPARSE_STATUS_ALLOC_FAILED;

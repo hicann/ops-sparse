@@ -9,6 +9,9 @@
 # ----------------------------------------------------------------------------------------------------------
 
 if(BUILD_TEST)
+    # The raw-enum ABI tests use a C translation unit to pass out-of-range enum
+    # values through the public C API without C++ enum-cast undefined behavior.
+    enable_language(C)
     # 初始化 skip 清单（CMake 配置阶段由 test.cmake 中的函数写入被跳过的算子）
     file(WRITE ${CMAKE_BINARY_DIR}/test/skipped_tests.list "")
 

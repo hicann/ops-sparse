@@ -648,9 +648,14 @@ aclsparseStatus_t aclsparseBsrSetStridedBatch(
  * @param cscValues IN, DEVICE, 指向非零元素值数组的指针。
  * @param cscColOffsetsType IN, HOST, 列偏移数组的数据类型。
  * @param cscRowIndType IN, HOST, 行索引数组的数据类型。
- * @param idxBase IN, HOST, 索引的基础值，通常为0或1。
- * @param valueType IN, HOST, 非零元素值的数据类型。
+ * @param idxBase IN, HOST, 仅支持 ACL_SPARSE_INDEX_BASE_ZERO /
+ *        ACL_SPARSE_INDEX_BASE_ONE。
+ * @param valueType IN, HOST, 须在支持的白名单内（FLOAT、FLOAT16、DOUBLE、
+ *        INT8/16/32/64、UINT8/16/32/64、BF16、FLOAT8_E4M3FN、FLOAT8_E5M2、
+ *        FLOAT4_E2M1、COMPLEX64、COMPLEX128）。
  * @return aclsparseStatus_t 返回执行状态，成功则为ACL_SPARSE_STATUS_SUCCESS。
+ *         索引类型、idxBase 或 valueType 非法时返回
+ *         ACL_SPARSE_STATUS_INVALID_VALUE，且 *spMatDescr 保持原值。
  */
 aclsparseStatus_t aclsparseCreateCsc(aclsparseSpMatDescr_t* spMatDescr, int64_t rows, int64_t cols, int64_t nnz,
                                      void* cscColOffsets, void* cscRowInd, void* cscValues,
@@ -660,6 +665,8 @@ aclsparseStatus_t aclsparseCreateCsc(aclsparseSpMatDescr_t* spMatDescr, int64_t 
 /**
  * @brief 创建只读(const)CSC 稀疏矩阵描述符。
  * @note 可创建只读 CSC 描述符，作为 SparseToDense 的 CSC 输入。
+ *       约束同 aclsparseCreateCsc（含 idxBase/valueType 校验；失败时
+ *       *spMatDescr 保持原值）。
  *       SpMV 当前仅支持 CSR 格式，传入 CSC 描述符将返回 ACL_SPARSE_STATUS_NOT_SUPPORTED；
  *       SpMM 当前仅支持 CSR 格式，传入 CSC 描述符将返回 ACL_SPARSE_STATUS_MATRIX_TYPE_NOT_SUPPORTED。
  */
@@ -2723,6 +2730,13 @@ aclsparseStatus_t aclsparseSpMatGetAttribute(aclsparseConstSpMatDescr_t spMatDes
  *        nullptr（Create 期延迟绑定，使用期校验）。
  * @param cooIdxType IN, HOST, 索引类型，仅支持 ACL_SPARSE_INDEX_32I /
  *        ACL_SPARSE_INDEX_64I。
+ * @param idxBase IN, HOST, 仅支持 ACL_SPARSE_INDEX_BASE_ZERO /
+ *        ACL_SPARSE_INDEX_BASE_ONE。
+ * @param valueType IN, HOST, 须在支持的白名单内（FLOAT、FLOAT16、DOUBLE、
+ *        INT8/16/32/64、UINT8/16/32/64、BF16、FLOAT8_E4M3FN、FLOAT8_E5M2、
+ *        FLOAT4_E2M1、COMPLEX64、COMPLEX128）。
+ * @note idxBase 或 valueType 非法时返回 ACL_SPARSE_STATUS_INVALID_VALUE，
+ *       且 *spMatDescr 保持原值，不会被改写。
  * @return aclsparseStatus_t 参数非法返回 ACL_SPARSE_STATUS_INVALID_VALUE。
  */
 aclsparseStatus_t aclsparseCreateCoo(aclsparseSpMatDescr_t* spMatDescr, int64_t rows, int64_t cols, int64_t nnz,
@@ -2820,6 +2834,13 @@ aclsparseStatus_t aclsparseConstCsrGet(aclsparseConstSpMatDescr_t spMatDescr, in
  *        nullptr（Create 期延迟绑定，使用期校验——与 CreateCoo 同款口径）。
  * @param sellIdxType IN, HOST, 索引类型，仅支持 ACL_SPARSE_INDEX_32I /
  *        ACL_SPARSE_INDEX_64I。
+ * @param idxBase IN, HOST, 仅支持 ACL_SPARSE_INDEX_BASE_ZERO /
+ *        ACL_SPARSE_INDEX_BASE_ONE。
+ * @param valueType IN, HOST, 须在支持的白名单内（FLOAT、FLOAT16、DOUBLE、
+ *        INT8/16/32/64、UINT8/16/32/64、BF16、FLOAT8_E4M3FN、FLOAT8_E5M2、
+ *        FLOAT4_E2M1、COMPLEX64、COMPLEX128）。
+ * @note idxBase 或 valueType 非法时返回 ACL_SPARSE_STATUS_INVALID_VALUE，
+ *       且 *spMatDescr 保持原值，不会被改写。
  * @return aclsparseStatus_t 参数非法返回 ACL_SPARSE_STATUS_INVALID_VALUE。
  */
 aclsparseStatus_t aclsparseCreateSlicedEll(aclsparseSpMatDescr_t* spMatDescr, int64_t rows, int64_t cols, int64_t nnz,

@@ -37,6 +37,7 @@
 #include "test_common.h"
 
 #include "aclsparse_descr_internal.h"
+#include "raw_enum_api.h"
 #include "../csc_get_param.h"
 #include "csc_get_npu_wrapper.h"
 
@@ -227,6 +228,25 @@ TEST_F(CscGetExceptionTest, CreateCscInvalidIndexType) {
                                  ACL_SPARSE_INDEX_BASE_ZERO, ACL_FLOAT),
               ACL_SPARSE_STATUS_INVALID_VALUE);
     EXPECT_EQ(descr, nullptr);
+}
+
+// L2-09: out-of-range idxBase for CreateCsc -> ACL_SPARSE_STATUS_INVALID_VALUE
+TEST_F(CscGetExceptionTest, CreateCscInvalidIndexBase) {
+    aclsparseSpMatDescr_t descr = nullptr;
+    EXPECT_EQ(AclsparseCreateCscRawEnums(&descr, 2, 2, 2, offsets_.data(), indices_.data(), values_.data(),
+                                         ACL_SPARSE_INDEX_32I, ACL_SPARSE_INDEX_32I, 99, ACL_FLOAT),
+              ACL_SPARSE_STATUS_INVALID_VALUE);
+    EXPECT_EQ(descr, nullptr) << "failed Create should not touch OUT";
+}
+
+// L2-10: unsupported valueType for CreateCsc -> ACL_SPARSE_STATUS_INVALID_VALUE
+TEST_F(CscGetExceptionTest, CreateCscInvalidValueType) {
+    aclsparseSpMatDescr_t descr = nullptr;
+    EXPECT_EQ(AclsparseCreateCscRawEnums(&descr, 2, 2, 2, offsets_.data(), indices_.data(), values_.data(),
+                                         ACL_SPARSE_INDEX_32I, ACL_SPARSE_INDEX_32I,
+                                         ACL_SPARSE_INDEX_BASE_ZERO, 999),
+              ACL_SPARSE_STATUS_INVALID_VALUE);
+    EXPECT_EQ(descr, nullptr) << "failed Create should not touch OUT";
 }
 
 // L2-15: nullptr out handle for CreateConstCsc -> ACL_SPARSE_STATUS_INVALID_VALUE（const 变体独立覆盖）

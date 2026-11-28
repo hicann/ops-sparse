@@ -402,6 +402,42 @@ inline aclsparseStatus_t ValidateSpMatCreateParams(
     return ACL_SPARSE_STATUS_SUCCESS;
 }
 
+// 稀疏矩阵 valueType 白名单。CSR/COO/CSC/SLICED_ELL 等 Create 接口共享同一集合：
+// 未在 CANN 稀疏算子中实现的类型（以及越界的 aclDataType 枚举值）一律拒绝，
+// 避免将非法枚举写进描述符后由下游 kernel 按未知类型解释。
+inline bool IsValidSparseValueType(aclDataType valueType)
+{
+    switch (valueType) {
+        case ACL_FLOAT:
+        case ACL_FLOAT16:
+        case ACL_DOUBLE:
+        case ACL_INT8:
+        case ACL_INT16:
+        case ACL_INT32:
+        case ACL_INT64:
+        case ACL_UINT8:
+        case ACL_UINT16:
+        case ACL_UINT32:
+        case ACL_UINT64:
+        case ACL_BF16:
+        case ACL_FLOAT8_E4M3FN:
+        case ACL_FLOAT8_E5M2:
+        case ACL_FLOAT4_E2M1:
+        case ACL_COMPLEX64:
+        case ACL_COMPLEX128:
+            return true;
+        default:
+            return false;
+    }
+}
+
+// 稀疏索引基址仅允许 0/1（cuSPARSE 语义）。越界枚举此前会被原样存入描述符，
+// 下游 kernel 可能据此推导出错误的索引偏移。
+inline bool IsValidSparseIndexBase(aclsparseIndexBase_t idxBase)
+{
+    return idxBase == ACL_SPARSE_INDEX_BASE_ZERO || idxBase == ACL_SPARSE_INDEX_BASE_ONE;
+}
+
 // 校验 CSR 稀疏矩阵索引类型（严格模式）：当前仅支持 32 位且 ptr/col 类型一致。
 // 供 spmm、spmv/arch22 等仅支持 I32 索引的算子在 execute 路径使用。
 inline aclsparseStatus_t AclsparseValidateSupportedCsrIndexTypes(aclsparseIndexType_t ptrType,

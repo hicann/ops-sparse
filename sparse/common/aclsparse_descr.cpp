@@ -57,33 +57,6 @@ static aclsparseStatus_t ValidateAttributeParams(const void *spMatDescr, const v
     return ACL_SPARSE_STATUS_SUCCESS;
 }
 
-static bool IsValidSparseValueType(aclDataType valueType)
-{
-    switch (valueType) {
-        case ACL_FLOAT:
-        case ACL_FLOAT16:
-        case ACL_DOUBLE:
-        case ACL_INT8:
-        case ACL_INT16:
-        case ACL_INT32:
-        case ACL_INT64:
-        case ACL_UINT8:
-        case ACL_UINT16:
-        case ACL_UINT32:
-        case ACL_UINT64:
-        case ACL_BF16:
-        case ACL_FLOAT8_E4M3FN:
-        case ACL_FLOAT8_E5M2:
-        case ACL_FLOAT4_E2M1:
-        case ACL_COMPLEX64:
-        case ACL_COMPLEX128:
-            return true;
-        default:
-            return false;
-    }
-}
-
-
 static bool IsSupportedBsrBlockSize(int64_t blockSize)
 {
     switch (blockSize) {
@@ -1360,6 +1333,9 @@ aclsparseStatus_t aclsparseCreateCoo(aclsparseSpMatDescr_t *spMatDescr,
     if (cooIdxType != ACL_SPARSE_INDEX_32I && cooIdxType != ACL_SPARSE_INDEX_64I) {
         return ACL_SPARSE_STATUS_INVALID_VALUE;
     }
+    if (!IsValidSparseIndexBase(idxBase) || !IsValidSparseValueType(valueType)) {
+        return ACL_SPARSE_STATUS_INVALID_VALUE;
+    }
     auto *inner = new (std::nothrow) aclsparseSpMatDescr();
     if (inner == nullptr) {
         return ACL_SPARSE_STATUS_ALLOC_FAILED;
@@ -1419,6 +1395,9 @@ aclsparseStatus_t aclsparseCreateSlicedEll(aclsparseSpMatDescr_t *spMatDescr,
         return ACL_SPARSE_STATUS_INVALID_VALUE;
     }
     if (sliceNnz < 0 || numSlices < 0) {
+        return ACL_SPARSE_STATUS_INVALID_VALUE;
+    }
+    if (!IsValidSparseIndexBase(idxBase) || !IsValidSparseValueType(valueType)) {
         return ACL_SPARSE_STATUS_INVALID_VALUE;
     }
     auto *inner = new (std::nothrow) aclsparseSpMatDescr();

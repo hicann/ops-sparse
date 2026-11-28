@@ -54,6 +54,9 @@ aclsparseStatus_t aclsparseCreateCoo(aclsparseSpMatDescr_t *spMatDescr, int64_t 
 
 - rows >= 0，cols >= 0，nnz >= 0，否则返回 `ACL_SPARSE_STATUS_INVALID_VALUE`
 - spMatDescr（输出句柄）不可为 nullptr，否则返回 `ACL_SPARSE_STATUS_INVALID_VALUE`
+- idxBase 仅支持 `ACL_SPARSE_INDEX_BASE_ZERO` / `ACL_SPARSE_INDEX_BASE_ONE`，否则返回 `ACL_SPARSE_STATUS_INVALID_VALUE`
+- valueType 必须在支持的数据类型白名单内（FLOAT、FLOAT16、DOUBLE、INT8/16/32/64、UINT8/16/32/64、BF16、FLOAT8_E4M3FN、FLOAT8_E5M2、FLOAT4_E2M1、COMPLEX64、COMPLEX128），否则返回 `ACL_SPARSE_STATUS_INVALID_VALUE`
+- idxBase 或 valueType 校验失败时，`*spMatDescr` 保持原值，不会被改写为半成品句柄
 - cooIdxType 同时约束行/列索引类型；**支持 `ACL_SPARSE_INDEX_32I` 与 `ACL_SPARSE_INDEX_64I`**（accessor 层无 NPU 计算，与 cuSPARSE 一致）。注意：这与 CSR 不同——CSR 当前 SpMV / SpMM 计算路径仅支持 `ACL_SPARSE_INDEX_32I`；COO accessor 两种索引类型均接受
 - aclsparseCreateCoo 为纯 host 操作，不启动 NPU kernel，不涉及 stream 同步
 - const 变体（aclsparseCreateConstCoo）构造出的描述符只能传给接收 const 形参的接口；销毁统一用 `aclsparseDestroySpMat`（接受 const 变体，const 与非 const 描述符均可销毁）

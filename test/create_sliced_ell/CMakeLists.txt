@@ -21,7 +21,8 @@ if(TARGET create_sliced_ell_test)
     target_include_directories(create_sliced_ell_test PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/../spmat_descr_common)
     target_sources(create_sliced_ell_test PRIVATE
-        ${CMAKE_SOURCE_DIR}/sparse/spmat_get_strided_batch/arch35/spmat_get_strided_batch_host.cpp)
+        ${CMAKE_SOURCE_DIR}/sparse/spmat_get_strided_batch/arch35/spmat_get_strided_batch_host.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/../spmat_descr_common/raw_enum_api.c)
     # 内嵌源码依赖 log/log.h（库目标有此 include，测试目标需补充）
     target_include_directories(create_sliced_ell_test PRIVATE
         ${ASCEND_CANN_PACKAGE_PATH}/include/op_common)
