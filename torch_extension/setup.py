@@ -61,9 +61,15 @@ atexit.register(_cleanup_staged_license)
 def _operator_extensions():
     """Return ``(category, op, source_dir)`` entries owned by operators."""
     extensions = []
-    selected_ops = {
-        op.strip() for op in os.environ.get("TORCH_EXTENSION_OPS", "").split(",") if op.strip()
-    }
+    raw_ops = os.environ.get("TORCH_EXTENSION_OPS")
+    if raw_ops is not None:
+        selected_ops = {op.strip() for op in raw_ops.split(",") if op.strip()}
+        if not selected_ops:
+            raise RuntimeError(
+                "TORCH_EXTENSION_OPS must contain at least one non-empty operator name"
+            )
+    else:
+        selected_ops = set()
     sparse_root = OPS_SPARSE_ROOT / "sparse"
     for op_dir in sorted(sparse_root.iterdir()):
         extension_dir = op_dir / "torch_extension"
@@ -122,12 +128,12 @@ class BuildPyWithOps(_build_py):
     """Collect each operator's torch_extension sources into the wheel package."""
 
     def run(self):
+        extensions = _operator_extensions()
         super().run()
         package_root = Path(self.build_lib) / PACKAGE_NAME
         # ``build_py`` may reuse an existing build directory.  Remove generated
         # operator artifacts first so deleted wrapper sources cannot leak into a wheel.
         shutil.rmtree(package_root / "csrc", ignore_errors=True)
-        extensions = _operator_extensions()
         for category in {item[0] for item in extensions}:
             shutil.rmtree(package_root / "ops" / category, ignore_errors=True)
         categories = {}
@@ -169,6 +175,8 @@ if _bdist_wheel is not None:
         """Build a wheel from a clean staging directory."""
 
         def run(self):
+            # Reject invalid selections before deleting any prior wheel.
+            _operator_extensions()
             _clean_build_artifacts()
             super().run()
 

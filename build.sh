@@ -12,6 +12,7 @@
 set -e
 
 BUILD_OPS=""
+OPS_EXPLICIT=FALSE
 RUN_TEST=OFF
 RUN_DEVICE=0
 DEVICE_SPECIFIED=FALSE
@@ -72,6 +73,7 @@ for arg in "$@"; do
     case $arg in
         --ops=*)
             BUILD_OPS="${arg#*=}"
+            OPS_EXPLICIT=TRUE
             ;;
         --run)
             RUN_TEST=ON
@@ -111,6 +113,27 @@ for arg in "$@"; do
             ;;
     esac
 done
+
+if [ "${OPS_EXPLICIT}" == "TRUE" ]; then
+    if [ -z "${BUILD_OPS}" ]; then
+        print_error "--ops requires at least one non-empty operator name"
+        exit 1
+    fi
+    _raw_ops=()
+    IFS=',' read -ra _raw_ops <<< "${BUILD_OPS}" || true
+    _filtered_ops=""
+    for _op in "${_raw_ops[@]}"; do
+        _op="${_op#"${_op%%[![:space:]]*}"}"
+        _op="${_op%"${_op##*[![:space:]]}"}"
+        [ -n "${_op}" ] || continue
+        _filtered_ops="${_filtered_ops:+${_filtered_ops},}${_op}"
+    done
+    if [ -z "${_filtered_ops}" ]; then
+        print_error "--ops requires at least one non-empty operator name"
+        exit 1
+    fi
+    BUILD_OPS="${_filtered_ops}"
+fi
 
 if [ "${DEVICE_SPECIFIED}" == "TRUE" ] && [ "${RUN_TEST}" != "ON" ]; then
     print_error "--device requires --run"

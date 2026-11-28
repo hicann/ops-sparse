@@ -271,3 +271,76 @@ def test_source_archive_can_be_recreated_and_filtered(tmp_path):
     final = extract_source_archive(second, nested)
     run_package_command(final, tmp_path / "rebuilt", "wheel")
     assert_equivalent_wheels(tmp_path / "direct", tmp_path / "rebuilt")
+
+
+@pytest.mark.parametrize("raw_ops", ["", "   ", " , ", ",,,"])
+def test_wheel_driver_rejects_empty_or_whitespace_ops(tmp_path, raw_ops):
+    checkout = create_checkout(tmp_path, False)
+    unused_prefix = tmp_path / "unused-host-env-prefix"
+    unused_prefix.mkdir()
+    environment = dict(os.environ)
+    environment["ASCEND_HOME_PATH"] = str(unused_prefix)
+    run = subprocess.run(
+        [
+            command_path("bash"),
+            str(checkout / "build.sh"),
+            "--torch_extension",
+            f"--ops={raw_ops}",
+        ],
+        cwd=checkout,
+        env=environment,
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    assert run.returncode != 0, run.stdout + run.stderr
+    assert "--ops requires at least one non-empty operator name" in run.stdout + run.stderr
+    assert not list((checkout / "build_out").glob("*.whl"))
+
+
+@pytest.mark.parametrize("raw_ops", ["", "   ", " , ", ",,,"])
+def test_setup_rejects_explicit_empty_or_whitespace_ops(tmp_path, raw_ops):
+    checkout = create_checkout(tmp_path, False)
+    run = run_package_command(
+        checkout / "torch_extension",
+        tmp_path / "invalid",
+        "wheel",
+        selected=raw_ops,
+        succeed=False,
+    )
+    assert "TORCH_EXTENSION_OPS must contain at least one non-empty operator name" in (
+        run.stdout + run.stderr
+    )
+
+
+@pytest.mark.parametrize(
+    ("raw_ops", "diagnostic"),
+    [
+        ("", "must contain at least one non-empty operator name"),
+        (" , ", "must contain at least one non-empty operator name"),
+        ("gather,not_an_operator", "contains operators without torch_extension: not_an_operator"),
+    ],
+)
+def test_direct_wheel_rejects_invalid_selection_before_cleaning(tmp_path, raw_ops, diagnostic):
+    project = create_checkout(tmp_path, False) / "torch_extension"
+    dist = project / "dist"
+    run_package_command(project, dist, "wheel", "gather")
+    existing_wheel, = dist.glob("cann_ops_sparse-*.whl")
+    original = existing_wheel.read_bytes()
+
+    run = subprocess.run(
+        [sys.executable, "setup.py", "bdist_wheel"],
+        cwd=project,
+        env=dict(os.environ, TORCH_EXTENSION_OPS=raw_ops),
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+    assert run.returncode != 0, run.stdout + run.stderr
+    assert f"TORCH_EXTENSION_OPS {diagnostic}" in run.stdout + run.stderr
+    assert list(dist.glob("*.whl")) == [existing_wheel]
+    assert existing_wheel.read_bytes() == original
